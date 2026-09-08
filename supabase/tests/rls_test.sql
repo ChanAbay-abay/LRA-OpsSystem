@@ -49,6 +49,12 @@ create temp table t_results (
   passed  boolean
 );
 grant all on t_results to authenticated;
+-- anon too: the TRUNCATE attacks below run as `anon`, and expect_blocked()
+-- records its result into this table from inside that role. Without this
+-- the suite aborts on the first anon test instead of reporting it.
+grant all on t_results to anon;
+-- The sequence behind the identity column needs the same treatment.
+grant usage, select on all sequences in schema pg_temp to authenticated, anon;
 grant usage, select on sequence t_results_id_seq to authenticated;
 
 -- An attack that must be refused. Passes only if the database raises,
@@ -270,9 +276,17 @@ select pg_temp.expect_allowed('audit',
 -- =======================================================================
 
 reset role;
+-- `reset role` alone is NOT enough. core.is_system_caller() reads the
+-- `request.jwt.claims` GUC, not the current role -- and the last
+-- pg_temp.become() left claims saying role=authenticated, so every
+-- system-bypass below (the `submitted` seed, the is_clearing_founder
+-- promotion) was still being refused with 42501. Clear the claims too.
+-- This is the exact plural-GUC distinction this file's own header warns
+-- about, and it bit the fixtures rather than the assertions.
+select set_config('request.jwt.claims', null, true);
 
 create temp table t_meta (k text primary key, v uuid);
-grant all on t_meta to authenticated;
+grant all on t_meta to authenticated, anon;
 
 insert into ops.task_types (name, category, guideline_note, default_points, is_active)
 values ('TEST-Type', 'Test', 'DRAFT — test fixture, never priced for real', 8, true);
@@ -466,7 +480,7 @@ select pg_temp.expect_rows('read-scoping',
 
 select pg_temp.expect_rows('CANARY', 'MUST FAIL: a non-member reads every TEST task',
   $sql$select count(*) from ops.tasks where title like 'TEST-%'$sql$,
-  (select count(*) from t_meta where k in ('main','task2','task3','taskA','taskB')));
+  (select count(*)::int from t_meta where k in ('main','task2','task3','taskA','taskB')));
 
 set local role authenticated;
 
