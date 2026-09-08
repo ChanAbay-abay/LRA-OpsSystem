@@ -37,16 +37,28 @@ interface LedgerRow {
 export function PointsPage() {
   const [balance, setBalance] = React.useState<Balance | null>(null);
   const [ledger, setLedger] = React.useState<LedgerRow[] | null>(null);
+  const [oldestDays, setOldestDays] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     api.get<Balance[]>('/api/points/me').then((rows) => setBalance(rows[0] ?? null));
     api.get<LedgerRow[]>('/api/points/ledger').then(setLedger);
   }, []);
 
+  // `Date.now()` was being called inline in the render body (defect #7)
+  // -- React treats that as impure regardless of whether the result is
+  // memoized, since a `useMemo` callback still runs during render.
+  // Computing it here, in an effect that only re-runs when the fetched
+  // timestamp actually changes, keeps the impure call out of render
+  // entirely rather than just hiding it behind a memo.
+  React.useEffect(() => {
+    setOldestDays(
+      balance?.oldest_pending_since
+        ? Math.floor((Date.now() - new Date(balance.oldest_pending_since).getTime()) / 864e5)
+        : null
+    );
+  }, [balance?.oldest_pending_since]);
+
   const pending = (balance?.pending_with_gm ?? 0) + (balance?.pending_with_founder ?? 0);
-  const oldestDays = balance?.oldest_pending_since
-    ? Math.floor((Date.now() - new Date(balance.oldest_pending_since).getTime()) / 864e5)
-    : null;
 
   return (
     <div>
