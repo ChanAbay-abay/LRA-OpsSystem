@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+.DS_Store
+
+# Pre-rebuild database snapshot — contains employee PII, never commit
+backup/
+
+# Supabase CLI local state
+supabase/.branches
+supabase/.temp
+

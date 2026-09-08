@@ -1,0 +1,161 @@
+/* =====================================================================
+   LRA Ops Monitoring System :: design tokens
+   Generated from DESIGN.md §9 by the `designer` agent, 2026-09-08.
+
+   BINDING. Copy this into apps/web/src/index.css before generating the
+   first component. DESIGN.md wins over PLAN.md and over shadcn defaults
+   on every colour, font, radius and motion value.
+
+   Two rules the rest of the system hangs on:
+     1. Cyan (#68CEF8) only ever appears on navy. 1.78:1 on white.
+     2. Settled value is solid ink; unsettled value never is.
+        .num-cleared / .num-pending / .num-committed / .num-rejected
+   ===================================================================== */
+@import '@fontsource-variable/urbanist';
+@import '@fontsource-variable/geist-mono';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+
+  /* ── brand ─────────────────────────────────────────── */
+  --navy-900: #010F31;
+  --navy-800: #041C5A;
+  --navy-700: #0A2E7E;
+  --brand-800: #0C3FA3;
+  --brand-700: #0F4FC4;
+  --brand-600: #1662E8;
+  --brand-500: #3D7FEE;
+  --brand-300: #9CC2F7;
+  --brand-200: #C9DDFB;
+  --brand-100: #E8F0FE;
+  --brand-50:  #F2F7FF;
+  --cyan:      #68CEF8;   /* ON NAVY ONLY — 1.78:1 on white */
+
+  /* ── neutrals ──────────────────────────────────────── */
+  --canvas:          #F7F8FA;
+  --surface:         #FFFFFF;
+  --surface-2:       #F1F3F7;
+  --surface-3:       #E7EAF1;
+  --hairline:        #E2E6EE;
+  --hairline-strong: #CBD2E0;
+  --ink:             #0B1B3F;
+  --ink-2:           #47536B;
+  --ink-3:           #5F6B80;
+  --ink-disabled:    #8A94A6;
+  --on-dark:         #FFFFFF;
+  --on-dark-2:       #C9D3E8;
+  --on-dark-3:       #8FA0C4;
+
+  /* ── semantics ─────────────────────────────────────── */
+  --cleared: #0E7A46;  --cleared-wash: #E6F4EC;  --cleared-border: #BFE3CE;
+  --pending: #8A5A00;  --pending-wash: #FCF3E3;  --pending-border: #EBD9AE;
+  --danger:  #B3261E;  --danger-wash:  #FBEBE9;  --danger-border:  #F0CFCD;
+  --blocked: #475569;  --blocked-wash: #EEF1F5;  --blocked-border: #D3DAE4;
+  --info:    #1662E8;  --info-wash:    #F2F7FF;  --info-border:    #C9DDFB;
+
+  --hatch-blocked: repeating-linear-gradient(45deg,
+      #EEF1F5 0 4px, #E4E9F0 4px 8px);
+
+  /* ── charts ────────────────────────────────────────── */
+  --chart-1: #1662E8;
+  --chart-2: #0E7A46;
+  --chart-3: #8A5A00;
+  --chart-4: #041C5A;
+  --chart-5: #64748B;
+
+  /* ── shadcn aliases (raw values, NOT hsl triplets) ─── */
+  --background: var(--canvas);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand-600);
+  --primary-foreground: var(--on-dark);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--ink-3);
+  --accent: var(--brand-50);
+  --accent-foreground: var(--brand-700);
+  --destructive: var(--danger);
+  --destructive-foreground: var(--on-dark);
+  --border: var(--hairline);
+  --input: var(--hairline-strong);
+  --ring: var(--brand-600);
+  --ring-on-navy: var(--cyan);
+  --radius: 0.5rem;
+
+  /* ── type ──────────────────────────────────────────── */
+  --font-sans: 'Urbanist Variable', Urbanist, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'Geist Mono Variable', 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* ── elevation ─────────────────────────────────────── */
+  --shadow-pop:   0 4px 16px -2px rgba(1,15,49,.12), 0 1px 3px rgba(1,15,49,.08);
+  --shadow-drag:  0 8px 24px -4px rgba(1,15,49,.18), 0 2px 6px -1px rgba(1,15,49,.10);
+  --shadow-modal: 0 24px 64px -12px rgba(1,15,49,.28);
+  --scrim: rgba(1,15,49,.40);
+
+  /* ── motion ────────────────────────────────────────── */
+  --ease:        cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out:    cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --dur-press: 120ms;
+  --dur-fast: 160ms;
+  --dur-pop: 200ms;
+  --dur-dialog: 260ms;
+  --dur-clear: 420ms;
+}
+
+@layer base {
+  * { border-color: var(--hairline); }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: inherit;
+  }
+
+  .on-navy :focus-visible { outline-color: var(--ring-on-navy); }
+
+  /* Every figure a person could argue about. */
+  .num {
+    font-family: var(--font-mono);
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .num-col { text-align: right; white-space: nowrap; }
+
+  /* Unsettled money is never solid ink. */
+  .num-pending { color: var(--pending); border-bottom: 1px dashed currentColor; }
+  .num-cleared { color: var(--ink); }
+  .num-committed { color: var(--ink-3); }
+  .num-rejected { color: var(--danger); text-decoration: line-through; }
+
+  ::selection { background: var(--brand-100); color: var(--ink); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

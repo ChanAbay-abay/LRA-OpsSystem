@@ -1,0 +1,74 @@
+{
+  "_header": {
+    "purpose": "Reference copy of the deleted public.statutory_rate_config seed rows, kept for the future HR module rebuild. PLAN.md §0.5.",
+    "source": "backup/pre-rebuild-snapshot.json, table statutory_rate_config, taken 2026-09-08T15:51:44.355Z",
+    "warning": "KNOWN WRONG: LRA-HR's statutory.ts:35 maps salary to an SSS Monthly Salary Credit bracket with Math.floor(salary/500)*500, but the real SSS schedule brackets on midpoints, not on the floor. That formula is one bracket low for roughly half of all salaries, so it chronically under-remits SSS contributions. payroll.test.ts:92 currently asserts the wrong answer and locks the bug in. Whoever rebuilds HR must get the real 2026 SSS contribution table (as brackets, not a formula) from the accountant before this config is used for a live payroll run. Do not trust the sss row below beyond its shape.",
+    "doNotUseForLivePayroll": true
+  },
+  "rates": [
+    {
+      "rate_type": "sss",
+      "config_json": {
+        "note": "Salary is mapped to the nearest MSC bracket, then employee share = MSC x employee_rate. Amounts above the MPF threshold route to the Mandatory Provident Fund portion.",
+        "msc_step": 500,
+        "msc_floor": 5000,
+        "total_rate": 0.15,
+        "computation": "msc_bracket",
+        "msc_ceiling": 35000,
+        "employee_rate": 0.05,
+        "employer_rate": 0.1,
+        "mpf_threshold": 20000
+      },
+      "effective_date": "2025-01-01",
+      "notes": "SSS contribution schedule. VERIFY against latest SSS circular before live payroll. See _header.warning: the bracket-mapping formula this config was paired with is known wrong."
+    },
+    {
+      "rate_type": "philhealth",
+      "config_json": {
+        "note": "Monthly premium = basic salary x premium_rate, clamped between floor and ceiling, then split 50/50.",
+        "computation": "percentage_of_basic",
+        "premium_rate": 0.05,
+        "salary_floor": 10000,
+        "employee_share": 0.5,
+        "employer_share": 0.5,
+        "salary_ceiling": 100000
+      },
+      "effective_date": "2025-01-01",
+      "notes": "PhilHealth premium schedule. VERIFY against latest PhilHealth advisory."
+    },
+    {
+      "rate_type": "pagibig",
+      "config_json": {
+        "note": "Salary at or below low_threshold uses the low rate. Contribution base is capped at monthly_fund_salary_cap.",
+        "computation": "tiered_percentage",
+        "employer_rate": 0.02,
+        "low_threshold": 1500,
+        "employee_rate_low": 0.01,
+        "employee_rate_high": 0.02,
+        "max_employee_share": 200,
+        "max_employer_share": 200,
+        "monthly_fund_salary_cap": 10000
+      },
+      "effective_date": "2025-01-01",
+      "notes": "Pag-IBIG contribution schedule. VERIFY against latest HDMF circular."
+    },
+    {
+      "rate_type": "bir_withholding",
+      "config_json": {
+        "note": "Taxable income = gross compensation minus statutory contributions minus non-taxable benefits. De minimis and the 13th month exemption are applied before this table.",
+        "basis": "annual_taxable_income",
+        "brackets": [
+          { "min": 0, "max": 250000, "rate": 0, "base_tax": 0, "excess_over": 0 },
+          { "min": 250000, "max": 400000, "rate": 0.15, "base_tax": 0, "excess_over": 250000 },
+          { "min": 400000, "max": 800000, "rate": 0.2, "base_tax": 22500, "excess_over": 400000 },
+          { "min": 800000, "max": 2000000, "rate": 0.25, "base_tax": 102500, "excess_over": 800000 },
+          { "min": 2000000, "max": 8000000, "rate": 0.3, "base_tax": 402500, "excess_over": 2000000 },
+          { "min": 8000000, "max": null, "rate": 0.35, "base_tax": 2202500, "excess_over": 8000000 }
+        ],
+        "thirteenth_month_exempt_ceiling": 90000
+      },
+      "effective_date": "2025-01-01",
+      "notes": "TRAIN Law annual withholding tax table. VERIFY against latest BIR RR."
+    }
+  ]
+}
