@@ -44,6 +44,14 @@ export default async function pointsRoutes(app: FastifyInstance) {
   // both oldest-first with age in hours -- PRD.md §6.4's "a GM who sits
   // on verifications is visible to everyone" is this screen's whole
   // point, so age is computed server-side, not left to the client clock.
+  //
+  // The server already refuses a GM verifying their own task (422, left
+  // alone -- that part works). But with exactly one GM in this company,
+  // leaving the GM's own submitted tasks IN the list left a dead-end
+  // "Verify" button that could never succeed, cluttering the queue every
+  // week (defect #6). Excluding the caller's own tasks here, in the
+  // query, means every other client of this endpoint gets the same fix
+  // for free rather than each screen re-implementing the filter.
   app.get('/queue', { onRequest: requireOversight() }, async (req) => {
     const status = req.user.authority === 'gm' ? 'submitted' : 'verified';
     const db = userClient(req.accessToken);
@@ -52,6 +60,7 @@ export default async function pointsRoutes(app: FastifyInstance) {
       .from('tasks')
       .select('*')
       .eq('status', status)
+      .neq('owner_user_id', req.user.id)
       .order('last_activity_at', { ascending: true });
     if (error) throw error;
 
