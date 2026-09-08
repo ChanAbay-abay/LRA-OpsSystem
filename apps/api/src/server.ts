@@ -16,6 +16,13 @@ import { ApiError } from './lib/domain.js';
 import { assertEnv } from './lib/env.js';
 import meRoutes, { membersRoutes } from './routes/me.js';
 import adminRoutes from './routes/admin.js';
+import catalogRoutes from './routes/catalog.js';
+import tasksRoutes, { blocksRoutes } from './routes/tasks.js';
+import pointsRoutes from './routes/points.js';
+import notificationsRoutes from './routes/notifications.js';
+import weeksRoutes from './routes/weeks.js';
+import settingsRoutes from './routes/settings.js';
+import jobsRoutes from './routes/jobs.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -76,7 +83,15 @@ export function buildServer() {
 
   app.register(meRoutes, { prefix: '/api/me' });
   app.register(membersRoutes, { prefix: '/api/members' });
-  app.register(adminRoutes, { prefix: '/api/admin/users' });
+  app.register(adminRoutes, { prefix: '/api/admin' });
+  app.register(catalogRoutes, { prefix: '/api/catalog' });
+  app.register(tasksRoutes, { prefix: '/api/tasks' });
+  app.register(blocksRoutes, { prefix: '/api/blocks' });
+  app.register(pointsRoutes, { prefix: '/api/points' });
+  app.register(notificationsRoutes, { prefix: '/api/notifications' });
+  app.register(weeksRoutes, { prefix: '/api/weeks' });
+  app.register(settingsRoutes, { prefix: '/api/settings' });
+  app.register(jobsRoutes, { prefix: '/api/jobs' });
 
   return app;
 }

@@ -33,6 +33,11 @@ export default {
         pending: { DEFAULT: 'var(--pending)', wash: 'var(--pending-wash)', border: 'var(--pending-border)' },
         blocked: { DEFAULT: 'var(--blocked)', wash: 'var(--blocked-wash)', border: 'var(--blocked-border)' },
         info: { DEFAULT: 'var(--info)', wash: 'var(--info-wash)', border: 'var(--info-border)' },
+        // Was missing entirely -- `text-danger` was already used in
+        // Phase 2's admin-users.tsx/login.tsx and silently generated no
+        // CSS at all (Tailwind ignores an unrecognised utility rather
+        // than erroring). Added here rather than left as a no-op.
+        danger: { DEFAULT: 'var(--danger)', wash: 'var(--danger-wash)', border: 'var(--danger-border)' },
 
         // shadcn aliases — raw values, no hsl() wrapper
         background: 'var(--background)',

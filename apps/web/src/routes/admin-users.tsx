@@ -31,6 +31,7 @@ interface AdminUserRow {
   email: string;
   authority: (typeof AUTHORITIES)[number];
   is_active: boolean;
+  is_clearing_founder: boolean;
   last_login: string | null;
   opsMembership: { position: string; is_active: boolean } | null;
 }
@@ -79,7 +80,9 @@ export function AdminUsersPage() {
               <TableHead>Authority</TableHead>
               <TableHead>Position</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Clearing founder</TableHead>
               <TableHead>Last login</TableHead>
+              <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -89,14 +92,40 @@ export function AdminUsersPage() {
                 <TableCell className="text-eyebrow">{r.authority}</TableCell>
                 <TableCell className="text-eyebrow">{r.opsMembership?.position ?? '—'}</TableCell>
                 <TableCell>{r.is_active ? 'Active' : 'Deactivated'}</TableCell>
-                <TableCell className="num num-sm">
+                <TableCell>
+                  {r.authority === 'founder' ? (
+                    <button
+                      className={`text-label ${r.is_clearing_founder ? 'text-cleared' : 'text-ink-3 hover:text-ink'}`}
+                      onClick={async () => {
+                        await api.patch(`/api/admin/users/${r.id}`, { isClearingFounder: !r.is_clearing_founder });
+                        load();
+                      }}
+                    >
+                      {r.is_clearing_founder ? 'Yes — the seat' : 'Make the clearing founder'}
+                    </button>
+                  ) : (
+                    <span className="text-ink-3">—</span>
+                  )}
+                </TableCell>
+                <TableCell className="num text-num-sm">
                   {r.last_login ? new Date(r.last_login).toLocaleString() : 'Never logged in'}
+                </TableCell>
+                <TableCell>
+                  <button
+                    className="text-label text-ink-3 hover:text-ink"
+                    onClick={async () => {
+                      await api.patch(`/api/admin/users/${r.id}`, { isActive: !r.is_active });
+                      load();
+                    }}
+                  >
+                    {r.is_active ? 'Deactivate' : 'Activate'}
+                  </button>
                 </TableCell>
               </TableRow>
             ))}
             {rows?.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-ink-3">
+                <TableCell colSpan={7} className="text-center text-ink-3">
                   Nobody invited yet.
                 </TableCell>
               </TableRow>

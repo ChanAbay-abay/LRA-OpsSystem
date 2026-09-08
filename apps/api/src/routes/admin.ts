@@ -45,6 +45,12 @@ const patchSchema = z.object({
   isActive: z.boolean().optional(),
   authority: z.enum(AUTHORITIES).optional(),
   position: z.enum(POSITIONS).optional(),
+  // Exactly one row in the whole table may carry this flag (a partial
+  // unique index enforces it) -- see core_clearing_founder.sql. Setting
+  // it true on a second row is refused by the database, not by this
+  // route; a 500 with a unique-violation from Postgres is the correct,
+  // honest failure mode here.
+  isClearingFounder: z.boolean().optional(),
 });
 
 /** Next sequential LRA-### person code. Sequential, not client-supplied. */
@@ -67,7 +73,7 @@ export default async function adminRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
   app.addHook('onRequest', requireAuthority('admin'));
 
-  app.post('/', async (req) => {
+  app.post('/users', async (req) => {
     const body = inviteSchema.parse(req.body);
     const db = serviceClient();
 
@@ -183,12 +189,12 @@ export default async function adminRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/', async () => {
+  app.get('/users', async () => {
     const db = serviceClient();
     const { data: users, error } = await db
       .schema('core')
       .from('users')
-      .select('id, email, authority, is_active, last_login, person_id');
+      .select('id, email, authority, is_active, is_clearing_founder, last_login, person_id, created_at');
     if (error) throw error;
 
     const { data: memberships } = await db
@@ -207,7 +213,7 @@ export default async function adminRoutes(app: FastifyInstance) {
     };
   });
 
-  app.patch('/:id', async (req) => {
+  app.patch('/users/:id', async (req) => {
     const { id } = req.params as { id: string };
     const body = patchSchema.parse(req.body);
     const db = serviceClient();
@@ -215,10 +221,21 @@ export default async function adminRoutes(app: FastifyInstance) {
     const patch: Record<string, unknown> = {};
     if (body.isActive !== undefined) patch.is_active = body.isActive;
     if (body.authority !== undefined) patch.authority = body.authority;
+    if (body.isClearingFounder !== undefined) patch.is_clearing_founder = body.isClearingFounder;
 
     if (Object.keys(patch).length) {
       const { error } = await db.schema('core').from('users').update(patch).eq('id', id);
-      if (error) throw error;
+      if (error) {
+        // 23505 here is specifically the partial unique index on
+        // is_clearing_founder -- surface it as the friendly "there is
+        // already one" message rather than a generic 500, since this is
+        // the one column where a duplicate is an expected user mistake,
+        // not a bug.
+        if (error.code === '23505') {
+          throw new ApiError(409, 'Another account already holds the clearing founder seat. Unset it there first.', 'ALREADY_CLEARING_FOUNDER');
+        }
+        throw error;
+      }
     }
 
     if (body.position !== undefined) {
@@ -240,5 +257,34 @@ export default async function adminRoutes(app: FastifyInstance) {
     });
 
     return { data: { id, ...body } };
+  });
+
+  // ---------------------------------------------------------------------
+  // Audit timeline — Chan's ask for a real admin console, not just an
+  // invite form. `core.audit_logs` is append-only even to the service
+  // role (a BEFORE trigger refuses UPDATE/DELETE outright); this route
+  // surfaces that guarantee in the response shape rather than hiding it.
+  // Admin's own RLS read (actor, entity-owner, or oversight) already
+  // covers "everything" since `core.can_read_audit` treats oversight as
+  // "reads everything" -- serviceClient here is for the actor/email
+  // filter convenience, matching the rest of this file's established
+  // system-level provisioning pattern, not a policy workaround.
+  // ---------------------------------------------------------------------
+  app.get('/audit', async (req) => {
+    const q = req.query as { actorId?: string; entityType?: string; entityId?: string; limit?: string };
+    const db = serviceClient();
+    let query = db
+      .schema('core')
+      .from('audit_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(q.limit ? Number(q.limit) : 200);
+    if (q.actorId) query = query.eq('actor_id', q.actorId);
+    if (q.entityType) query = query.eq('entity_type', q.entityType);
+    if (q.entityId) query = query.eq('entity_id', q.entityId);
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return { data, meta: { appendOnly: true, note: 'core.audit_logs cannot be UPDATEd or DELETEd by any role, including service_role.' } };
   });
 }

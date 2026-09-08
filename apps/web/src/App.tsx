@@ -8,11 +8,20 @@
  * and `/admin/users` are real.
  */
 import { Navigate, Route, Routes } from 'react-router-dom';
+import { Toaster } from 'sonner';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppShell } from '@/components/layout/app-shell';
 import { LoginPage } from '@/routes/login';
 import { NowPage } from '@/routes/now';
+import { BoardPage } from '@/routes/board';
+import { PointsPage } from '@/routes/points';
+import { QueuePage } from '@/routes/queue';
+import { InboxPage } from '@/routes/inbox';
+import { CatalogPage } from '@/routes/catalog';
 import { AdminUsersPage } from '@/routes/admin-users';
+import { AdminSettingsPage } from '@/routes/admin-settings';
+import { AdminAuditPage } from '@/routes/admin-audit';
+import { AdminEverythingPage } from '@/routes/admin-everything';
 
 function ProtectedRoute({
   children,
@@ -49,10 +58,74 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/board"
+        element={
+          <ProtectedRoute>
+            <BoardPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/points"
+        element={
+          <ProtectedRoute>
+            <PointsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/queue"
+        element={
+          <ProtectedRoute>
+            <QueuePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/inbox"
+        element={
+          <ProtectedRoute>
+            <InboxPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/catalog"
+        element={
+          <ProtectedRoute>
+            <CatalogPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/admin/users"
         element={
           <ProtectedRoute requireAdmin>
             <AdminUsersPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/settings"
+        element={
+          <ProtectedRoute requireAdmin>
+            <AdminSettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/audit"
+        element={
+          <ProtectedRoute requireAdmin>
+            <AdminAuditPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/everything"
+        element={
+          <ProtectedRoute requireAdmin>
+            <AdminEverythingPage />
           </ProtectedRoute>
         }
       />
@@ -64,6 +137,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <AuthProvider>
+      <Toaster position="bottom-right" />
       <AppRoutes />
     </AuthProvider>
   );

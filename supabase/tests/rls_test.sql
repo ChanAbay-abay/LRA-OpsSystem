@@ -261,6 +261,215 @@ select pg_temp.expect_allowed('audit',
   $sql$insert into core.audit_logs (actor_id, action, entity_type)
        select uid, 'TEST-self', 'test.self' from p where k='sales'$sql$);
 
+-- =======================================================================
+-- Phase 3/4/5 additions — catalog, tasks, the state machine, the ledger,
+-- blocks. Fixtures created as the owner/system role (still before this
+-- point we are `authenticated`, so switch back briefly) so the INSERT
+-- guard's system-caller bypass applies and these rows do not have to
+-- satisfy `created_by = auth_user_id()` for a specific persona.
+-- =======================================================================
+
+reset role;
+
+create temp table t_meta (k text primary key, v uuid);
+grant all on t_meta to authenticated;
+
+insert into ops.task_types (name, category, guideline_note, default_points, is_active)
+values ('TEST-Type', 'Test', 'DRAFT — test fixture, never priced for real', 8, true);
+
+insert into t_meta (k, v)
+select 'task_type', id from ops.task_types where name = 'TEST-Type';
+
+-- main: stays at todo, target of the column-forgery attacks (9/10/11).
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-main', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'main', id from ins;
+
+-- task2: walked all the way to cleared by legitimate actors, so the
+-- ledger has real rows to test attack 13/14 against.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-task2', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'task2', id from ins;
+
+-- task3: owned by the GM, submitted directly (system bypass), so attack
+-- 8 (GM self-verification) has something to attack without needing the
+-- legal todo->submitted path first.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='gm'), (select v from t_meta where k='task_type'),
+         'TEST-task3', 'submitted', (select uid from p where k='gm')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'task3', id from ins;
+
+-- taskA / taskB: the cycle-guard fixtures.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-taskA', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'taskA', id from ins;
+
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-taskB', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'taskB', id from ins;
+
+-- Promote the test founder to the one clearing seat, admin-only in
+-- practice (RLS/trigger both require it) -- done here as the owner role,
+-- the same way attack 24's fixture row bypasses the ladder legitimately.
+update core.users set is_clearing_founder = true where id = (select uid from p where k='founder');
+
+set local role authenticated;
+
+-- === Attack 3: INSERT a task already at a downstream status ==========
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('state-machine',
+  'staff cannot INSERT a task that starts at verified',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+       select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+              'TEST-bad-insert', 'verified', (select uid from p where k='sales')
+       from ops.weeks w where w.week_start = ops.week_start_for(now())$sql$);
+
+-- === Attack 9/10/11: column forgery on ops.tasks ======================
+
+select pg_temp.expect_blocked('ladder',
+  'staff cannot change catalog_points on their own task',
+  $sql$update ops.tasks set catalog_points = 21 where id = (select v from t_meta where k='main')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'staff cannot set a points override',
+  $sql$update ops.tasks set points_override = 13, points_override_reason = 'because I said so'
+       where id = (select v from t_meta where k='main')$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('ladder',
+  'oversight cannot set a points override with no reason',
+  $sql$update ops.tasks set points_override = 13 where id = (select v from t_meta where k='main')$sql$);
+
+-- === Attack 4/5: staff cannot self-clear or write points_awarded ======
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('lifecycle',
+  'owner CAN submit their own task (todo -> submitted)',
+  $sql$update ops.tasks set status = 'submitted' where id = (select v from t_meta where k='task2')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'staff cannot jump their own task straight to cleared',
+  $sql$update ops.tasks set status = 'cleared' where id = (select v from t_meta where k='task2')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'staff cannot write points_awarded directly',
+  $sql$update ops.tasks set points_awarded = 99 where id = (select v from t_meta where k='task2')$sql$);
+
+-- === Attack 8: GM cannot verify their own task ========================
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('ladder',
+  'a GM cannot verify a task they own',
+  $sql$update ops.tasks set status = 'verified' where id = (select v from t_meta where k='task3')$sql$);
+
+-- === Legitimate verify, then Attack 6/7: GM cannot stamp founder or clear ==
+
+select pg_temp.expect_allowed('lifecycle',
+  'GM CAN verify a task owned by someone else',
+  $sql$update ops.tasks set status = 'verified' where id = (select v from t_meta where k='task2')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'GM cannot stamp founder_id',
+  $sql$update ops.tasks set founder_id = (select uid from p where k='gm')
+       where id = (select v from t_meta where k='task2')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'GM cannot move verified -> cleared',
+  $sql$update ops.tasks set status = 'cleared' where id = (select v from t_meta where k='task2')$sql$);
+
+-- === Legitimate clear, by the ONE clearing founder ====================
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('lifecycle',
+  'the clearing founder CAN clear a verified task',
+  $sql$update ops.tasks set status = 'cleared' where id = (select v from t_meta where k='task2')$sql$);
+
+select pg_temp.expect_rows('ledger',
+  'task2''s full lifecycle wrote exactly 3 ledger rows (submitted/verified/cleared)',
+  $sql$select count(*) from ops.point_ledger where task_id = (select v from t_meta where k='task2')$sql$, 3);
+
+-- === Attack 13: the ledger is append-only, even to oversight ==========
+
+select pg_temp.expect_blocked('append-only',
+  'a founder cannot rewrite a point_ledger row',
+  $sql$update ops.point_ledger set points = 21 where task_id = (select v from t_meta where k='task2')$sql$);
+select pg_temp.expect_blocked('append-only',
+  'a founder cannot delete a point_ledger row',
+  $sql$delete from ops.point_ledger where task_id = (select v from t_meta where k='task2')$sql$);
+
+-- === Attack 14: a cleared task is terminal ============================
+
+select pg_temp.expect_blocked('ladder',
+  'a cleared task cannot be edited, even by the clearing founder',
+  $sql$update ops.tasks set title = 'TAMPERED' where id = (select v from t_meta where k='task2')$sql$);
+
+-- === Attack 15: staff cannot edit the catalog =========================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('ladder',
+  'staff cannot re-price a catalog type',
+  $sql$update ops.task_types set default_points = 21 where id = (select v from t_meta where k='task_type')$sql$);
+
+-- === Attack 18: task -> task blocks may not close a cycle =============
+
+select pg_temp.expect_allowed('blocks',
+  'sales CAN declare taskB blocked by taskA',
+  $sql$insert into ops.task_blocks (task_id, target, blocking_task_id, reason, created_by)
+       values ((select v from t_meta where k='taskB'), 'task',
+               (select v from t_meta where k='taskA'), 'waiting on the other task', (select uid from p where k='sales'))$sql$);
+
+select pg_temp.expect_blocked('blocks',
+  'the reverse edge (taskA blocked by taskB) is refused as a cycle',
+  $sql$insert into ops.task_blocks (task_id, target, blocking_task_id, reason, created_by)
+       values ((select v from t_meta where k='taskA'), 'task',
+               (select v from t_meta where k='taskB'), 'this would deadlock the board', (select uid from p where k='sales'))$sql$);
+
+-- === Attack 1 (ops.tasks) / Attack 27 (real canary) ====================
+
+reset role;
+set local role anon;
+select pg_temp.expect_blocked('truncate',
+  'anon cannot TRUNCATE ops.tasks',
+  'truncate ops.tasks cascade');
+reset role;
+set local role authenticated;
+
+select pg_temp.become((select uid from p where k='other'));
+select pg_temp.expect_rows('read-scoping',
+  'a non-ops-member sees zero ops.tasks rows',
+  $sql$select count(*) from ops.tasks where title like 'TEST-%'$sql$, 0);
+
+select pg_temp.expect_rows('CANARY', 'MUST FAIL: a non-member reads every TEST task',
+  $sql$select count(*) from ops.tasks where title like 'TEST-%'$sql$,
+  (select count(*) from t_meta where k in ('main','task2','task3','taskA','taskB')));
+
+set local role authenticated;
+
 -- === Attack 2: TRUNCATE never falls through RLS =======================
 
 reset role;

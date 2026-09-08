@@ -9,7 +9,18 @@
  * is.
  */
 import { NavLink } from 'react-router-dom';
-import { Home, UserCog } from 'lucide-react';
+import {
+  BookOpen,
+  ClipboardCheck,
+  Coins,
+  FileClock,
+  Home,
+  Inbox,
+  KanbanSquare,
+  ShieldCheck,
+  SlidersHorizontal,
+  UserCog,
+} from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 
@@ -23,10 +34,23 @@ interface NavItem {
 export function Sidebar() {
   const { me, signOut } = useAuth();
 
-  const items: NavItem[] = [{ to: '/', label: 'Now', icon: Home, end: true }];
-  if (me?.authority === 'admin') {
-    items.push({ to: '/admin/users', label: 'Provisioning', icon: UserCog });
+  const items: NavItem[] = [
+    { to: '/', label: 'Now', icon: Home, end: true },
+    { to: '/board', label: 'Board', icon: KanbanSquare },
+    { to: '/points', label: 'My points', icon: Coins },
+    { to: '/inbox', label: 'Inbox', icon: Inbox },
+    { to: '/catalog', label: 'Catalog', icon: BookOpen },
+  ];
+  if (me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin') {
+    items.push({ to: '/queue', label: 'Approvals', icon: ClipboardCheck });
   }
+
+  const adminItems: NavItem[] = [
+    { to: '/admin/users', label: 'People & access', icon: UserCog },
+    { to: '/admin/settings', label: 'Settings', icon: SlidersHorizontal },
+    { to: '/admin/everything', label: 'Everything', icon: FileClock },
+    { to: '/admin/audit', label: 'Audit', icon: ShieldCheck },
+  ];
 
   return (
     <aside className="flex h-screen w-sidebar shrink-0 flex-col bg-navy-900 on-navy">
@@ -64,6 +88,35 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {me?.authority === 'admin' ? (
+        <>
+          <div className="px-3 pt-4 pb-1.5 text-eyebrow text-on-dark-3">Admin</div>
+          <nav className="flex flex-col gap-0.5 px-3">
+            {adminItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  cn(
+                    'relative flex h-[34px] items-center gap-2.5 rounded-sm px-2.5 text-body text-on-dark-2',
+                    'hover:bg-white/[.06] hover:text-white',
+                    isActive && 'bg-white/10 font-semibold text-white'
+                  )
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    {isActive && <span className="absolute left-0 h-4 w-0.5 rounded-r-sm bg-cyan" aria-hidden />}
+                    <item.icon className="size-4" aria-hidden />
+                    {item.label}
+                  </>
+                )}
+              </NavLink>
+            ))}
+          </nav>
+        </>
+      ) : null}
 
       <div className="mt-auto border-t border-white/10 p-3">
         <div className="mb-2 truncate text-body-sm text-on-dark-2">{me?.email}</div>
