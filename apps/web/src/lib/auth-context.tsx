@@ -45,6 +45,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (err instanceof ApiClientError) {
         console.error('[auth] failed to load /api/me', err.message);
       }
+      // A 401 specifically means the session itself is invalid/expired
+      // (defect #5) — leaving `session` set while `me` is null renders a
+      // half-authenticated shell (sidebar with blank role, dead nav
+      // links, "Invalid or expired token" inline). Sign out so the
+      // Supabase client drops the stale session and the app falls
+      // through to the normal signed-out redirect to /login, instead of
+      // limping along on a session the server has already rejected.
+      if (err instanceof ApiClientError && err.status === 401) {
+        await supabase.auth.signOut();
+      }
       setMe(null);
     }
   }, []);
