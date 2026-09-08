@@ -108,4 +108,49 @@ npm run dev:web
 
 `POST /api/admin/users` (admin/Chan only) invites a teammate by email — idempotent, no
 credential ever passes through this system. `scripts/provision.md` documents the fallback
-if an invite email genuinely does not land.
+if an invite email genuinely does not land. The full admin console lives under `/admin`:
+people & access, ops settings, an audit timeline, and a cross-user "everything" view of
+tasks/ledger/blocks — admin-only, enforced in RLS and route guards, not just hidden nav.
+
+## Phases 3–5 — catalog, tasks, board, ledger, weeks
+
+**Status: written, not yet applied to the live database.** This coder pass had no working
+Supabase MCP tool and no linked CLI session (no `SUPABASE_ACCESS_TOKEN`, no
+`supabase/.supabase` token) despite the brief describing one — the same constraint
+`APPLY-TO-PRODUCTION.sql` already exists to work around. Every migration is a real,
+timestamped file under `supabase/migrations/`, and they are also concatenated in order
+into `supabase/APPLY-PHASE-3-4-5.sql`, ready to paste into the Supabase SQL editor. Read
+its header first.
+
+After Chan applies it:
+
+1. `node scripts/verify-db.mjs` — extended with Phase 3/5 checks: the six new `ops` tables,
+   `core.users.is_clearing_founder`, the DRAFT catalog count, and a live anon-key read of
+   `ops.tasks` (must see zero rows, proving RLS filters rather than just erroring).
+2. Re-run the Supabase security advisor — it reported zero findings before this pass;
+   it must still report zero after.
+3. **`node scripts/seed-demo.mjs`** — the one-command way to test the whole system solo,
+   before inviting the real GM/Sales/Broker/Founder. Creates four throwaway accounts
+   (`founder-demo@ops-demo.invalid`, `gm-demo@…`, `sales-demo@…`, `broker-demo@…` — the
+   `.invalid` TLD is reserved by RFC 2606 and can never resolve or belong to a real
+   person), prints their generated passwords to stdout **only**, and drives a realistic
+   week of tasks through each persona's own signed-in client — in progress, pending-with-
+   founder, a full clear with a points override, a rejection, two blocks (external and
+   person-to-person), a simulated carry-over, and a real run of
+   `ops.generate_recurring_tasks()`. This doubles as the cross-process integration check
+   PLAN.md §6 asks for, run against the live database.
+4. **`node scripts/seed-demo.mjs --purge`** — removes exactly those four accounts and
+   every row they own (tasks, ledger entries, blocks, memberships), returning the database
+   to its current clean state (one real `auth.users` row) before the real invites go out.
+   `ops.point_ledger` is append-only even to the service role by design (same rule as
+   `core.audit_logs`) — `ops_ledger_purge_exception.sql` carves out one narrow exception
+   (DELETE, never UPDATE, and only for a direct system connection) specifically so this
+   purge can work without weakening the guarantee for any real business actor. Demo
+   actors' rows in `core.audit_logs` are left in place on purpose — that table gets no
+   exception, ever.
+
+New standing rule from tonight: `core.authority = 'founder'` can still have multiple rows,
+but **exactly one** may carry `core.users.is_clearing_founder = true` (a partial unique
+index enforces it) — that is the seat whose approval actually clears a task's points. Any
+founder can be promoted to it with a single admin `PATCH /api/admin/users/:id
+{isClearingFounder:true}` — no migration, no code change.

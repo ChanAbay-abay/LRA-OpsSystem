@@ -31,7 +31,13 @@ if (!url || !serviceKey) {
 }
 
 const CORE_TABLES = ['people', 'users', 'memberships', 'notifications', 'notification_outbox', 'audit_logs'];
-const OPS_TABLES = ['settings', 'weeks'];
+const OPS_TABLES = [
+  'settings', 'weeks',
+  // Phase 3/4/5 additions -- present only after supabase/APPLY-PHASE-3-4-5.sql
+  // has been pasted into the SQL editor. A FAIL on these before that is
+  // expected, not a regression.
+  'task_types', 'task_type_revisions', 'recurring_templates', 'tasks', 'task_blocks', 'point_ledger',
+];
 
 async function checkTable(db, schema, table) {
   const client = db.schema(schema);
@@ -75,6 +81,45 @@ async function main() {
         'replace -- `public` must stay listed). This is expected until that step is done ' +
         'and is not a code defect.'
     );
+  }
+
+  console.log('\n=== Phase 3/4/5 spot checks ===');
+
+  const { error: clearingFounderErr } = await db.schema('core').from('users').select('is_clearing_founder').limit(1);
+  console.log(
+    clearingFounderErr
+      ? `  FAIL  core.users.is_clearing_founder column: ${clearingFounderErr.message}`
+      : '  ok    core.users.is_clearing_founder column exists'
+  );
+
+  const { data: draftTypes, error: draftErr } = await db
+    .schema('ops')
+    .from('task_types')
+    .select('name, default_points')
+    .is('default_points', null);
+  if (draftErr) {
+    console.log(`  FAIL  could not read ops.task_types: ${draftErr.message}`);
+  } else {
+    console.log(`  ok    ${draftTypes.length} DRAFT (unpriced) catalog types -- expected until the founder prices them`);
+  }
+
+  // Live RLS spot check with the ANON key (unauthenticated) -- should
+  // see zero rows, never an error and never real rows. This is the one
+  // negative RLS check this script CAN do without a signed-in session;
+  // the full 27-attack suite still needs supabase/tests/rls_test.sql
+  // against a real Postgres connection (no Docker available here).
+  if (process.env.SUPABASE_ANON_KEY) {
+    const anon = createClient(url, process.env.SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+    const { data: anonTasks, error: anonErr } = await anon.schema('ops').from('tasks').select('id');
+    if (anonErr) {
+      console.log(`  ok    anon key cannot read ops.tasks at all (${anonErr.message})`);
+    } else {
+      console.log(
+        anonTasks.length === 0
+          ? '  ok    anon key sees zero ops.tasks rows (RLS is filtering, not just erroring)'
+          : `  FAIL  anon key saw ${anonTasks.length} ops.tasks row(s) -- RLS is not filtering unauthenticated reads`
+      );
+    }
   }
 
   console.log('\n=== auth.users ===');

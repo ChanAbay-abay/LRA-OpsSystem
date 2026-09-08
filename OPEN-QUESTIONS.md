@@ -152,6 +152,16 @@ The seam is preserved instead: history (`core.audit_logs`) and delivery
 
 ---
 
+## 13. HIBP leaked-password protection is off — a paid upgrade, not an oversight
+
+Chan tightened the project's password policy tonight (min length 10, requires lower +
+upper + digit). Supabase Auth also offers a "have I been pwned" leaked-password check on
+top of that, but enabling it on this project returns `402` — it is gated to the Pro plan.
+It is **off**, not misconfigured. Turning it on later is a dashboard toggle once the
+project is on a paid tier, nothing structural.
+
+---
+
 ## Answered — do not re-ask
 
 - **The wipe.** Verified safe by a live row census: 47 rows total, all seed or derived from one

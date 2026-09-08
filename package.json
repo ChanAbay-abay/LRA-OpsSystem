@@ -15,7 +15,9 @@
     "dev:web": "npm run dev -w @lra/ops-web",
     "db:push": "npx supabase@latest db push",
     "db:reset:local": "npx supabase@latest db reset",
-    "test:rls": "bash scripts/run-rls-tests.sh"
+    "test:rls": "bash scripts/run-rls-tests.sh",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "seed:demo:purge": "node scripts/seed-demo.mjs --purge"
   },
   "engines": {
     "node": ">=20"
