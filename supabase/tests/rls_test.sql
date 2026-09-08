@@ -349,6 +349,12 @@ insert into t_meta (k, v) select 'taskB', id from ins;
 -- Promote the test founder to the one clearing seat, admin-only in
 -- practice (RLS/trigger both require it) -- done here as the owner role,
 -- the same way attack 24's fixture row bypasses the ladder legitimately.
+-- Stand down whoever currently holds the single clearing seat first.
+-- `uq_core_users_one_clearing_founder` permits exactly one, by design, so
+-- with real (or demo-seeded) data present the promotion below would fail
+-- on a duplicate key and abort the whole suite. Safe: everything here is
+-- inside the transaction this file rolls back at the end.
+update core.users set is_clearing_founder = false where is_clearing_founder;
 update core.users set is_clearing_founder = true where id = (select uid from p where k='founder');
 
 set local role authenticated;
