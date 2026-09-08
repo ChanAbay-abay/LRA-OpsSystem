@@ -6,14 +6,20 @@
  * section depends on `GET /api/weeks/current`, which is Phase 3 API
  * surface — deferred until that route exists rather than shipped
  * against fake data.
+ *
+ * DESIGN.md:1144 (defect #2) — below 768px the persistent `<aside>`
+ * (`Sidebar`) hides itself and `MobileSidebarTrigger`'s top bar takes
+ * over instead; exactly one renders at any given width, both driven by
+ * the same `md:` breakpoint so they can never both show or both hide.
  */
 import type { ReactNode } from 'react';
-import { Sidebar } from './sidebar';
+import { MobileSidebarTrigger, Sidebar } from './sidebar';
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-screen bg-canvas">
+    <div className="flex min-h-screen flex-col bg-canvas md:flex-row">
       <Sidebar />
+      <MobileSidebarTrigger />
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-app px-6 py-6 lg:px-8">{children}</div>
       </main>

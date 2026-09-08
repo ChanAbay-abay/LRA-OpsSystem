@@ -33,6 +33,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
   type Announcements,
+  type KeyboardCoordinateGetter,
 } from '@dnd-kit/core';
 import { Ban, CheckCircle2, Pencil, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
@@ -79,6 +80,17 @@ const COLUMNS: { id: keyof Board; label: string; droppable: boolean }[] = [
   { id: 'verified', label: 'Verified', droppable: true },
   { id: 'cleared', label: 'Cleared', droppable: true },
 ];
+
+// Who the task is now waiting on once it lands in a given column, for
+// the keyboard drop announcement (DESIGN.md:663-664, defect #4). Only
+// the two approval columns have a waiting party; everything else is
+// either self-owned (backlog/in progress), a final state (cleared), or
+// announced separately (blocked opens its own dialog before any move
+// commits).
+const NEXT_ACTOR: Partial<Record<keyof Board, string>> = {
+  submitted: 'GM',
+  verified: 'Founder',
+};
 
 // Columns that map directly to a task_status. `blocked` maps to nothing
 // (it is derived from ops.task_blocks) and `this_week` maps to nothing
@@ -166,7 +178,7 @@ function Column({ id, label, droppable, tasks }: { id: keyof Board; label: strin
   const total = tasks.reduce((sum, t) => sum + (t.points_override ?? t.catalog_points ?? 0), 0);
 
   return (
-    <div className="flex w-[288px] shrink-0 flex-col gap-2 rounded-xl bg-surface-2 p-2">
+    <div className="flex w-[288px] shrink-0 snap-start flex-col gap-2 rounded-xl bg-surface-2 p-2">
       <div className="flex items-center justify-between px-2 pb-1 pt-1">
         <div className="flex items-center gap-1.5 text-eyebrow text-ink-2">
           {id === 'blocked' ? <Ban className="size-3 text-blocked" aria-hidden /> : null}
@@ -193,6 +205,32 @@ function Column({ id, label, droppable, tasks }: { id: keyof Board; label: strin
   );
 }
 
+// One column (288px) + its gap (12px), per DESIGN.md's column geometry
+// in §7.3. dnd-kit's default keyboard coordinate getter moves the
+// virtual pointer in small fixed pixel steps, which measured out at
+// 15-18 ArrowRight presses to cross one column (defect #3) — defeating
+// DESIGN.md:665's "hard requirement" that the board be operable from a
+// keyboard on the shared display. One press now covers exactly one
+// column, landing the pointer over the next column's droppable rect so
+// `closestCenter` picks it up immediately.
+const COLUMN_STEP = 300;
+const ROW_STEP = 50;
+
+const columnKeyboardCoordinateGetter: KeyboardCoordinateGetter = (event, { currentCoordinates }) => {
+  switch (event.code) {
+    case 'ArrowRight':
+      return { ...currentCoordinates, x: currentCoordinates.x + COLUMN_STEP };
+    case 'ArrowLeft':
+      return { ...currentCoordinates, x: currentCoordinates.x - COLUMN_STEP };
+    case 'ArrowDown':
+      return { ...currentCoordinates, y: currentCoordinates.y + ROW_STEP };
+    case 'ArrowUp':
+      return { ...currentCoordinates, y: currentCoordinates.y - ROW_STEP };
+    default:
+      return undefined;
+  }
+};
+
 export function BoardPage() {
   const [board, setBoard] = React.useState<Board | null>(null);
   const [activeTask, setActiveTask] = React.useState<Task | null>(null);
@@ -200,7 +238,7 @@ export function BoardPage() {
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor)
+    useSensor(KeyboardSensor, { coordinateGetter: columnKeyboardCoordinateGetter })
   );
 
   const load = React.useCallback(() => {
@@ -229,8 +267,10 @@ export function BoardPage() {
     },
     onDragEnd({ over }) {
       if (!over) return 'Move cancelled, returned to its column.';
-      const label = COLUMNS.find((c) => c.id === over.id)?.label ?? String(over.id);
-      return `Moved to ${label}.`;
+      const colId = over.id as keyof Board;
+      const label = COLUMNS.find((c) => c.id === colId)?.label ?? String(over.id);
+      const waitingOn = NEXT_ACTOR[colId];
+      return `Moved to ${label}.${waitingOn ? ` Waiting on ${waitingOn}.` : ''}`;
     },
     onDragCancel({ active }) {
       const from = findColumn(String(active.id));
@@ -297,7 +337,7 @@ export function BoardPage() {
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        <div className="flex gap-3 overflow-x-auto pb-4">
+        <div className="flex snap-x snap-proximity gap-3 overflow-x-auto pb-4">
           {COLUMNS.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} droppable={c.droppable} tasks={board[c.id]} />
           ))}

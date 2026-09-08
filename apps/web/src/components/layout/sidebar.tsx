@@ -7,7 +7,14 @@
  * item for an unbuilt screen is a dead link, and DESIGN.md's own rule
  * is that this app should never look like it is further along than it
  * is.
+ *
+ * DESIGN.md:1144 — at <768px this stops being a persistent column and
+ * becomes a Radix `Sheet` behind a hamburger (defect #2). `SidebarNav`
+ * holds the actual nav markup so both the persistent `<aside>` (≥768px)
+ * and the off-canvas `Sheet` (<768px, see `MobileSidebarTrigger`) render
+ * the identical content instead of two copies drifting apart.
  */
+import * as React from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   BookOpen,
@@ -17,12 +24,14 @@ import {
   Home,
   Inbox,
   KanbanSquare,
+  Menu,
   ShieldCheck,
   SlidersHorizontal,
   UserCog,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 
 interface NavItem {
   to: string;
@@ -31,7 +40,7 @@ interface NavItem {
   end?: boolean;
 }
 
-export function Sidebar() {
+function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const { me, signOut } = useAuth();
 
   const items: NavItem[] = [
@@ -53,7 +62,7 @@ export function Sidebar() {
   ];
 
   return (
-    <aside className="flex h-screen w-sidebar shrink-0 flex-col bg-navy-900 on-navy">
+    <div className="flex h-full w-sidebar shrink-0 flex-col bg-navy-900 on-navy">
       <div className="flex items-center gap-2 p-4">
         <div className="flex size-6 items-center justify-center rounded bg-brand-600 text-[11px] font-bold text-white">
           L
@@ -68,6 +77,7 @@ export function Sidebar() {
             key={item.to}
             to={item.to}
             end={item.end}
+            onClick={onNavigate}
             className={({ isActive }) =>
               cn(
                 'relative flex h-[34px] items-center gap-2.5 rounded-sm px-2.5 text-body text-on-dark-2',
@@ -97,6 +107,7 @@ export function Sidebar() {
               <NavLink
                 key={item.to}
                 to={item.to}
+                onClick={onNavigate}
                 className={({ isActive }) =>
                   cn(
                     'relative flex h-[34px] items-center gap-2.5 rounded-sm px-2.5 text-body text-on-dark-2',
@@ -128,6 +139,49 @@ export function Sidebar() {
           Sign out
         </button>
       </div>
+    </div>
+  );
+}
+
+/** ≥768px: the persistent column. Hidden below that per DESIGN.md:1144. */
+export function Sidebar() {
+  return (
+    <aside className="hidden h-screen shrink-0 md:flex">
+      <SidebarNav />
     </aside>
+  );
+}
+
+/**
+ * <768px: a hamburger in a top bar that opens the sidebar as a Radix
+ * `Sheet` sliding in from the left, per DESIGN.md:1144. Rendered by
+ * `AppShell` alongside (not inside) the persistent `<aside>` so exactly
+ * one of the two is visible at any width.
+ */
+export function MobileSidebarTrigger() {
+  const [open, setOpen] = React.useState(false);
+
+  return (
+    <div className="flex h-12 shrink-0 items-center gap-2 border-b border-hairline bg-navy-900 px-3 on-navy md:hidden">
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetTrigger asChild>
+          <button
+            type="button"
+            aria-label="Open navigation"
+            className="flex size-8 items-center justify-center rounded-sm text-white hover:bg-white/[.06]"
+          >
+            <Menu className="size-5" aria-hidden />
+          </button>
+        </SheetTrigger>
+        <SheetContent side="left" className="p-0">
+          <SheetTitle>LRA Ops navigation</SheetTitle>
+          <SidebarNav onNavigate={() => setOpen(false)} />
+        </SheetContent>
+      </Sheet>
+      <div className="flex size-6 items-center justify-center rounded bg-brand-600 text-[11px] font-bold text-white">
+        L
+      </div>
+      <span className="text-strong text-white">LRA Ops</span>
+    </div>
   );
 }
