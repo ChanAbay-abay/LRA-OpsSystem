@@ -12,3 +12,6 @@ backup/
 supabase/.branches
 supabase/.temp
 
+
+# Playwright MCP scratch output
+.playwright-mcp/
