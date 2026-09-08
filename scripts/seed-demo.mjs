@@ -218,6 +218,7 @@ async function seed() {
 
   const credentials = [];
   const clients = {};
+  let anyRotated = false;
 
   for (const persona of PERSONAS) {
     const password = generatePassword();
@@ -235,6 +236,7 @@ async function seed() {
     } else {
       const { error } = await svc.auth.admin.updateUserById(authUser.id, { password });
       if (error) throw error;
+      anyRotated = true;
       console.log(`  found ${persona.email}, password reset`);
     }
 
@@ -248,6 +250,21 @@ async function seed() {
     const { error: signInError } = await anon.auth.signInWithPassword({ email: persona.email, password });
     if (signInError) throw new Error(`could not sign in as ${persona.email}: ${signInError.message}`);
     clients[persona.key] = anon;
+  }
+
+  // A re-run silently invalidates any credentials shared earlier (Slack
+  // message, screenshot, whatever) -- every existing persona gets its
+  // password reset above. That is an easy trap if it is buried in the
+  // same quiet "found X, password reset" line as everything else, so
+  // make it loud and impossible to miss in stdout.
+  if (anyRotated) {
+    const banner = '!'.repeat(78);
+    console.log(`\n${banner}`);
+    console.log('  PASSWORDS ROTATED: this was a re-run, not a first seed.');
+    console.log('  Every demo account that already existed just got a NEW password.');
+    console.log('  Any credentials you shared before this run (Slack, screenshot, etc.)');
+    console.log('  are now WRONG. Only the table printed below is current.');
+    console.log(banner);
   }
 
   console.log('\n=== Credentials (printed once, never written to disk) ===');
@@ -285,7 +302,32 @@ async function currentWeekId() {
   return { id: created.id, weekStart };
 }
 
+// The demo title (`[DEMO] <title>`) plus `week_id` uniquely identifies
+// each hand-seeded task -- every title in `seedWeek` below is distinct
+// and only ever created once per week. Re-running the script now looks
+// for that row first instead of inserting a duplicate, which is the
+// actual bug: `seedWeek` never checked before, so a second run doubled
+// every board column and inflated every point total with no error, even
+// though the script's own doc comment claimed it "repairs missing rows".
+async function findExistingTask(client, weekId, title) {
+  const { data, error } = await client
+    .schema('ops')
+    .from('tasks')
+    .select('*')
+    .eq('week_id', weekId)
+    .eq('title', `[DEMO] ${title}`)
+    .maybeSingle();
+  if (error) throw new Error(`findExistingTask("${title}") failed: ${error.message}`);
+  return data;
+}
+
 async function createTask(client, { weekId, ownerUserId, taskTypeId, title, description }) {
+  const existing = await findExistingTask(client, weekId, title);
+  if (existing) {
+    console.log(`  [skip] task "${title}" already exists this week, reusing it`);
+    return existing;
+  }
+
   const { data, error } = await client
     .schema('ops')
     .from('tasks')
@@ -304,9 +346,41 @@ async function createTask(client, { weekId, ownerUserId, taskTypeId, title, desc
   return data;
 }
 
+// Idempotent by construction: a no-op update (`to` already the current
+// status) is skipped rather than re-sent, since the state-machine
+// trigger treats a same-state transition as illegal, not a no-op --
+// without this guard, reusing an existing task via `createTask` above
+// would throw the moment `seedWeek` tried to replay its transitions.
 async function transition(client, taskId, to, extra = {}) {
+  const { data: current, error: readError } = await client.schema('ops').from('tasks').select('status').eq('id', taskId).single();
+  if (readError) throw new Error(`transition ${taskId} -> ${to}: could not read current status: ${readError.message}`);
+  if (current.status === to) return current;
+
   const { data, error } = await client.schema('ops').from('tasks').update({ status: to, ...extra }).eq('id', taskId).select().single();
   if (error) throw new Error(`transition ${taskId} -> ${to} failed: ${error.message}`);
+  return data;
+}
+
+// Each demo task in this script gets at most one block, so "a block
+// already exists for this task" is enough to say the row was already
+// seeded -- same re-run bug as the tasks themselves (task_blocks has no
+// upsert key of its own to check against, but this task/block pairing
+// is 1:1 by construction here).
+async function ensureTaskBlock(client, taskId, row) {
+  const { data: existing, error: readError } = await client
+    .schema('ops')
+    .from('task_blocks')
+    .select('id')
+    .eq('task_id', taskId)
+    .maybeSingle();
+  if (readError) throw new Error(`ensureTaskBlock(${taskId}): could not check for an existing block: ${readError.message}`);
+  if (existing) {
+    console.log(`  [skip] task ${taskId} already has a block, reusing it`);
+    return existing;
+  }
+
+  const { data, error } = await client.schema('ops').from('task_blocks').insert(row).select().single();
+  if (error) throw new Error(`ensureTaskBlock(${taskId}) failed: ${error.message}`);
   return data;
 }
 
@@ -375,7 +449,7 @@ async function seedWeek(clients) {
     weekId, ownerUserId: brokerId, taskTypeId: holdType,
     title: 'Resolve BOC alert on shipment #DEMO-5678',
   });
-  await clients.broker.schema('ops').from('task_blocks').insert({
+  await ensureTaskBlock(clients.broker, t5.id, {
     task_id: t5.id, target: 'external', blocking_external: 'Bureau of Customs',
     reason: 'Waiting on BOC to lift an alert before the shipment can be released.', created_by: brokerId,
   });
@@ -385,7 +459,7 @@ async function seedWeek(clients) {
     weekId, ownerUserId: brokerId, taskTypeId: truckingType,
     title: 'Arrange trucking for shipment #DEMO-9012',
   });
-  await clients.broker.schema('ops').from('task_blocks').insert({
+  await ensureTaskBlock(clients.broker, t6.id, {
     task_id: t6.id, target: 'person', blocking_user_id: salesId,
     reason: 'Need the client-confirmed delivery address from sales before booking a truck.', created_by: brokerId,
   });
@@ -393,15 +467,25 @@ async function seedWeek(clients) {
   // A carry-over -- simulated directly (system client) as already having
   // rolled over once from last week, so the board's age badge has
   // something to show without actually closing the live current week.
+  // Same duplicate-on-rerun bug as the six tasks above: this bypassed
+  // `createTask` entirely (it inserts through `svc`, not a persona
+  // client, because there's no real-world actor for a simulated carry-
+  // over), so it needs its own existence check rather than inheriting
+  // `createTask`'s.
   const lastMonday = new Date(new Date(weekStart).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const { data: lastWeek } = await svc.schema('ops').from('weeks').select('id').eq('week_start', lastMonday).maybeSingle();
   const firstWeekId = lastWeek?.id ?? weekId;
-  await svc.schema('ops').from('tasks').insert({
-    week_id: weekId, owner_user_id: gmId, task_type_id: followUpType,
-    title: '[DEMO] Weekly billing follow-up (carried over)',
-    status: 'todo', is_recurring: true, carry_over_count: 1, first_week_id: firstWeekId,
-    created_by: gmId,
-  });
+  const existingCarryOver = await findExistingTask(svc, weekId, 'Weekly billing follow-up (carried over)');
+  if (existingCarryOver) {
+    console.log('  [skip] carry-over task already exists this week, reusing it');
+  } else {
+    await svc.schema('ops').from('tasks').insert({
+      week_id: weekId, owner_user_id: gmId, task_type_id: followUpType,
+      title: '[DEMO] Weekly billing follow-up (carried over)',
+      status: 'todo', is_recurring: true, carry_over_count: 1, first_week_id: firstWeekId,
+      created_by: gmId,
+    });
+  }
 
   // Recurring generation for the week, run for real through the
   // oversight-guarded RPC -- exercises Phase 5 exactly as production
