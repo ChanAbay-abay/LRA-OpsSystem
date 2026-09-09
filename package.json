@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @lra/ops-scoring && npm run build -w @lra/ops-api && npm run build -w @lra/ops-web",
-    "test": "npm run test -w @lra/ops-scoring && npm run test -w @lra/ops-api",
+    "test": "npm run test -w @lra/ops-scoring && npm run test -w @lra/ops-api && npm run test -w @lra/ops-web",
     "dev:api": "npm run dev -w @lra/ops-api",
     "dev:web": "npm run dev -w @lra/ops-web",
     "db:push": "npx supabase@latest db push",

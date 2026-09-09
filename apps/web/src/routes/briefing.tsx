@@ -172,7 +172,7 @@ export function BriefingPage() {
 
       <ResourceView
         resource={weekResource}
-        skeleton={<SkeletonRows rows={1} height={40} />}
+        skeleton={<BriefingSkeleton />}
         empty={
           <div className="mx-auto max-w-[420px] rounded-xl border border-hairline bg-surface p-8 text-center">
             <p className="mb-3 text-body text-ink-2">This week hasn't been opened.</p>
@@ -191,7 +191,7 @@ export function BriefingPage() {
       </ResourceView>
 
       {week ? (
-        <ResourceView resource={briefingResource} skeleton={<SkeletonRows rows={6} height={48} />}>
+        <ResourceView resource={briefingResource} skeleton={<BriefingSkeleton />}>
           {(data) =>
             data ? (
               <div className="flex flex-col gap-8">
@@ -235,6 +235,64 @@ export function BriefingPage() {
           </DialogContent>
         </Dialog>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The briefing's own placeholder. Reproduced defect (Chan: "for the
+ * founder account it doesn't load the briefing"): this screen needs TWO
+ * chained requests — `/api/weeks/current`, then `/api/briefing/:id`
+ * keyed off its answer — and while the first was in flight `week` was
+ * `null`, so the entire body below the header rendered as literally
+ * nothing for several seconds. On a cold load that reads as a broken
+ * page, not a loading one. It was never founder-specific; the founder
+ * is simply the account it was noticed on.
+ *
+ * The skeleton mirrors the four real sections so the page has its own
+ * shape from the first paint and the data lands into it.
+ */
+function BriefingSkeleton() {
+  return (
+    <div className="flex flex-col gap-8" aria-busy="true">
+      <span className="sr-only">Loading the briefing…</span>
+      <section>
+        <div className="skeleton-pulse mb-3 h-5 w-48 rounded-md bg-surface-2" aria-hidden />
+        <SkeletonRows rows={4} height={40} />
+      </section>
+      <section>
+        <div className="skeleton-pulse mb-3 h-5 w-32 rounded-md bg-surface-2" aria-hidden />
+        <SkeletonRows rows={2} height={40} />
+      </section>
+      <section>
+        <div className="skeleton-pulse mb-3 h-5 w-24 rounded-md bg-surface-2" aria-hidden />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2" aria-hidden>
+          {[0, 1].map((i) => (
+            <div key={i} className="rounded-xl border border-hairline bg-surface p-4">
+              <div className="skeleton-pulse mb-3 h-2.5 w-28 rounded-xs bg-surface-3" style={{ animationDelay: `${i * 90}ms` }} />
+              <div className="skeleton-pulse mb-2 h-3 w-full rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 60}ms` }} />
+              <div className="skeleton-pulse h-3 w-2/3 rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 120}ms` }} />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section>
+        <div className="skeleton-pulse mb-3 h-5 w-20 rounded-md bg-surface-2" aria-hidden />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3" aria-hidden>
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="rounded-xl border border-hairline bg-surface p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="skeleton-pulse h-3 w-24 rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90}ms` }} />
+                <div className="skeleton-pulse h-3 w-6 rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90}ms` }} />
+              </div>
+              <div className="skeleton-pulse mb-2 h-2.5 w-20 rounded-xs bg-surface-3" style={{ animationDelay: `${i * 90 + 60}ms` }} />
+              <div className="skeleton-pulse mb-3 h-3 w-full rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 120}ms` }} />
+              <div className="skeleton-pulse mb-2 h-2.5 w-20 rounded-xs bg-surface-3" style={{ animationDelay: `${i * 90 + 60}ms` }} />
+              <div className="skeleton-pulse h-3 w-4/5 rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 180}ms` }} />
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

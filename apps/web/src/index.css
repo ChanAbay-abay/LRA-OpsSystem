@@ -149,6 +149,25 @@
   .num-rejected { color: var(--danger); text-decoration: line-through; }
 
   ::selection { background: var(--brand-100); color: var(--ink); }
+
+  /*
+   * Loading placeholders (ui/resource-state.tsx). Tailwind's own
+   * `animate-pulse` swings opacity down to .5, which on a wash that is
+   * already close to its container reads as the surface flickering
+   * rather than as content arriving -- Chan's "ghosting". This is a
+   * shallower swing over a longer cycle, staggered per element by an
+   * inline `animation-delay`, so a column of placeholders breathes as a
+   * list instead of blinking in unison. The reduced-motion block below
+   * flattens it to a static tint, which is still legible as "not yet
+   * loaded" because the shapes themselves carry the meaning.
+   */
+  @keyframes skeleton-breathe {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .55; }
+  }
+  .skeleton-pulse {
+    animation: skeleton-breathe 1.6s var(--ease-in-out) infinite;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

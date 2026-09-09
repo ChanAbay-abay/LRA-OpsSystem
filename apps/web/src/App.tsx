@@ -11,6 +11,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppShell } from '@/components/layout/app-shell';
+import { SkeletonRows } from '@/components/ui/resource-state';
 import { LoginPage } from '@/routes/login';
 import { NowPage } from '@/routes/now';
 import { BoardPage } from '@/routes/board';
@@ -24,22 +25,73 @@ import { AdminSettingsPage } from '@/routes/admin-settings';
 import { AdminAuditPage } from '@/routes/admin-audit';
 import { AdminEverythingPage } from '@/routes/admin-everything';
 
+/**
+ * The app's own boot placeholder. It used to be a bare centred
+ * "Loading…" on an empty page, which is a different layout from the one
+ * that replaces it — so the first paint after sign-in was a jump from
+ * nothing to a full shell. This is the shell's silhouette instead: the
+ * navy sidebar column and a content skeleton in the same places the
+ * real ones land.
+ */
+function ShellSkeleton() {
+  return (
+    <div className="flex h-screen overflow-hidden bg-canvas" aria-busy="true" aria-live="polite">
+      <span className="sr-only">Loading LRA Ops…</span>
+      <div className="hidden w-sidebar shrink-0 flex-col gap-1 bg-navy-900 p-3 md:flex" aria-hidden>
+        <div className="mb-4 flex items-center gap-2 p-1">
+          <div className="flex size-6 items-center justify-center rounded bg-brand-600 text-[11px] font-bold text-white">L</div>
+          <span className="text-strong text-white">LRA Ops</span>
+        </div>
+        {Array.from({ length: 7 }).map((_, i) => (
+          <div
+            key={i}
+            className="skeleton-pulse h-[34px] rounded-sm bg-white/[.06]"
+            style={{ animationDelay: `${i * 80}ms` }}
+          />
+        ))}
+      </div>
+      <main className="min-h-0 flex-1 overflow-hidden">
+        <div className="mx-auto max-w-app px-6 py-6 lg:px-8">
+          <div className="skeleton-pulse mb-2 h-6 w-48 rounded-md bg-surface-2" aria-hidden />
+          <div className="skeleton-pulse mb-5 h-3 w-72 rounded-xs bg-surface-2" style={{ animationDelay: '80ms' }} aria-hidden />
+          <SkeletonRows rows={5} height={44} />
+        </div>
+      </main>
+    </div>
+  );
+}
+
 function ProtectedRoute({
   children,
   requireAdmin = false,
+  requireOversight = false,
 }: {
   children: React.ReactNode;
   requireAdmin?: boolean;
+  /**
+   * gm/founder/admin only. `/queue` reads `GET /api/points/queue`,
+   * which is `requireOversight()` server-side — without this guard a
+   * Sales or Broker who types the URL (or follows a stale link) lands
+   * on a 403 error panel for a screen that was never theirs. Chan's
+   * ask: approvals should not exist at all for the people who do not
+   * approve, not merely fail for them.
+   */
+  requireOversight?: boolean;
 }) {
   const { session, me, loading } = useAuth();
 
-  if (loading) {
-    return <div className="flex min-h-screen items-center justify-center text-body-sm text-ink-3">Loading…</div>;
-  }
+  if (loading) return <ShellSkeleton />;
   if (!session) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
+  // `me` is still in flight for a beat after the session settles; the
+  // shell skeleton is the honest answer, not a redirect on a role we
+  // have not read yet.
+  if ((requireAdmin || requireOversight) && !me) return <ShellSkeleton />;
   if (requireAdmin && me?.authority !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+  if (requireOversight && !['gm', 'founder', 'admin'].includes(me?.authority ?? '')) {
     return <Navigate to="/" replace />;
   }
 
@@ -85,7 +137,7 @@ function AppRoutes() {
       <Route
         path="/queue"
         element={
-          <ProtectedRoute>
+          <ProtectedRoute requireOversight>
             <QueuePage />
           </ProtectedRoute>
         }

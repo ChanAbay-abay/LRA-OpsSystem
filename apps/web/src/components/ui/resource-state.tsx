@@ -63,27 +63,85 @@ export function ErrorPanel({ message, onRetry }: { message: string; onRetry: () 
   );
 }
 
-/** A row of skeleton blocks matching a table's real row geometry (DESIGN.md §8). */
+/**
+ * A row of skeleton blocks matching a table's real row geometry
+ * (DESIGN.md §8). The inner bar is inset and radiused rather than a
+ * full-bleed rectangle so the placeholder reads as the same family of
+ * shapes as the rows it stands in for -- Chan's "round the corners or
+ * something to match the container".
+ */
 export function SkeletonRows({ rows = 5, height = 36 }: { rows?: number; height?: number }) {
   return (
     <div className="overflow-hidden rounded-xl border border-hairline bg-surface" aria-hidden>
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="border-b border-hairline px-4 py-2 last:border-0" style={{ height }}>
-          <div className="h-full w-full animate-pulse rounded bg-surface-2" style={{ animationDuration: '1.4s' }} />
+        <div key={i} className="flex items-center border-b border-hairline px-4 py-2 last:border-0" style={{ height }}>
+          <div
+            className="skeleton-pulse h-[60%] w-full rounded-md bg-surface-2"
+            style={{ animationDelay: `${i * 90}ms`, maxWidth: `${88 - (i % 3) * 12}%` }}
+          />
         </div>
       ))}
     </div>
   );
 }
 
-/** Three skeleton cards, the board column's real card height, per DESIGN.md §8. */
+/**
+ * Board-column placeholders. These used to be flat `bg-surface-2`
+ * blocks sitting inside a `bg-surface-2` column -- the same colour as
+ * the thing behind them, which is exactly the "ghosting" Chan is
+ * describing. They now carry the real card's own geometry: white
+ * surface, hairline border, `rounded-lg`, and three inset bars where a
+ * card's eyebrow / title / footer actually sit.
+ */
 export function SkeletonCards({ count = 3, className }: { count?: number; className?: string }) {
   return (
     <div className={cn('flex flex-col gap-2', className)} aria-hidden>
       {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="h-[86px] animate-pulse rounded-lg bg-surface-2" style={{ animationDuration: '1.4s' }} />
+        <div
+          key={i}
+          className="flex flex-col gap-2 rounded-lg border border-hairline bg-surface p-3"
+          style={{ opacity: 1 - i * 0.15 }}
+        >
+          <div className="skeleton-pulse h-2 w-10 rounded-xs bg-surface-3" style={{ animationDelay: `${i * 90}ms` }} />
+          <div className="skeleton-pulse h-3 w-full rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 60}ms` }} />
+          <div className="skeleton-pulse h-3 w-3/5 rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 120}ms` }} />
+          <div className="mt-1 flex items-center justify-between">
+            <div className="skeleton-pulse size-5 rounded-full bg-surface-3" style={{ animationDelay: `${i * 90}ms` }} />
+            <div className="skeleton-pulse h-3 w-6 rounded-xs bg-surface-2" style={{ animationDelay: `${i * 90 + 60}ms` }} />
+          </div>
+        </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * A full board placeholder: the real column chrome (rounded shell,
+ * header, count pill) with skeleton cards inside it, so the first paint
+ * is the board's own geometry and the real data lands into a layout
+ * that is already the right shape instead of replacing a different one.
+ */
+export function SkeletonBoard({ columns = 7 }: { columns?: number }) {
+  return (
+    <>
+      {/* The filter toolbar's own footprint, so the columns don't jump
+          up the page the moment the data lands. */}
+      <div className="mb-4 flex items-center gap-2" aria-hidden>
+        <div className="skeleton-pulse h-[34px] w-[260px] rounded-md bg-surface-2" />
+        <div className="skeleton-pulse h-[34px] w-[216px] rounded-md bg-surface-2" style={{ animationDelay: '80ms' }} />
+      </div>
+      <div className="flex gap-3 overflow-hidden pb-4" aria-hidden>
+      {Array.from({ length: columns }).map((_, i) => (
+        <div key={i} className="flex w-column shrink-0 flex-col gap-2 rounded-xl bg-surface-2 p-2">
+          <div className="flex items-center justify-between px-2 py-1">
+            <div className="skeleton-pulse h-2.5 w-16 rounded-xs bg-surface-3" style={{ animationDelay: `${i * 70}ms` }} />
+            <div className="skeleton-pulse h-2.5 w-4 rounded-xs bg-surface-3" style={{ animationDelay: `${i * 70}ms` }} />
+          </div>
+          <SkeletonCards count={i < 4 ? 3 : 2} />
+        </div>
+      ))}
+      </div>
+    </>
   );
 }
 
