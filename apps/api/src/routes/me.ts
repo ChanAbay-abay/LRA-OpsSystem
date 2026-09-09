@@ -22,6 +22,13 @@ export default async function meRoutes(app: FastifyInstance) {
         authority: req.user.authority,
         personId: req.user.personId,
         memberships: req.user.memberships,
+        // The real capability, computed server-side (domain.ts / lib/
+        // supabase.ts) from the same rule as `core.is_clearing_founder()`.
+        // The queue and board gate their clear/approve controls on this,
+        // not on `authority === 'founder'` -- a founder who is not the
+        // seated clearing founder must see a disabled control, same as a
+        // GM would.
+        isClearingFounder: req.user.isClearingFounder,
       },
     };
   });

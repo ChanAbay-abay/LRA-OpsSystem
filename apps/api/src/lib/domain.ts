@@ -38,6 +38,16 @@ export interface AuthUser {
   personId: string | null;
   isActive: boolean;
   memberships: Membership[];
+  // Mirrors `core.is_clearing_founder()` exactly (is_admin() OR the
+  // is_clearing_founder column) -- the single seat that may clear a
+  // task's points or decide a flagged cancellation. Computed here, once,
+  // server-side, so the web app never has to re-derive "can this person
+  // clear" from `authority` alone: an authority='founder' account that
+  // is not the seated clearing founder must see the same disabled
+  // control a GM does, and a UI that infers the capability from
+  // authority would light that control up incorrectly (the exact defect
+  // this field exists to close).
+  isClearingFounder: boolean;
 }
 
 export function isOversight(authority: Authority): boolean {

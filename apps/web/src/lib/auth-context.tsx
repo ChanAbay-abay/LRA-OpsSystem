@@ -17,6 +17,13 @@ export interface Me {
   authority: 'staff' | 'gm' | 'founder' | 'admin';
   personId: string | null;
   memberships: { module: string; position: string; isActive: boolean }[];
+  // The real "may clear a task / decide a flagged cancellation" flag,
+  // computed server-side from `core.is_clearing_founder()`'s rule (admin,
+  // or the single seated clearing founder). Never infer this from
+  // `authority === 'admin' || authority === 'founder'` — a non-clearing
+  // founder has authority 'founder' too, and that inference is exactly
+  // the bug this field exists to close.
+  isClearingFounder: boolean;
 }
 
 interface AuthContextValue {

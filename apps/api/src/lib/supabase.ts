@@ -132,7 +132,7 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
   const { data: profile, error } = await db
     .schema('core')
     .from('users')
-    .select('id, email, authority, person_id, is_active')
+    .select('id, email, authority, person_id, is_active, is_clearing_founder')
     .eq('id', userId)
     .single();
 
@@ -156,5 +156,9 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
       position: m.position,
       isActive: m.is_active,
     })),
+    // `core.is_clearing_founder()` verbatim: admin, or the one seated
+    // clearing founder. Read from the same row as `authority` above, not
+    // a second round trip, and not re-derived from a JWT claim.
+    isClearingFounder: profile.authority === 'admin' || profile.is_clearing_founder === true,
   };
 }

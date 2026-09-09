@@ -12,6 +12,15 @@
  * explicit that approving a cancellation and clearing points must never
  * be one ambiguous control, so they get their own row shape and their
  * own destructive-styled decision buttons.
+ *
+ * The "Clear" button and both cancellation-decision buttons are gated on
+ * `me.isClearingFounder`, not `authority === 'founder'`. Multiple people
+ * can hold `founder` authority (PLAN.md §0.4), but exactly one of them is
+ * the seated clearing founder whose approval the database's own trigger
+ * will actually accept (`core.is_clearing_founder()`) — a founder who
+ * isn't that seat would otherwise see a live-looking button that always
+ * 403s. GM's "Verify" is unaffected: verifying is any GM's job, not the
+ * clearing seat's.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
@@ -43,6 +52,12 @@ export function QueuePage() {
   const [decidingCancellation, setDecidingCancellation] = React.useState<QueueTask | null>(null);
 
   const nextAction = me?.authority === 'founder' || me?.authority === 'admin' ? 'cleared' : 'verified';
+  const canClear = me?.isClearingFounder ?? false;
+  // Only the "Clear" step and cancellation decisions are the clearing
+  // founder's own seat (PLAN.md §2.5 item 6 / core.is_clearing_founder());
+  // "Verify" is any GM's job and is unaffected.
+  const clearDisabled = nextAction === 'cleared' && !canClear;
+  const clearDisabledReason = 'Only the clearing founder can approve this.';
 
   async function approve(task: QueueTask) {
     try {
@@ -81,10 +96,22 @@ export function QueuePage() {
                     <p className="text-label text-danger">Flagged for cancellation — {t.cancellation_reason}</p>
                   </div>
                   <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : 'text-ink-3'}`}>{t.ageHours}h</span>
-                  <Button variant="destructive" size="sm" onClick={() => approveCancellation(t)}>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={!canClear}
+                    title={!canClear ? clearDisabledReason : undefined}
+                    onClick={() => approveCancellation(t)}
+                  >
                     Approve cancellation
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => setDecidingCancellation(t)}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!canClear}
+                    title={!canClear ? clearDisabledReason : undefined}
+                    onClick={() => setDecidingCancellation(t)}
+                  >
                     Refuse
                   </Button>
                 </div>
@@ -95,7 +122,13 @@ export function QueuePage() {
                   <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : t.ageHours >= 8 ? 'text-pending' : 'text-ink-3'}`}>
                     {t.ageHours}h
                   </span>
-                  <Button variant={nextAction === 'cleared' ? 'clear' : 'primary'} size="sm" onClick={() => approve(t)}>
+                  <Button
+                    variant={nextAction === 'cleared' ? 'clear' : 'primary'}
+                    size="sm"
+                    disabled={clearDisabled}
+                    title={clearDisabled ? clearDisabledReason : undefined}
+                    onClick={() => approve(t)}
+                  >
                     {nextAction === 'cleared' ? 'Clear' : 'Verify'}
                   </Button>
                   <Button variant="secondary" size="sm" onClick={() => setRejecting(t)}>

@@ -35,6 +35,7 @@ describe('hasMembership', () => {
     personId: 'p1',
     isActive: true,
     memberships: [{ module: 'ops', position: 'sales', isActive: true }],
+    isClearingFounder: false,
   };
 
   test('a staff member with an active ops membership counts as a member', () => {
@@ -61,6 +62,7 @@ describe('hasMembership', () => {
       personId: null,
       isActive: true,
       memberships: [],
+      isClearingFounder: true,
     };
     assert.equal(hasMembership(admin, 'ops'), true);
     assert.equal(hasMembership(admin, 'hr'), true);
