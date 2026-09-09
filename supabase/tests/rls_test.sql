@@ -547,6 +547,19 @@ select set_config('request.jwt.claims', null, true);
 select ops.close_briefing((select id from ops.weeks where week_start = ops.week_start_for(now())));
 set local role authenticated;
 
+-- === Attack 12: a FRESH commit, not merely an alteration, once the
+-- briefing has closed. taskB has never been committed before this
+-- point in the file (it is only touched by the cancellation ladder
+-- further down) -- distinct from the "alter an existing commitment"
+-- attacks below, which exercise the same trigger branch but starting
+-- from is_committed = true rather than false.
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('commitments',
+  'attack 12: staff cannot make a brand-new commitment once the briefing has closed',
+  $sql$update ops.tasks set is_committed = true,
+         committed_week_id = week_id, committed_points = coalesce(points_override, catalog_points, 0)
+       where id = (select v from t_meta where k='taskB')$sql$);
+
 select pg_temp.become((select uid from p where k='sales'));
 select pg_temp.expect_blocked('commitments',
   'nobody can alter a commitment after the briefing closes (owner tries to uncommit)',
@@ -911,6 +924,185 @@ select pg_temp.expect_rows('purge',
 select pg_temp.expect_rows('purge',
   'a second run is a no-op (idempotent)',
   $sql$select core.purge_due_accounts()$sql$, 0);
+
+reset role;
+
+-- =======================================================================
+-- Read-only founder accounts (20260910120100_core_read_only_accounts):
+-- ERC/DCA -- authority = founder, is_clearing_founder = false,
+-- read_only = true. Must see exactly what oversight sees and write
+-- nothing at all. One attack per write surface from the coder's sweep
+-- checklist. `readonly` proves the guard against a plain founder-level
+-- account (the real ERC/DCA shape); `readonly_admin` additionally
+-- proves the guard stands even ahead of the admin bypass, since several
+-- of the triggers/RPCs check core.is_read_only() before
+-- core.is_system_caller() or core.is_admin().
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+
+insert into t_ids (k, v)
+select k, gen_random_uuid() from unnest(array['readonly', 'readonly_admin']) as k;
+insert into auth.users (id, email, instance_id, aud, role)
+select v, 'test-' || k || '@lra.invalid', '00000000-0000-0000-0000-000000000000',
+       'authenticated', 'authenticated'
+from t_ids where k in ('readonly', 'readonly_admin');
+insert into core.people (person_code, first_name, last_name, email)
+select 'TEST-' || upper(k), initcap(k), 'Persona', 'test-' || k || '@lra.invalid'
+from t_ids where k in ('readonly', 'readonly_admin');
+insert into core.users (id, email, authority, person_id, read_only)
+select t.v, 'test-' || t.k || '@lra.invalid',
+       (case when t.k = 'readonly_admin' then 'admin' else 'founder' end)::core.authority,
+       (select id from core.people where person_code = 'TEST-' || upper(t.k)),
+       true
+from t_ids t where t.k in ('readonly', 'readonly_admin');
+insert into core.memberships (user_id, module, position)
+select v, 'ops', 'other' from t_ids where k in ('readonly', 'readonly_admin');
+
+set local role authenticated;
+
+-- === Reads are UNTOUCHED: a read-only founder sees exactly what
+--     oversight sees (same full-visibility count as attack 26's
+--     oversight assertion). ===
+
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_rows('read-only',
+  'a read-only founder still reads every test person, same as oversight',
+  $sql$select count(*) from core.people where person_code like 'TEST-%'$sql$,
+  (select count(*)::int from t_ids));
+select pg_temp.expect_rows('read-only',
+  'a read-only founder still reads every visible TEST task',
+  $sql$select count(*) from ops.tasks where title like 'TEST-%'$sql$,
+  (select count(*)::int from t_meta where k in ('main', 'task2', 'task3', 'taskA', 'taskB')));
+
+-- === core.people / core.users / core.memberships ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot insert a core.people row (also not admin, belt and suspenders)',
+  $sql$insert into core.people (person_code, first_name, last_name, email)
+       values ('TEST-RO-FORGED', 'Forged', 'Person', 'test-ro-forged@lra.invalid')$sql$);
+
+select pg_temp.become((select uid from p where k='readonly_admin'));
+select pg_temp.expect_blocked('read-only',
+  'a read-only ADMIN cannot update core.users -- the guard stands ahead of the admin bypass',
+  $sql$update core.users set last_login = now() where id = (select uid from p where k='readonly_admin')$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only ADMIN cannot grant authority to another account either',
+  $sql$update core.users set authority = 'admin' where id = (select uid from p where k='sales')$sql$);
+
+-- === core.notifications -- own is_read toggle ===
+
+-- Seeded as the system caller: there is no INSERT policy for
+-- `authenticated` on core.notifications at all (the forgeable-inbox
+-- defect, core_notifications_audit.sql) -- the read-only persona could
+-- not create this fixture row for themselves even if the attack below
+-- did not exist.
+reset role;
+select set_config('request.jwt.claims', null, true);
+insert into core.notifications (user_id, title, message)
+select (select uid from p where k='readonly'), 'TEST notification', 'seeded for the read-only guard';
+set local role authenticated;
+
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot even mark their own notification read',
+  $sql$update core.notifications set is_read = true
+       where user_id = (select uid from p where k='readonly') and title = 'TEST notification'$sql$);
+
+-- === core.audit_logs ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot insert an audit row, even claiming themselves',
+  $sql$insert into core.audit_logs (actor_id, action, entity_type)
+       values ((select uid from p where k='readonly'), 'TEST-readonly-forge', 'test.forge')$sql$);
+
+-- === ops.settings ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot change ops.settings',
+  $sql$update ops.settings set recurring_cap_pct = 0.30$sql$);
+
+-- === ops.weeks (direct write, and the three RPCs) ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot insert a new ops.weeks row',
+  $sql$insert into ops.weeks (week_start, state) values ('2099-03-02', 'planning')$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot directly update ops.weeks',
+  $sql$update ops.weeks set briefing_opened_at = now() where week_start = ops.week_start_for(now())$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot call ops.generate_recurring_tasks',
+  $sql$select ops.generate_recurring_tasks((select id from ops.weeks where week_start = ops.week_start_for(now())))$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot call ops.roll_over_week',
+  $sql$select ops.roll_over_week((select id from ops.weeks where week_start = ops.week_start_for(now())))$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot call ops.close_week',
+  $sql$select ops.close_week((select id from ops.weeks where week_start = ops.week_start_for(now())))$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot call ops.open_briefing',
+  $sql$select ops.open_briefing((select id from ops.weeks where week_start = ops.week_start_for(now())))$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot call ops.close_briefing',
+  $sql$select ops.close_briefing((select id from ops.weeks where week_start = ops.week_start_for(now())))$sql$);
+
+-- === ops.task_types / ops.recurring_templates, incl. the hard-delete RPC ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot re-price a catalog type',
+  $sql$update ops.task_types set default_points = 21 where id = (select v from t_meta where k='task_type')$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot insert a new catalog type',
+  $sql$insert into ops.task_types (name, category, guideline_note, is_active)
+       values ('TEST-RO-forged-type', 'Test', 'DRAFT — forged', true)$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot call ops.delete_task_type_if_unused',
+  $sql$select ops.delete_task_type_if_unused((select v from t_meta where k='task_type'))$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot edit a recurring template',
+  $sql$update ops.recurring_templates set is_active = is_active
+       where id = (select id from ops.recurring_templates where position = 'sales' limit 1)$sql$);
+
+-- === ops.tasks -- create, transition, delete ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot create a new task',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+       select w.id, (select uid from p where k='readonly'), (select v from t_meta where k='task_type'),
+              'TEST-RO-forged-task', 'todo', (select uid from p where k='readonly')
+       from ops.weeks w where w.week_start = ops.week_start_for(now())$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot move someone else''s task, even oversight-eligible transitions',
+  $sql$update ops.tasks set status = 'in_progress' where id = (select v from t_meta where k='main')$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot set a points override',
+  $sql$update ops.tasks set points_override = 13, points_override_reason = 'read-only trying anyway'
+       where id = (select v from t_meta where k='main')$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot delete a task',
+  $sql$delete from ops.tasks where id = (select v from t_meta where k='main') and status = 'todo'$sql$);
+
+-- === ops.task_blocks / ops.task_notes ===
+
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot declare a block',
+  $sql$insert into ops.task_blocks (task_id, target, blocking_task_id, reason, created_by)
+       values ((select v from t_meta where k='main'), 'task',
+               (select v from t_meta where k='taskA'), 'read-only trying to declare a block',
+               (select uid from p where k='readonly'))$sql$);
+select pg_temp.expect_blocked('read-only',
+  'a read-only founder cannot add a worklog note, even to a task they could otherwise see',
+  $sql$insert into ops.task_notes (task_id, author_user_id, body)
+       values ((select v from t_meta where k='main'), (select uid from p where k='readonly'),
+               'read-only trying to narrate a task that is not theirs')$sql$);
+
+-- === core.purge_due_accounts -- the one admin-only surface, proven via readonly_admin ===
+
+select pg_temp.become((select uid from p where k='readonly_admin'));
+select pg_temp.expect_blocked('read-only',
+  'a read-only ADMIN cannot run core.purge_due_accounts',
+  $sql$select core.purge_due_accounts()$sql$);
 
 reset role;
 
