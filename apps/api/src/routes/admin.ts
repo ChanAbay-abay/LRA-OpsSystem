@@ -41,6 +41,10 @@ const inviteSchema = z.object({
   position: z.enum(POSITIONS).default('other'),
 });
 
+const deleteSchema = z.object({
+  reason: z.string().optional(),
+});
+
 const patchSchema = z.object({
   isActive: z.boolean().optional(),
   authority: z.enum(AUTHORITIES).optional(),
@@ -194,7 +198,9 @@ export default async function adminRoutes(app: FastifyInstance) {
     const { data: users, error } = await db
       .schema('core')
       .from('users')
-      .select('id, email, authority, is_active, is_clearing_founder, last_login, person_id, created_at');
+      .select(
+        'id, email, authority, is_active, is_clearing_founder, last_login, person_id, created_at, deleted_at, deleted_by, purge_due_at'
+      );
     if (error) throw error;
 
     const { data: memberships } = await db
@@ -257,6 +263,97 @@ export default async function adminRoutes(app: FastifyInstance) {
     });
 
     return { data: { id, ...body } };
+  });
+
+  // ---------------------------------------------------------------------
+  // Soft delete, with a 14-day grace period — Chan: "admin should also
+  // be able to delete the accounts when needed and the accounts will
+  // have 2 weeks before being deleted permanently."
+  //
+  // The real enforcement is the database (20260910090000_core_soft_-
+  // delete_accounts.sql): a trigger refuses self-deletion and deleting
+  // the last active admin, forces is_active false and computes
+  // purge_due_at server-side, and RLS treats a soft-deleted caller as
+  // having no access at all, immediately, everywhere — not just here.
+  // The checks below are a friendlier first line, not the guard itself.
+  // ---------------------------------------------------------------------
+
+  app.post('/users/:id/delete', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = deleteSchema.parse(req.body ?? {});
+
+    if (id === req.user.id) {
+      throw new ApiError(400, 'You cannot delete your own account.', 'SELF_DELETE');
+    }
+
+    const db = serviceClient();
+    const { data: updated, error } = await db
+      .schema('core')
+      .from('users')
+      .update({
+        deleted_at: new Date().toISOString(),
+        deleted_by: req.user.id,
+        is_active: false,
+      })
+      .eq('id', id)
+      .select('id, deleted_at, purge_due_at')
+      .single();
+    if (error) throw error;
+
+    await writeAudit(req.user, {
+      module: 'ops',
+      action: 'admin.users.delete',
+      entityType: 'core.users',
+      entityId: id,
+      newValues: { reason: body.reason ?? null, purgeDueAt: updated.purge_due_at },
+    });
+
+    return { data: updated };
+  });
+
+  app.post('/users/:id/restore', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = serviceClient();
+
+    const { data: updated, error } = await db
+      .schema('core')
+      .from('users')
+      .update({ deleted_at: null })
+      .eq('id', id)
+      .select('id, is_active')
+      .single();
+    if (error) throw error;
+
+    await writeAudit(req.user, {
+      module: 'ops',
+      action: 'admin.users.restore',
+      entityType: 'core.users',
+      entityId: id,
+    });
+
+    return { data: updated };
+  });
+
+  // Manual trigger for the permanent purge. Idempotent, so calling it
+  // more than once (or before a scheduled runner exists) is harmless —
+  // it only ever touches accounts whose 14-day purge_due_at has already
+  // passed. A pg_cron job calling `core.purge_due_accounts()` directly
+  // is still needed for this to run unattended (PLAN.md Phase 9 /
+  // Chan's own note) — this endpoint is the manual/administrative path.
+  app.post('/purge-due-accounts', async (req) => {
+    const db = serviceClient();
+    const { data, error } = await db.schema('core').rpc('purge_due_accounts');
+    if (error) throw error;
+
+    const purgedCount = data as number;
+    await writeAudit(req.user, {
+      module: 'ops',
+      action: 'admin.users.purge',
+      entityType: 'core.users',
+      newValues: { purgedCount },
+    });
+
+    return { data: { purgedCount } };
   });
 
   // ---------------------------------------------------------------------

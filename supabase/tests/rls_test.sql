@@ -713,6 +713,188 @@ select pg_temp.expect_rows('CANARY', 'MUST FAIL: staff reads every test person',
   -- went red because it still expected 5. The invariant is "sees ALL of them".
   (select count(*)::int from t_ids));
 
+-- =======================================================================
+-- Soft delete + 14-day purge (20260910090000_core_soft_delete_accounts)
+-- =======================================================================
+--
+-- Fixtures: three synthetic admins (so "the last admin" can be tested
+-- for real, without assuming anything about whether a production admin
+-- row already exists) and one throwaway staff account to soft-delete
+-- and restore, kept separate from every persona the attacks above
+-- depend on.
+
+insert into t_ids (k, v)
+select k, gen_random_uuid() from unnest(array['admin1','admin2','admin3','staff_del']) as k;
+insert into auth.users (id, email, instance_id, aud, role)
+select v, 'test-' || k || '@lra.invalid', '00000000-0000-0000-0000-000000000000',
+       'authenticated', 'authenticated'
+from t_ids where k in ('admin1','admin2','admin3','staff_del');
+insert into core.people (person_code, first_name, last_name, email)
+select 'TEST-' || upper(k), initcap(k), 'Persona', 'test-' || k || '@lra.invalid'
+from t_ids where k in ('admin1','admin2','admin3','staff_del');
+insert into core.users (id, email, authority, person_id)
+select t.v, 'test-' || t.k || '@lra.invalid',
+       (case when t.k = 'staff_del' then 'staff' else 'admin' end)::core.authority,
+       (select id from core.people where person_code = 'TEST-' || upper(t.k))
+from t_ids t where t.k in ('admin1','admin2','admin3','staff_del');
+insert into core.memberships (user_id, module, position)
+select v, 'ops', 'other' from t_ids where k in ('admin1','admin2','admin3','staff_del');
+
+-- === Non-admin cannot soft-delete anyone ===============================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('soft-delete',
+  'staff cannot soft-delete another account',
+  $sql$update core.users set deleted_at = now(), deleted_by = (select uid from p where k='sales'), is_active = false
+       where id = (select uid from p where k='staff_del')$sql$);
+
+-- === A legitimate soft-delete by an admin ==============================
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_allowed('soft-delete',
+  'admin can soft-delete a staff account',
+  $sql$update core.users set deleted_at = now(), deleted_by = (select uid from p where k='admin1'), is_active = false
+       where id = (select uid from p where k='staff_del')$sql$);
+
+-- === Non-admin cannot restore anyone ====================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('soft-delete',
+  'staff cannot restore a soft-deleted account',
+  $sql$update core.users set deleted_at = null where id = (select uid from p where k='staff_del')$sql$);
+
+-- === A soft-deleted user cannot read or write anything ==================
+-- Tested as the soft-deleted user's own token, direct against Postgres,
+-- not just through the API's is_active check.
+
+select pg_temp.become((select uid from p where k='staff_del'));
+select pg_temp.expect_rows('soft-delete',
+  'a soft-deleted user sees zero ops.tasks rows despite an active ops membership row',
+  $sql$select count(*) from ops.tasks where title like 'TEST-%'$sql$, 0);
+select pg_temp.expect_rows('soft-delete',
+  'a soft-deleted user cannot even read their own core.people row',
+  $sql$select count(*) from core.people where person_code = 'TEST-STAFF_DEL'$sql$, 0);
+select pg_temp.expect_blocked('soft-delete',
+  'a soft-deleted user cannot update their own core.users row',
+  $sql$update core.users set email = 'still-here@lra.invalid' where id = (select uid from p where k='staff_del')$sql$);
+
+-- === Admin restore, fully reversible within the grace period ===========
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_allowed('soft-delete',
+  'admin can restore a soft-deleted account',
+  $sql$update core.users set deleted_at = null where id = (select uid from p where k='staff_del')$sql$);
+select pg_temp.expect_rows('soft-delete',
+  'a restored account is_active is forced back to true by the guard',
+  $sql$select count(*) from core.users where id = (select uid from p where k='staff_del') and is_active$sql$, 1);
+
+-- === An admin cannot delete their own account ===========================
+
+select pg_temp.expect_blocked('soft-delete',
+  'an admin cannot soft-delete themselves',
+  $sql$update core.users set deleted_at = now(), deleted_by = (select uid from p where k='admin1'), is_active = false
+       where id = (select uid from p where k='admin1')$sql$);
+
+-- === The last remaining active admin cannot be deleted ==================
+
+select pg_temp.expect_allowed('soft-delete',
+  'admin can delete a second admin while others remain active',
+  $sql$update core.users set deleted_at = now(), deleted_by = (select uid from p where k='admin1'), is_active = false
+       where id = (select uid from p where k='admin2')$sql$);
+select pg_temp.expect_allowed('soft-delete',
+  'admin can delete a third admin while others remain active',
+  $sql$update core.users set deleted_at = now(), deleted_by = (select uid from p where k='admin1'), is_active = false
+       where id = (select uid from p where k='admin3')$sql$);
+
+-- Reduce every OTHER active admin in the table (there may or may not be
+-- a real one, depending on environment) to deleted too, one row at a
+-- time -- never in one bulk UPDATE, whose trigger exception would abort
+-- the whole statement and make the outcome depend on row-processing
+-- order instead of deterministically reaching "admin1 is the only one
+-- left".
+do $$
+declare
+  r record;
+begin
+  for r in
+    select id from core.users
+    where authority = 'admin' and is_active and deleted_at is null
+      and id <> (select v from t_ids where k = 'admin1')
+  loop
+    update core.users
+    set deleted_at = now(),
+        deleted_by = (select v from t_ids where k = 'admin1'),
+        is_active = false
+    where id = r.id;
+  end loop;
+end $$;
+
+select pg_temp.expect_rows('soft-delete',
+  'admin1 is now the sole remaining active admin',
+  $sql$select count(*) from core.users where authority = 'admin' and is_active and deleted_at is null$sql$, 1);
+
+-- Attempted as the system caller (no JWT claims at all), not as admin1
+-- itself -- specifically to prove this is the *last-admin* invariant
+-- firing and not the separate self-delete guard: is_system_caller()
+-- bypasses the self-delete check but the last-admin check has no such
+-- bypass, on purpose (PLAN.md's "SECURITY DEFINER bypasses RLS by
+-- design and must recheck" lesson applied to a trigger, not a
+-- function).
+reset role;
+select pg_temp.expect_blocked('soft-delete',
+  'the last remaining active admin cannot be deleted, even by the system caller',
+  $sql$update core.users set deleted_at = now(), deleted_by = (select v from t_ids where k = 'admin2'), is_active = false
+       where id = (select v from t_ids where k = 'admin1')$sql$);
+set local role authenticated;
+
+-- === core.purge_due_accounts() ==========================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('purge',
+  'a non-admin cannot run core.purge_due_accounts()',
+  $sql$select core.purge_due_accounts()$sql$);
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_rows('purge',
+  'purge_due_accounts ignores an account whose purge_due_at is still in the future',
+  -- staff_del was restored above; re-delete it to get a fresh,
+  -- not-yet-due purge_due_at (now() + 14 days, set by the guard).
+  $sql$with d as (
+         update core.users set deleted_at = now(), deleted_by = (select uid from p where k='admin1'), is_active = false
+         where id = (select uid from p where k='staff_del')
+       )
+       select core.purge_due_accounts()$sql$, 0);
+
+-- Backdating purge_due_at here is an admin/system action exercising the
+-- function's own logic, not a path a client can reach (the privilege
+-- guard restricts that column to admin/system already, and the API
+-- never exposes it as user input) -- this is the test proving the
+-- 14-day boundary is respected, not a demonstration of a client attack.
+select pg_temp.expect_allowed('purge',
+  'admin backdates purge_due_at to exercise the due path',
+  $sql$update core.users set purge_due_at = now() - interval '1 minute'
+       where id = (select uid from p where k='staff_del')$sql$);
+
+select pg_temp.expect_rows('purge',
+  'purge_due_accounts purges exactly the one due account',
+  $sql$select core.purge_due_accounts()$sql$, 1);
+
+select pg_temp.expect_rows('purge',
+  'the auth.users login is gone after purge',
+  $sql$select count(*) from auth.users where id = (select uid from p where k='staff_del')$sql$, 0);
+
+select pg_temp.expect_rows('purge',
+  'core.users survives the purge -- ledger/task/audit attribution is never broken',
+  $sql$select count(*) from core.users where id = (select uid from p where k='staff_del')$sql$, 1);
+
+select pg_temp.expect_rows('purge',
+  'core.people identity is scrubbed to a tombstone, not deleted',
+  $sql$select count(*) from core.people where person_code = 'TEST-STAFF_DEL' and email like '%+deleted@purged.lra.invalid'$sql$, 1);
+
+select pg_temp.expect_rows('purge',
+  'a second run is a no-op (idempotent)',
+  $sql$select core.purge_due_accounts()$sql$, 0);
+
 reset role;
 
 -- ---------------------------------------------------------------------
