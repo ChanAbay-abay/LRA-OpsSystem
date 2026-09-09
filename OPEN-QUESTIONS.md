@@ -98,11 +98,14 @@ demo account, and both get a quick-switch pill on `/login`. Provisioned as
 `erc-demo@ops-demo.invalid` and `dca-demo@ops-demo.invalid` by `scripts/seed-demo.mjs`,
 `authority = 'founder'`, `is_clearing_founder = false`, `position = 'founder'`.
 
-**They are NOT read-only yet.** `core.users.read_only` does not exist on the database until
-the migration is applied, so today they hold full founder write access — they cannot clear
-points (that needs the clearing flag) but they can verify, close a briefing and resolve
-blocks. The seed prints a loud warning saying so, and re-running it after the migration sets
-the flag.
+**They ARE read-only as of 2026-09-10.** Chan applied the migration and re-ran the seed;
+verified directly against the database: `erc-demo` and `dca-demo` both carry
+`read_only = true`, `founder-demo` carries `read_only = false`. Chan also confirmed by hand
+that ERC cannot make edits in the app. The RLS suite passes 109/0 against these rules (#14).
+
+Remaining on this: the write controls are still **visible** to an observer and merely fail
+when used, which violates this app's own rule that the UI must never offer what the database
+will refuse. The UI gating is in progress.
 
 **Still needed from Chan, when the real accounts are made:** the actual email addresses, and
 whether the LRA founder account is his father's or a shared brokerage inbox.
@@ -234,6 +237,31 @@ The seam is preserved instead: history (`core.audit_logs`) and delivery
 - **B)** Build it now anyway — but then #1 must be answered first, and it becomes Phase 9.
 
 **Assumption: A.** Say the word and it becomes B.
+
+---
+
+## 14. The RLS suite cannot be run from the Supabase SQL editor — **resolved, worth remembering**
+
+Chan tried to run `supabase/tests/rls_test.sql` by pasting it into the dashboard's SQL editor
+on 2026-09-10 and got:
+
+    ERROR: 42P01: relation "t_results" does not exist
+
+**Not a broken suite.** The web SQL editor splits a pasted script into separate statements, so
+the temp tables the suite builds (`t_results`, `t_ids`, `t_meta`) vanish between them. The file
+is deliberately one transaction, `begin;` through `rollback;`.
+
+**What works, in order of preference:**
+
+1. `psql "$DATABASE_URL" -f supabase/tests/rls_test.sql` (or `npm run test:rls`) — needs psql,
+   which is not installed on Chan's machine.
+2. **A single Supabase MCP `execute_sql` call containing the whole file verbatim.** One call is
+   one session, so the temp tables survive. This is how the run below was produced.
+
+**Result, 2026-09-10, against the live project:** `ALL PASS (canary correctly failed)`,
+**109 passed / 0 failed**, both canaries correctly red. This is the first time the suite has
+been run since attack 12 and the ~20-assertion read-only block were added, and it is what
+turns the read-only sweep from "correct on paper" into "enforced by the database."
 
 ---
 

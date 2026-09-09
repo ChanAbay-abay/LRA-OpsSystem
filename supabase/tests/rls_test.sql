@@ -8,6 +8,17 @@
 --
 --     psql "$DATABASE_URL" -f supabase/tests/rls_test.sql
 --
+-- DO NOT paste this file into the Supabase web SQL editor. That editor
+-- splits a script into separate statements, and the temp tables below
+-- (`t_results`, `t_ids`, `t_meta`) do not survive the split -- the run
+-- dies with `relation "t_results" does not exist`, which looks like a
+-- broken suite and is not. Tried and confirmed 2026-09-10.
+--
+-- Without psql, the working route is a single Supabase MCP
+-- `execute_sql` call containing this entire file verbatim; one call is
+-- one session, so the temp tables hold. That is how the 109/0 pass on
+-- 2026-09-10 was produced.
+--
 -- Structure and the two rules it exists to enforce are copied from
 -- LRA-HR's suite (which was itself a rewrite after its first version
 -- passed 14/14 against a wide-open database):
