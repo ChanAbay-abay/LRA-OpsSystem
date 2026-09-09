@@ -17,6 +17,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireMembership, requireOversight } from '../middleware/auth.js';
 import { userClient } from '../lib/supabase.js';
+import { ApiError } from '../lib/domain.js';
 
 const FIB = [1, 2, 3, 5, 8, 13, 21] as const;
 
@@ -104,6 +105,19 @@ export default async function catalogRoutes(app: FastifyInstance) {
     return { data };
   });
 
+  // The only DELETE path: `ops.delete_task_type_if_unused` checks
+  // oversight AND "never referenced by any task or template" itself, so
+  // this route cannot be tricked into a hard delete a route bug thinks
+  // is safe. Everything else is deactivate (`PATCH { isActive: false }`
+  // above) -- "delete" here means that, per Chan's explicit decision.
+  app.delete('/:id', { onRequest: requireOversight() }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { error } = await db.schema('ops').rpc('delete_task_type_if_unused', { p_id: id });
+    if (error) throw new ApiError(409, error.message, error.code ?? 'DELETE_REFUSED');
+    return reply.code(204).send();
+  });
+
   app.get('/:id/revisions', async (req) => {
     const { id } = req.params as { id: string };
     const db = userClient(req.accessToken);
@@ -168,5 +182,14 @@ export default async function catalogRoutes(app: FastifyInstance) {
       .single();
     if (error) throw error;
     return { data };
+  });
+
+  // Same "hard-delete only if unused" rule as task types, above.
+  app.delete('/recurring/:id', { onRequest: requireOversight() }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { error } = await db.schema('ops').rpc('delete_recurring_template_if_unused', { p_id: id });
+    if (error) throw new ApiError(409, error.message, error.code ?? 'DELETE_REFUSED');
+    return reply.code(204).send();
   });
 }
