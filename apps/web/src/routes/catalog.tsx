@@ -1,13 +1,25 @@
 /**
  * LRA Global Ops :: /catalog — the task catalog
  *
- * PRD.md §3.3 / OPEN-QUESTIONS.md #3: every seeded type ships DRAFT with
- * no point value. This screen is where a real number replaces that —
- * "the catalog is the company's written statement of what it values",
- * so pricing is a deliberate act (a dedicated dialog, not an inline
- * click-to-edit), and the DRAFT banner stays up for as long as any row
- * is still unpriced. Read by every ops member; only GM/founder/admin see
- * the price/edit controls, matching `ops.task_types` RLS exactly.
+ * PRD.md §3.3 / OPEN-QUESTIONS.md #3: every seeded type ships unpriced.
+ * This screen is where a real number replaces that — "the catalog is the
+ * company's written statement of what it values", so pricing is a
+ * deliberate act (a dedicated dialog, not an inline click-to-edit).
+ *
+ * `20260909180000_placeholder_points_and_admin_clearing.sql` gave all 15
+ * seeded types a `default_points` value so scores stop reading zero
+ * during the trial — but Chan's own migration comment is explicit these
+ * are NOT the founder's real answer, and every `guideline_note` it wrote
+ * carries a literal `PLACEHOLDER — ` prefix to say so. The banner and
+ * the per-row indicator therefore key off that prefix, not off
+ * `default_points == null` — a row can be non-null and still be a
+ * placeholder, and checking only for null would go silent the moment
+ * this migration ran while nothing had actually been priced by Chan.
+ * A row a human has genuinely priced (via the Price/Edit dialogs below,
+ * which strip the prefix on save) drops out of the count for good.
+ *
+ * Read by every ops member; only GM/founder/admin see the price/edit
+ * controls, matching `ops.task_types` RLS exactly.
  *
  * Chan: "keep those task types for now... add an option where you can
  * CRUD the task types incase there are more repeating ones." This
@@ -35,6 +47,15 @@ import { api, ApiClientError } from '@/lib/api';
 
 const FIB = [1, 2, 3, 5, 8, 13, 21];
 const POSITIONS = ['founder', 'gm', 'sales', 'broker', 'hr_officer', 'accounting', 'other'] as const;
+
+// The one signal that survives a placeholder having a real-looking
+// point value: the prefix Chan's migration wrote onto every seeded
+// note. `default_points == null` alone is not enough (see the file
+// header comment) — an unpriced brand-new type still counts too, so
+// either signal marks a row as not-really-priced.
+function isPlaceholder(t: Pick<TaskType, 'guideline_note' | 'default_points'>): boolean {
+  return t.default_points == null || /^(PLACEHOLDER|DRAFT)\s*—/.test(t.guideline_note);
+}
 
 interface TaskType {
   id: string;
@@ -70,7 +91,7 @@ export function CatalogPage() {
   const [deletingTemplate, setDeletingTemplate] = React.useState<RecurringTemplate | null>(null);
 
   const types = typesResource.data;
-  const draftCount = types?.filter((t) => t.is_active && t.default_points == null).length ?? 0;
+  const draftCount = types?.filter((t) => t.is_active && isPlaceholder(t)).length ?? 0;
 
   async function toggleActive(t: TaskType) {
     try {
@@ -107,8 +128,9 @@ export function CatalogPage() {
 
       {draftCount > 0 ? (
         <div className="mb-4 rounded-lg border border-[#EBD9AE] bg-[#FCF3E3] px-4 py-3 text-body-sm text-[#8A5A00]">
-          {draftCount} of {types?.length} catalog types are still DRAFT and unpriced. Commitments made against a DRAFT value
-          are not real commitments — the founder pricing every row here is a gate on the Monday briefing.
+          {draftCount} of {types?.length} catalog types are still PLACEHOLDER pricing — a starting number so the trial isn't
+          scoring zero, not the founder's real answer. Commitments made against a placeholder value are not real
+          commitments — Chan pricing every row here for real is a gate on the Monday briefing.
         </div>
       ) : null}
 
@@ -130,12 +152,17 @@ export function CatalogPage() {
                   </p>
                   <p className="text-body-sm text-ink-3">{t.guideline_note}</p>
                 </div>
-                <div className="flex w-20 shrink-0 items-center justify-end">
+                <div className="flex w-20 shrink-0 flex-col items-end justify-center">
                   {t.default_points != null ? (
-                    <span className="num text-num-md text-ink">{t.default_points}</span>
+                    <span className={`num text-num-md ${isPlaceholder(t) ? 'text-pending border-b border-dashed border-current' : 'text-ink'}`}>
+                      {t.default_points}
+                    </span>
                   ) : (
                     <span className="num text-num-sm text-pending">DRAFT</span>
                   )}
+                  {t.default_points != null && isPlaceholder(t) ? (
+                    <span className="text-micro text-pending">placeholder</span>
+                  ) : null}
                 </div>
                 {canEdit ? (
                   <div className="flex shrink-0 items-center gap-1.5">
@@ -260,7 +287,7 @@ export function CatalogPage() {
 
 function PriceDialog({ type, onClose, onDone }: { type: TaskType; onClose: () => void; onDone: () => void }) {
   const [points, setPoints] = React.useState<number | null>(type.default_points);
-  const [note, setNote] = React.useState(type.guideline_note.replace(/^DRAFT\s*—\s*/, ''));
+  const [note, setNote] = React.useState(type.guideline_note.replace(/^(PLACEHOLDER|DRAFT)\s*—\s*/, ''));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
