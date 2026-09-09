@@ -864,20 +864,26 @@ Deploy: build in CI, ship `dist/`. The VPS has 1 core and must not build anythin
 
 ## 7. Phases
 
+Each phase carries a **Status** line and per-step checkboxes. A `[x]` means the artifact was
+verified to exist in the repo — not that it was re-tested. `grep -n '^[0-9]\+\. \[ \]' PLAN.md`
+lists everything still outstanding. Update the box in the same change that lands the step.
+
 Every phase ends with a command to run and an output to read. Nothing is done without both.
 
 ### Phase 0 — The rebuild
 
-1. **Verify `backup/pre-rebuild-snapshot.json` exists and parses**, and that its row counts
+**Status: done.** `supabase/migrations/20260908120000_000_drop_legacy_hr.sql` applied; `public` rebuilt.
+
+1. [x] **Verify `backup/pre-rebuild-snapshot.json` exists and parses**, and that its row counts
    match the census in §0.1. If it does not parse, stop. This is the only rollback artifact.
-2. `supabase init`; `supabase link --project-ref <ref>`; commit `supabase/config.toml`.
-3. Migration `000_drop_legacy_hr.sql` per §2.1. **`auth` is not touched.**
-4. Confirm in the Supabase Dashboard that Chan's account still exists in Authentication.
-5. `reference/statutory-rates-2026.json` — the four `statutory_rate_config` rows, with the
+2. [x] `supabase init`; `supabase link --project-ref <ref>`; commit `supabase/config.toml`.
+3. [x] Migration `000_drop_legacy_hr.sql` per §2.1. **`auth` is not touched.**
+4. [x] Confirm in the Supabase Dashboard that Chan's account still exists in Authentication.
+5. [x] `reference/statutory-rates-2026.json` — the four `statutory_rate_config` rows, with the
    SSS-bracket warning in a header comment.
-6. LRA-HR legacy banner: `README.md` top + the rewritten `docs/STATUS.md` paragraph. Nothing
+6. [x] LRA-HR legacy banner: `README.md` top + the rewritten `docs/STATUS.md` paragraph. Nothing
    else in that repo is touched.
-7. `.gitignore` already excludes `backup/`; confirm.
+7. [x] `.gitignore` already excludes `backup/`; confirm.
 
 **Verify:**
 - `select count(*) from information_schema.tables where table_schema = 'public'` → **0**.
@@ -886,25 +892,27 @@ Every phase ends with a command to run and an output to read. Nothing is done wi
 
 ### Phase 1 — `core`, `ops` schemas, API, auth, tokens
 
-1. Root `package.json` (workspaces, `db:push`, `db:reset:local`, `test:rls`, **no `db:reset`**).
-2. Migrations: `core_identity` (§2.2), `core_notifications_audit` (§2.3),
+**Status: done.** Both schemas, RLS migration, `packages/ops-scoring`, `apps/api`, `apps/web`, `supabase/tests/rls_test.sql` and `.github/workflows/ci.yml` all present.
+
+1. [x] Root `package.json` (workspaces, `db:push`, `db:reset:local`, `test:rls`, **no `db:reset`**).
+2. [x] Migrations: `core_identity` (§2.2), `core_notifications_audit` (§2.3),
    `ops_foundation` (§2.4 settings/weeks), `core_ops_rls` (§2.7 policies **and the
    per-schema revoke block**).
-3. **Append `core` and `ops` to Supabase → Data API → Exposed schemas.** Append, never
+3. [x] **Append `core` and `ops` to Supabase → Data API → Exposed schemas.** Append, never
    replace — `public` must stay listed even though it is empty, or PostgREST's own
    introspection paths change.
-4. `packages/ops-scoring` with `weeks.ts` + tests.
-5. `apps/api`: `server.ts`, `lib/env.ts`, `lib/supabase.ts` (schema-scoped clients for `core`
+4. [x] `packages/ops-scoring` with `weeks.ts` + tests.
+5. [x] `apps/api`: `server.ts`, `lib/env.ts`, `lib/supabase.ts` (schema-scoped clients for `core`
    and `ops`), `lib/domain.ts`, `middleware/auth.ts` — **authority read from `core.users`,
    never from the JWT**.
-6. `apps/web`: Vite + React 19 + router; copy `design/tokens.css` into `src/index.css`;
+6. [x] `apps/web`: Vite + React 19 + router; copy `design/tokens.css` into `src/index.css`;
    `npx shadcn@latest init` (TypeScript, `src/components/ui`, CSS variables **on**); alias
    shadcn's token names to DESIGN.md's; install `@dnd-kit`, `lucide-react`, the two
    `@fontsource-variable` packages, `clsx`, `tailwind-merge`. `/login` + a placeholder `/`.
    **Both tsconfigs strict.**
-7. `supabase/tests/rls_test.sql` — harness, canary, attacks 1, 2, 16, 20, 21, 22, 23, 24, 25,
+7. [x] `supabase/tests/rls_test.sql` — harness, canary, attacks 1, 2, 16, 20, 21, 22, 23, 24, 25,
    26, 27. `scripts/run-rls-tests.sh`.
-8. `.github/workflows/ci.yml` including the `supabase start` RLS job.
+8. [x] `.github/workflows/ci.yml` including the `supabase start` RLS job.
 
 **Verify:**
 - `npm run build && npm test` green.
@@ -921,6 +929,8 @@ tokens and CI before anything depends on them.
 
 ### Phase 2 — Provisioning
 
+**Status: mostly done.** `routes/admin.ts`, `/admin/users`, `scripts/provision.md` present. **`/set-password` first-login flow is not built** — no route and no reference anywhere in `apps/web/src`.
+
 Chan's account is the only login in the system. Until three more people can sign in, every
 later phase can only be demonstrated by one person pretending to be four — which is exactly
 how a ladder bug survives to production.
@@ -928,7 +938,7 @@ how a ladder bug survives to production.
 The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, no UNIQUE
 `employee_id` to work around, no salary columns to leave at zero.
 
-1. `apps/api/src/routes/admin.ts`, guarded `requireAuthority('admin')` — Chan only, not the
+1. [x] `apps/api/src/routes/admin.ts`, guarded `requireAuthority('admin')` — Chan only, not the
    founder and not the GM. Provisioning is a system act.
    - `POST /api/admin/users` → `inviteUserByEmail` (**no credential ever passes through this
      system, an agent, or a chat log**), then `core.people`, then `core.users` with
@@ -938,12 +948,12 @@ The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, 
    - `GET` / `PATCH` for listing and deactivating. Every call writes `core.audit_logs`;
      creating a `founder` is the highest-privilege action in the platform and must never be
      silent.
-2. `apps/web` `/admin/users` — table + invite dialog, showing invited / accepted / never
+2. [ ] `apps/web` `/admin/users` — table + invite dialog, showing invited / accepted / never
    logged in. `/set-password` first-login flow.
-3. `scripts/provision.md` — the SQL fallback, and the documented alternative
+3. [x] `scripts/provision.md` — the SQL fallback, and the documented alternative
    (`auth.admin.createUser` with a one-time password read out in person) **if the invite
    emails do not land**, which is plausible in a four-person office.
-4. RLS suite: a non-admin creating a user → refused; attack 23 re-verified from the Ops side.
+4. [x] RLS suite: a non-admin creating a user → refused; attack 23 re-verified from the Ops side.
 
 **Verify:**
 - Three invites → three `core.people`, three `core.users` (`gm`, `staff`, `staff`), three
@@ -959,9 +969,11 @@ The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, 
 
 ### Phase 3 — Catalog, tasks, board
 
-1. Migrations: `ops_catalog_tasks`, `ops_task_state_machine` (**INSERT and UPDATE guards in
+**Status: mostly done.** Catalog + task migrations, state machine, `/board` on `@dnd-kit`, `/catalog` all present. **RLS attacks 5, 7, 10 and 11 are missing** from `rls_test.sql`.
+
+1. [x] Migrations: `ops_catalog_tasks`, `ops_task_state_machine` (**INSERT and UPDATE guards in
    the same migration**), `ops_catalog_rls`.
-2. `ops_seed_catalog` — ~15 types grounded in what LRA actually does: **Brokerage** (prepare
+2. [x] `ops_seed_catalog` — ~15 types grounded in what LRA actually does: **Brokerage** (prepare
    and file an import entry; BOC clearance follow-up; tariff classification for a new
    commodity; resolve a hold or discrepancy; daily shipment status to clients),
    **Sales** (quotation turnaround within SLA; convert a website "Free Quotation" lead; client
@@ -972,10 +984,10 @@ The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, 
    judgement about his own business, and an agent guessing it would launder a guess into
    company policy. Every seeded `guideline_note` begins `DRAFT —`; `/catalog` shows a banner
    while any DRAFT row exists; **the founder re-pricing the catalog is a Phase 6 gate.**
-3. API `/api/catalog*`, `/api/tasks*`.
-4. Web `/board` on `@dnd-kit`, seven columns; the Blocked drop opens a Radix `Dialog`;
+3. [x] API `/api/catalog*`, `/api/tasks*`.
+4. [x] Web `/board` on `@dnd-kit`, seven columns; the Blocked drop opens a Radix `Dialog`;
    `/catalog`.
-5. RLS suite: attacks 3–11, 14, 15.
+5. [ ] RLS suite: attacks 3–11, 14, 15.
 
 **Verify:** drag `todo → in_progress → submitted`; as GM drag to `verified`; as staff try to
 drag your own `submitted` task to `cleared` — the UI shows the database's `42501` and the card
@@ -983,13 +995,15 @@ snaps back. `npm run test:rls` all pass, canary fails.
 
 ### Phase 4 — Ledger, approval chain, notifications
 
-1. Migration `ops_ledger` (+ append-only guard, `v_point_balances`); extend the transition
+**Status: mostly done.** `ops_ledger` + purge exception, `points.ts` / `notifications.ts` / `jobs.ts`, `/points` `/queue` `/inbox`, attack 13 covered. **No integration smoke test across HTTP.**
+
+1. [x] Migration `ops_ledger` (+ append-only guard, `v_point_balances`); extend the transition
    trigger with `create or replace` in a **new** migration — never edit an applied one.
-2. API `/api/points/*`, `/api/tasks/:id/override-points`, `/api/notifications*`,
+2. [x] API `/api/points/*`, `/api/tasks/:id/override-points`, `/api/notifications*`,
    `/api/jobs/drain-outbox`. `services/outbox.ts` — the in-app drainer.
-3. Web `/points`, `/queue` with per-item age in hours, `/inbox`.
-4. Integration smoke test across HTTP.
-5. RLS suite: attack 13.
+3. [x] Web `/points`, `/queue` with per-item age in hours, `/inbox`.
+4. [ ] Integration smoke test across HTTP.
+5. [x] RLS suite: attack 13.
 
 **Verify:** three accounts, end to end — staff submits → **Pending, with the GM**; GM
 verifies → **Pending, with the Founder**; founder approves → **Cleared**.
@@ -997,6 +1011,8 @@ verifies → **Pending, with the Founder**; founder approves → **Cleared**.
 `update ops.point_ledger set points=21` as **service role** → `42501`.
 
 ### Phase 5 — Weeks, recurring, carry-over
+
+**Status: done.** `20260909110000_ops_weeks_functions.sql` plus the recurring/carry-over fix migrations.
 
 `ops.generate_recurring_tasks()`, `ops.roll_over_week()`, `ops.close_week()` — all
 `security definer`, **all guarded** (`is_system_caller() or is_oversight()`, else 42501) and
@@ -1010,6 +1026,8 @@ the new week with `carry_over_count = 1`.
 
 ### Phase 6 — The Monday briefing
 
+**Status: mostly done.** `20260909150100_ops_briefing.sql`, `routes/briefing.ts`, `/briefing` present. **RLS attacks 12 and 19 are missing.** Founder catalog re-pricing gate: still open — seeded rows are `PLACEHOLDER —` prefixed.
+
 Commitment lock trigger; `GET /api/briefing/:weekId` in one call; `/briefing` with the four
 sections in order and large type for a shared display; a single **Close the briefing** button
 for oversight, with a confirm step.
@@ -1022,6 +1040,8 @@ refused with "commitments are locked for this week." RLS attacks 12, 19.
 
 ### Phase 7 — Blockers, staleness, Now
 
+**Status: partial.** `ops.task_blocks` + cycle guard shipped in `ops_catalog_tasks`; the Blocked dialog is on `/board`. **Not built: `POST /api/jobs/flag-stale` (only `drain-outbox` exists in `routes/jobs.ts`), and `/api/now`** — `now.tsx` exists but there is no `now` endpoint.
+
 `ops.task_blocks` + cycle guard + blocked-time views; outbox events for
 `ops.block.opened` / `.resolved`; `POST /api/jobs/flag-stale` daily and idempotent per task
 per day; `/api/now`; the Blocked column dialog; `/` becomes the real Now screen, polling 20s.
@@ -1032,6 +1052,8 @@ RLS attack 18.
 
 ### Phase 8 — Scoreboard, reliability, leaderboard
 
+**Status: not started.** `packages/ops-scoring/src` holds only `weeks.ts`; no `/api/scoreboard`, no `/scoreboard`, no `/people/:id`.
+
 `packages/ops-scoring` completed — **tests first**, because these formulas have no visible
 failure mode. `/api/scoreboard*`; `/scoreboard` and `/people/:id`; capped score shown next to
 the raw cleared total, labelled.
@@ -1040,6 +1062,8 @@ the raw cleared total, labelled.
 the API agrees to two decimals. **Put that arithmetic in the phase report.**
 
 ### Phase 9 — Deploy and harden
+
+**Status: not started.** RLS suite covers 20 of 27 attacks (missing 5, 7, 10, 11, 12, 17, 19); no deploy, no cron.
 
 Full 27-attack suite green in CI. `README.md` — migration flow, env, provisioning, how to run
 the RLS suite, and the standing rule that **every new module schema repeats the §2.7 revoke
