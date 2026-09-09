@@ -969,7 +969,7 @@ The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, 
 
 ### Phase 3 — Catalog, tasks, board
 
-**Status: mostly done.** Catalog + task migrations, state machine, `/board` on `@dnd-kit`, `/catalog` all present. **RLS attacks 5, 7, 10 and 11 are missing** from `rls_test.sql`.
+**Status: mostly done.** Catalog + task migrations, state machine, `/board` on `@dnd-kit`, `/catalog` all present. **Outstanding: a manual "new task" dialog.** Until one exists there is no way to create a task anywhere in the app — tasks arrive only from the seed or recurring generation, which anyone trialling the app hits within a minute. (In progress on the web lane as of 2026-09-09 night; do not mark this done without opening the app and creating a task.) Attacks 5, 7, 10 and 11 were never actually missing: they exist in `rls_test.sql` under descriptive names rather than numbers (`'staff cannot write points_awarded directly'`, `'GM cannot move verified -> cleared'`, `'staff cannot set a points override'`, `'oversight cannot set a points override with no reason'`). Verified by grep, 2026-09-09.
 
 1. [x] Migrations: `ops_catalog_tasks`, `ops_task_state_machine` (**INSERT and UPDATE guards in
    the same migration**), `ops_catalog_rls`.
@@ -987,7 +987,7 @@ The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, 
 3. [x] API `/api/catalog*`, `/api/tasks*`.
 4. [x] Web `/board` on `@dnd-kit`, seven columns; the Blocked drop opens a Radix `Dialog`;
    `/catalog`.
-5. [ ] RLS suite: attacks 3–11, 14, 15.
+5. [x] RLS suite: attacks 3–11, 14, 15. (Present under descriptive names, not numbers.)
 
 **Verify:** drag `todo → in_progress → submitted`; as GM drag to `verified`; as staff try to
 drag your own `submitted` task to `cleared` — the UI shows the database's `42501` and the card
@@ -995,14 +995,14 @@ snaps back. `npm run test:rls` all pass, canary fails.
 
 ### Phase 4 — Ledger, approval chain, notifications
 
-**Status: mostly done.** `ops_ledger` + purge exception, `points.ts` / `notifications.ts` / `jobs.ts`, `/points` `/queue` `/inbox`, attack 13 covered. **No integration smoke test across HTTP.**
+**Status: done.** `ops_ledger` + purge exception, `points.ts` / `notifications.ts` / `jobs.ts`, `/points` `/queue` `/inbox`, attack 13 covered, and `apps/api/test/lifecycle-integration.test.ts` now walks the whole ladder over a real socket with three signed-in personas.
 
 1. [x] Migration `ops_ledger` (+ append-only guard, `v_point_balances`); extend the transition
    trigger with `create or replace` in a **new** migration — never edit an applied one.
 2. [x] API `/api/points/*`, `/api/tasks/:id/override-points`, `/api/notifications*`,
    `/api/jobs/drain-outbox`. `services/outbox.ts` — the in-app drainer.
 3. [x] Web `/points`, `/queue` with per-item age in hours, `/inbox`.
-4. [ ] Integration smoke test across HTTP.
+4. [x] Integration smoke test across HTTP. Listens on a real port and `fetch`es it rather than using `inject`; signs in `sales-demo`, `gm-demo` and `founder-demo`; walks create → commit → submit → verify → clear; asserts three `ops.point_ledger` rows in order and the balance **delta** (an absolute balance would be a coincidence, since the demo seed already gives sales-demo cleared points); asserts both refusals. Skips loudly with a named cause rather than passing silently when credentials are absent.
 5. [x] RLS suite: attack 13.
 
 **Verify:** three accounts, end to end — staff submits → **Pending, with the GM**; GM
@@ -1026,7 +1026,7 @@ the new week with `carry_over_count = 1`.
 
 ### Phase 6 — The Monday briefing
 
-**Status: mostly done.** `20260909150100_ops_briefing.sql`, `routes/briefing.ts`, `/briefing` present. **RLS attacks 12 and 19 are missing.** Founder catalog re-pricing gate: still open — seeded rows are `PLACEHOLDER —` prefixed.
+**Status: mostly done.** `20260909150100_ops_briefing.sql`, `routes/briefing.ts`, `/briefing` present. Attack 19 already existed (`'staff cannot commit someone else\'s task'`); **attack 12 was genuinely missing and has been added** — every existing commitment-lock test started from an already-true commitment and tried to *alter* it after close, so a fresh `false → true` commit after close had never been exercised. **The founder catalog re-pricing gate is still open**: Chan assigned arbitrary Fibonacci values on 2026-09-09 so the system could be exercised, but explicitly deferred the real valuation to a sit-down with his team. The `PLACEHOLDER —` prefix and the banner stay until then.
 
 Commitment lock trigger; `GET /api/briefing/:weekId` in one call; `/briefing` with the four
 sections in order and large type for a shared display; a single **Close the briefing** button
@@ -1040,7 +1040,7 @@ refused with "commitments are locked for this week." RLS attacks 12, 19.
 
 ### Phase 7 — Blockers, staleness, Now
 
-**Status: partial.** `ops.task_blocks` + cycle guard shipped in `ops_catalog_tasks`; the Blocked dialog is on `/board`. **Not built: `POST /api/jobs/flag-stale` (only `drain-outbox` exists in `routes/jobs.ts`), and `/api/now`** — `now.tsx` exists but there is no `now` endpoint.
+**Status: mostly done.** `ops.task_blocks` + cycle guard shipped in `ops_catalog_tasks`; the Blocked dialog is on `/board`. `POST /api/jobs/flag-stale` is built (idempotent per task per calendar day by checking the outbox for today's `ops.task.stale` row, which needs no schema change and also behaves correctly for a task still stale tomorrow) and `GET /api/now` is built and live-verified. Remaining: cron to actually call `flag-stale` daily, which belongs to Phase 9.
 
 `ops.task_blocks` + cycle guard + blocked-time views; outbox events for
 `ops.block.opened` / `.resolved`; `POST /api/jobs/flag-stale` daily and idempotent per task
@@ -1063,7 +1063,7 @@ the API agrees to two decimals. **Put that arithmetic in the phase report.**
 
 ### Phase 9 — Deploy and harden
 
-**Status: not started.** RLS suite covers 20 of 27 attacks (missing 5, 7, 10, 11, 12, 17, 19); no deploy, no cron.
+**Status: not started, and deliberately deferred.** Chan, 2026-09-09: deployment waits until the system is functionally as complete as it can be locally, to avoid adding hosting cost this early. Nothing before this phase may assume a deployed URL. The RLS attack count in earlier revisions of this file was wrong — 26 of 27 were already covered and only attack 12 was missing; it has been added, along with a read-only-account block. **The suite has not been run since those additions, and the two 2026-09-10 migrations have not been applied anywhere.** Also outstanding here: `pg_cron` is available but not installed, so `core.purge_due_accounts()` and `flag-stale` have no scheduler.
 
 Full 27-attack suite green in CI. `README.md` — migration flow, env, provisioning, how to run
 the RLS suite, and the standing rule that **every new module schema repeats the §2.7 revoke
