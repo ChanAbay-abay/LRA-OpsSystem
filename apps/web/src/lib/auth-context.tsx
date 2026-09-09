@@ -35,7 +35,7 @@ import { toast } from 'sonner';
 import { supabase } from './supabase';
 import { api, ApiClientError } from './api';
 import { singleFlight } from './single-flight';
-import { subscribeSession } from './session-store';
+import { beginLocalAuthAction, subscribeForeignSwitch, subscribeSession } from './session-store';
 
 export interface Me {
   id: string;
@@ -137,7 +137,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return unsubscribe;
   }, [loadMe]);
 
+  React.useEffect(() => {
+    // See `session-store.ts`'s cross-tab identity guard: this fires when
+    // a *different* account signed in in another tab on this origin and
+    // this tab was dropped to signed-out as a result. One browser profile
+    // cannot hold two identities on one origin -- last sign-in wins, so
+    // say that plainly instead of letting the redirect to `/login` (from
+    // `session` going `null`, handled above) speak for itself.
+    return subscribeForeignSwitch(() => {
+      toast.error('You were signed out because a different account signed in in another tab.', {
+        description: 'One browser can only stay signed in as one account at a time.',
+      });
+    });
+  }, []);
+
   const signIn = React.useCallback(async (email: string, password: string) => {
+    // Marks the event this call is about to produce as a real, local
+    // change of identity -- see `session-store.ts`'s cross-tab bleed
+    // guard. Without this, signing in as a *different* account than
+    // whatever another open tab last touched is indistinguishable from
+    // that other tab's own session bleeding in over the SDK's
+    // `BroadcastChannel`, and would be silently ignored.
+    beginLocalAuthAction();
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
     // Do not call `loadMe` here — `onAuthStateChange` already fires a
@@ -147,6 +168,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = React.useCallback(async () => {
+    beginLocalAuthAction();
     await supabase.auth.signOut();
     setMe(null);
   }, []);
