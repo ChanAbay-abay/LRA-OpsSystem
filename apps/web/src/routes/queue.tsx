@@ -23,6 +23,7 @@
  * clearing seat's.
  */
 import * as React from 'react';
+import { useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
@@ -32,6 +33,7 @@ import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
+import { FounderDigest } from '@/routes/founder-digest';
 
 interface QueueTask {
   id: string;
@@ -45,7 +47,30 @@ interface QueueTask {
   cancellation_reason: string | null;
 }
 
+/**
+ * Two audiences, one nav item.
+ *
+ * The GM's job here is unchanged: verify submitted work, one task at a
+ * time, oldest first. The founder's job changed on 2026-09-09 — he wants
+ * to monitor and approve in bulk, not walk a list — so a founder opening
+ * /queue gets `FounderDigest` instead. Same route and same sidebar entry
+ * on purpose: "Approvals" is where you go to approve, and giving the
+ * founder a second approval-shaped screen to choose between would be a
+ * worse outcome than either screen alone.
+ *
+ * `?view=list` escapes back to this list. The digest links cancellation
+ * decisions there, because those are per-task decisions with their own
+ * two-button shape that never belonged in a bulk checklist.
+ */
 export function QueuePage() {
+  const { me } = useAuth();
+  const isFounder = me?.authority === 'founder' || me?.authority === 'admin';
+  const wantsList = new URLSearchParams(useLocation().search).get('view') === 'list';
+  if (isFounder && !wantsList) return <FounderDigest />;
+  return <QueueList />;
+}
+
+function QueueList() {
   const { me } = useAuth();
   const resource = useResource((signal) => api.get<QueueTask[]>('/api/points/queue', { signal }), []);
   const [rejecting, setRejecting] = React.useState<QueueTask | null>(null);

@@ -67,6 +67,64 @@ const statusSchema = z
     }
   });
 
+// The founder's bulk clear / bulk flag. Capped at 200: the route is
+// sequential and a runaway list would hold a request open for minutes.
+// Three people cannot legitimately produce 200 verified tasks in a week,
+// so the cap guards against a malformed client, not against anyone's
+// real Monday.
+//
+// TWO SHAPES, because a bulk refusal has two honest forms (Chan,
+// 2026-09-09: "allow option for batch or individual depending if more
+// than one was selected"):
+//
+//   { ids: [...], reason }              — one verdict covering all of them
+//   { items: [{ id, reason }, ...] }    — a separate verdict per task
+//
+// Both normalise to the same `(id, reason)` list before anything is
+// written, so the transition path, the trigger and the partial-success
+// contract below are identical either way. The difference is only in
+// what the founder is asserting: "this batch is wrong for one reason" is
+// a different claim from "each of these is wrong for its own reason",
+// and forcing the first shape onto the second produces N copies of a
+// sentence that fits none of them.
+const bulkItemSchema = z.object({ id: z.string().uuid(), reason: z.string().optional() });
+
+const bulkStatusSchema = z
+  .object({
+    ids: z.array(z.string().uuid()).min(1).max(200).optional(),
+    items: z.array(bulkItemSchema).min(1).max(200).optional(),
+    to: z.enum(TASK_STATUSES),
+    reason: z.string().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.ids === !val.items) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ids'],
+        message: 'send exactly one of `ids` (one shared reason) or `items` (a reason per task)',
+      });
+      return;
+    }
+
+    // Sending work back is the one bulk action that costs someone their
+    // week, so it carries the same 10-character bar as every other
+    // written refusal in this system (override, block, cancellation) —
+    // and it carries it PER TASK, so the `items` shape cannot be used to
+    // smuggle in a blank reason for one row among nine good ones.
+    if (val.to !== 'rejected') return;
+    const short = (r?: string) => !r || r.trim().length < 10;
+    const message = 'sending tasks back needs a written reason of at least 10 characters';
+
+    if (val.ids && short(val.reason)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['reason'], message });
+    }
+    for (const [i, item] of (val.items ?? []).entries()) {
+      if (short(item.reason ?? val.reason)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['items', i, 'reason'], message });
+      }
+    }
+  });
+
 const overrideSchema = z.object({
   points: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(5), z.literal(8), z.literal(13), z.literal(21)]),
   reason: z.string().min(10, 'a points override needs a written reason of at least 10 characters'),
@@ -230,6 +288,22 @@ export default async function tasksRoutes(app: FastifyInstance) {
           return 'verified';
         case 'cleared':
           return 'cleared';
+        // A returned task lands back in Backlog (Chan, 2026-09-09:
+        // "make sure that returned tasks can be seen on the list").
+        // It previously fell through to `null` and rendered in NO
+        // column, so work the GM or founder sent back simply vanished
+        // from its owner's board — the one screen they would look for it
+        // on — while still counting against them. `rejected -> todo` is
+        // the only transition the trigger allows out of this state, so
+        // Backlog is where the card has to be for its owner to take it.
+        // It stays visually distinct there: the web client renders a
+        // "Returned" chip carrying `rejected_reason`.
+        //
+        // NOT `this_week`, even when committed. A returned task is no
+        // longer a commitment being met; putting it back among this
+        // week's promises would overstate the week.
+        case 'rejected':
+          return 'backlog';
         default:
           return null;
       }
@@ -356,6 +430,64 @@ export default async function tasksRoutes(app: FastifyInstance) {
     return { data };
   });
 
+  /**
+   * Bulk transition — the founder's "approve all" (Chan, 2026-09-09).
+   *
+   * This grants NOTHING that `POST /:id/status` does not. It runs on
+   * `userClient` and issues one UPDATE per task, so
+   * `ops.enforce_task_transition` fires per row exactly as it would for
+   * eleven separate clicks. A bulk endpoint that batched the rows into
+   * one statement, or reached for `serviceClient` to go faster, would be
+   * a second ladder — the precise thing PLAN.md §3 forbids.
+   *
+   * PARTIAL SUCCESS IS THE CONTRACT, per Chan's decision. The rows are
+   * independent: one task that has gone stale between page load and
+   * click (someone else cleared it, a block was raised, it was flagged
+   * for cancellation) must not strand ten good ones. Every refusal comes
+   * back with the trigger's own sentence attached to its task id, so the
+   * screen can leave those rows in place with the reason shown while the
+   * rest disappear.
+   *
+   * Sequential, not `Promise.all`. Each UPDATE takes a row lock and the
+   * ledger trigger writes on commit; firing eleven at once against a
+   * three-person Supabase project buys nothing and invites the lock
+   * contention that already had to be mapped to a retryable 503 once.
+   */
+  app.post('/bulk-status', async (req) => {
+    const body = bulkStatusSchema.parse(req.body);
+    const db = userClient(req.accessToken);
+
+    // The two request shapes collapse here, before any write, so
+    // everything below this line is blind to which one arrived.
+    const items = body.items ?? body.ids!.map((id) => ({ id, reason: body.reason }));
+
+    const changed: unknown[] = [];
+    const refused: { id: string; message: string }[] = [];
+
+    for (const { id, reason } of items) {
+      const patch: Record<string, unknown> = { status: body.to };
+      if (body.to === 'rejected') patch.rejected_reason = reason ?? body.reason ?? null;
+
+      const { data, error } = await db.schema('ops').from('tasks').update(patch).eq('id', id).select().single();
+      if (error) {
+        // Same PGRST116 translation as the single-task route: RLS
+        // filtering the UPDATE to zero rows is a correct refusal with an
+        // internals-leaking message.
+        refused.push({
+          id,
+          message:
+            error.code === 'PGRST116'
+              ? 'not found, or you do not have permission to change its status'
+              : error.message,
+        });
+        continue;
+      }
+      changed.push(data);
+    }
+
+    return { data: { changed, refused } };
+  });
+
   // Commit / uncommit — Phase 6. `ops.enforce_task_transition`'s
   // commitment-lock guard is the real enforcement (owner-or-oversight,
   // and refused once the task's week has left `planning`); this route
@@ -444,6 +576,44 @@ export default async function tasksRoutes(app: FastifyInstance) {
       .single();
     if (error) throw new ApiError(422, error.message, error.code ?? 'NOTE_REFUSED');
     return { data };
+  });
+
+  // One task's blocks, open and resolved, for its detail view. The
+  // board already gets an open-block COUNT per card; this is the "why",
+  // which only the detail modal needs and so is not worth carrying on
+  // every card in the board payload.
+  app.get('/:id/blocks', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { data, error } = await db
+      .schema('ops')
+      .from('task_blocks')
+      .select('*')
+      .eq('task_id', id)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+
+    const svc = serviceClient();
+    const userIds = [
+      ...new Set(
+        (data ?? [])
+          .flatMap((b) => [b.blocking_user_id, b.created_by, b.resolved_by])
+          .filter((v): v is string => Boolean(v))
+      ),
+    ];
+    const named = userIds.length
+      ? await enrichWithOwners(svc, userIds.map((owner_user_id) => ({ owner_user_id })))
+      : [];
+    const nameById = new Map(named.map((n) => [n.owner_user_id, n.ownerName]));
+
+    return {
+      data: (data ?? []).map((b) => ({
+        ...b,
+        blockingName: b.blocking_user_id ? (nameById.get(b.blocking_user_id) ?? null) : b.blocking_external,
+        createdByName: nameById.get(b.created_by) ?? null,
+        resolvedByName: b.resolved_by ? (nameById.get(b.resolved_by) ?? null) : null,
+      })),
+    };
   });
 
   app.post('/:id/override-points', { onRequest: requireOversight() }, async (req) => {
