@@ -25,6 +25,7 @@ import weeksRoutes from './routes/weeks.js';
 import settingsRoutes from './routes/settings.js';
 import jobsRoutes from './routes/jobs.js';
 import briefingRoutes from './routes/briefing.js';
+import nowRoutes from './routes/now.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -129,6 +130,7 @@ export function buildServer() {
   app.register(settingsRoutes, { prefix: '/api/settings' });
   app.register(jobsRoutes, { prefix: '/api/jobs' });
   app.register(briefingRoutes, { prefix: '/api/briefing' });
+  app.register(nowRoutes, { prefix: '/api/now' });
 
   return app;
 }

@@ -10,6 +10,7 @@
 import type { FastifyInstance } from 'fastify';
 import { authenticate, requireAuthority } from '../middleware/auth.js';
 import { drainOutbox } from '../services/outbox.js';
+import { flagStaleTasks } from '../services/stale.js';
 
 export default async function jobsRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
@@ -17,6 +18,13 @@ export default async function jobsRoutes(app: FastifyInstance) {
 
   app.post('/drain-outbox', async () => {
     const result = await drainOutbox();
+    return { data: result };
+  });
+
+  // Daily (PLAN.md Phase 7). Idempotent per task per day — see
+  // services/stale.ts's header for how that holds without a new column.
+  app.post('/flag-stale', async () => {
+    const result = await flagStaleTasks();
     return { data: result };
   });
 }
