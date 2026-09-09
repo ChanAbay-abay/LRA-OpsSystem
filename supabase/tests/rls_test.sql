@@ -185,6 +185,23 @@ insert into core.notifications (user_id, title, message)
 select v, 'TEST notification', 'seeded for the update-guard attack'
 from t_ids where k = 'sales';
 
+-- A SECOND founder, distinct from the one persona rows above promote to
+-- the clearing seat (see the "Promote the test founder..." block below)
+-- -- needed to prove that `core.authority = 'founder'` alone is not
+-- enough to decide a flagged cancellation; only the ONE clearing seat
+-- may (attack: "a non-clearing founder cannot approve one").
+insert into t_ids (k, v) values ('founder2', gen_random_uuid());
+insert into auth.users (id, email, instance_id, aud, role)
+select v, 'test-founder2@lra.invalid', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated'
+from t_ids where k = 'founder2';
+insert into core.people (person_code, first_name, last_name, email)
+select 'TEST-FOUNDER2', 'Founder2', 'Persona', 'test-founder2@lra.invalid';
+insert into core.users (id, email, authority, person_id)
+select t.v, 'test-founder2@lra.invalid', 'founder', (select id from core.people where person_code = 'TEST-FOUNDER2')
+from t_ids t where t.k = 'founder2';
+insert into core.memberships (user_id, module, position)
+select v, 'ops', 'other' from t_ids where k = 'founder2';
+
 -- ---------------------------------------------------------------------
 -- Everything below runs as `authenticated`, never as the owner.
 -- ---------------------------------------------------------------------
@@ -468,6 +485,163 @@ select pg_temp.expect_blocked('blocks',
   $sql$insert into ops.task_blocks (task_id, target, blocking_task_id, reason, created_by)
        values ((select v from t_meta where k='taskA'), 'task',
                (select v from t_meta where k='taskB'), 'this would deadlock the board', (select uid from p where k='sales'))$sql$);
+
+-- =======================================================================
+-- Catalog CRUD -- staff cannot create or hard-delete a catalog row
+-- (attack 15 above already covers UPDATE).
+-- =======================================================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('catalog-crud',
+  'staff cannot INSERT a new ops.task_types row',
+  $sql$insert into ops.task_types (name, category, guideline_note, is_active)
+       values ('TEST-forged-type', 'Test', 'DRAFT — forged', true)$sql$);
+
+select pg_temp.expect_blocked('catalog-crud',
+  'staff cannot hard-delete a task type via ops.delete_task_type_if_unused',
+  $sql$select ops.delete_task_type_if_unused((select v from t_meta where k='task_type'))$sql$);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('catalog-crud',
+  'oversight cannot hard-delete a task type that a task has already referenced',
+  $sql$select ops.delete_task_type_if_unused((select v from t_meta where k='task_type'))$sql$);
+
+-- =======================================================================
+-- Phase 6 -- commitments: ownership and the lock. taskA (still todo,
+-- owned by sales) is committed, the briefing is closed, and the lock is
+-- proven to bind everyone, including oversight, from the user path.
+-- =======================================================================
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('commitments',
+  'staff cannot commit someone else''s task',
+  $sql$update ops.tasks set is_committed = true,
+         committed_week_id = week_id, committed_points = coalesce(points_override, catalog_points, 0)
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('commitments',
+  'the owner CAN commit their own task while the week is planning',
+  $sql$update ops.tasks set is_committed = true,
+         committed_week_id = week_id, committed_points = coalesce(points_override, catalog_points, 0)
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+select ops.close_briefing((select id from ops.weeks where week_start = ops.week_start_for(now())));
+set local role authenticated;
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('commitments',
+  'nobody can alter a commitment after the briefing closes (owner tries to uncommit)',
+  $sql$update ops.tasks set is_committed = false, committed_week_id = null, committed_points = null
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('commitments',
+  'nobody can alter a commitment after the briefing closes (oversight tries too)',
+  $sql$update ops.tasks set committed_points = 999
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+-- =======================================================================
+-- Cancellation as a two-rung approval (taskB: todo, owned by sales).
+-- =======================================================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('cancellation',
+  'staff cannot flag their own task for cancellation',
+  $sql$update ops.tasks set status = 'pending_cancellation', cancellation_reason = 'trying to dodge review'
+       where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed('cancellation',
+  'GM CAN flag a task for cancellation with a real reason',
+  $sql$update ops.tasks set status = 'pending_cancellation', cancellation_reason = 'client cancelled the shipment entirely'
+       where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.expect_blocked('cancellation',
+  'the GM who flagged it cannot also decide it (not the clearing founder)',
+  $sql$update ops.tasks set status = 'cancelled' where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.become((select uid from p where k='founder2'));
+select pg_temp.expect_blocked('cancellation',
+  'a non-clearing founder cannot approve a flagged cancellation',
+  $sql$update ops.tasks set status = 'cancelled' where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.expect_blocked('cancellation',
+  'a non-clearing founder cannot refuse one either',
+  $sql$update ops.tasks set status = 'todo', cancellation_decision_reason = 'no, keep working on it'
+       where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('cancellation',
+  'the CLEARING founder CAN refuse a flagged cancellation, with a reason',
+  $sql$update ops.tasks set status = 'todo', cancellation_decision_reason = 'not yet — still chasing the client'
+       where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed('cancellation',
+  'GM re-flags the same task for cancellation',
+  $sql$update ops.tasks set status = 'pending_cancellation', cancellation_reason = 'confirmed cancelled by the client today'
+       where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('cancellation',
+  'the clearing founder CAN approve the flagged cancellation',
+  $sql$update ops.tasks set status = 'cancelled' where id = (select v from t_meta where k='taskB')$sql$);
+
+select pg_temp.expect_rows('cancellation',
+  'a cancelled task awards zero points and writes a cancelled ledger row',
+  $sql$select coalesce(sum(points), 0)::int from ops.point_ledger
+       where task_id = (select v from t_meta where k='taskB') and state = 'cancelled'$sql$, 0);
+
+select pg_temp.expect_blocked('cancellation',
+  'a cancelled task is frozen exactly like a cleared one',
+  $sql$update ops.tasks set title = 'TAMPERED-cancelled' where id = (select v from t_meta where k='taskB')$sql$);
+
+-- =======================================================================
+-- ops.task_notes -- the worklog. append-only, owner/oversight write,
+-- any member reads, closed once cleared/cancelled.
+-- =======================================================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('notes',
+  'the task owner CAN add a worklog note to their own task',
+  $sql$insert into ops.task_notes (task_id, author_user_id, body)
+       values ((select v from t_meta where k='main'), (select uid from p where k='sales'), 'Filed the entry, waiting on BOC.')$sql$);
+
+insert into t_meta (k, v)
+select 'note1', id from ops.task_notes where task_id = (select v from t_meta where k='main') order by created_at desc limit 1;
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('notes',
+  'staff cannot write a note on someone else''s task',
+  $sql$insert into ops.task_notes (task_id, author_user_id, body)
+       values ((select v from t_meta where k='main'), (select uid from p where k='broker'), 'Not my task, forged note')$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed('notes',
+  'the GM (oversight) CAN add a note to someone else''s task',
+  $sql$insert into ops.task_notes (task_id, author_user_id, body)
+       values ((select v from t_meta where k='main'), (select uid from p where k='gm'), 'Checked in — looks on track.')$sql$);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('notes',
+  'nobody, not even a founder, can UPDATE a task_notes row',
+  $sql$update ops.task_notes set body = 'TAMPERED' where id = (select v from t_meta where k='note1')$sql$);
+select pg_temp.expect_blocked('notes',
+  'nobody, not even a founder, can DELETE a task_notes row',
+  $sql$delete from ops.task_notes where id = (select v from t_meta where k='note1')$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('notes',
+  'no note can be added to a cleared task',
+  $sql$insert into ops.task_notes (task_id, author_user_id, body)
+       values ((select v from t_meta where k='task2'), (select uid from p where k='sales'), 'too late, already cleared')$sql$);
+select pg_temp.expect_blocked('notes',
+  'no note can be added to a cancelled task',
+  $sql$insert into ops.task_notes (task_id, author_user_id, body)
+       values ((select v from t_meta where k='taskB'), (select uid from p where k='sales'), 'too late, already cancelled')$sql$);
 
 -- === Attack 1 (ops.tasks) / Attack 27 (real canary) ====================
 
