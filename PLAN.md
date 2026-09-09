@@ -1107,3 +1107,64 @@ Cron: `flag-stale` daily 08:00 Manila, `drain-outbox` every minute, week creatio
    explaining why they are system-level.
 7. `LRA-HR/README.md` carries the legacy banner and nothing else in that repo has changed
    except `docs/STATUS.md`.
+
+---
+
+## 10. Chan's asks, 2026-09-10 (late)
+
+Given verbally as he signed off for the night, with standing authority to apply migrations
+directly and an explicit instruction: **"I expect things to review when I get back, not
+things I have to do before you can continue another chunk."** Nothing here may end in a
+state that blocks him.
+
+His stated priority order: **features first, UI/UX polish incrementally** — "we will slowly
+start to make the UI/UX better as we go but of course we put more priority to the features
+for now."
+
+| # | Ask | Status |
+|---|---|---|
+| 1 | A read-only visitor's refusals must be obvious, not silent failures | in flight |
+| 2 | Task cards get **quick submit + block** via right-click, and a 3-dot button opening the *same* menu | queued |
+| 3 | Task modal: when it grows tall, the **comment list** scrolls, not the whole modal | queued |
+| 4 | Hide **reliability and hit-rate** from non-founder members | queued |
+| 5 | The Monday lock, and the GM's edit-request path | in flight |
+| 6 | Keep testing; everything must actually work | standing |
+
+### 10.1 The Monday flow, in his words
+
+> "Every Monday there's a stand up meeting in the morning, everyone gets assigned their
+> tasks, they have to do their backlogs and the usual stuff. Once the meeting is concluded,
+> those todos should be set and not editable by the staff. Only admin and founder. GM can
+> flag for edits with the founder (LRA) or admin (me) approving the edits."
+
+What existed before tonight: `ops.close_briefing` moves the week out of `planning`, and a
+trigger then refuses changes to `is_committed`. **That was the only thing locked** — a staff
+member could still rewrite a committed task's title, type (and so its points) or owner after
+the meeting, which defeats the lock entirely. The record of what was promised on Monday is
+precisely what this system exists to make un-rewritable.
+
+**The distinction that must not be blurred:** the lock is on a task's *definition*, never on
+its *progress*. Staff must still move status, add notes, and declare or resolve blocks after
+the meeting — otherwise the app is unusable for the people it is for.
+
+The GM's path is a **proposed change that carries its content** and is applied atomically on
+approval — not a temporary unlock. An approver must see exactly what they are approving; an
+open editing window approves nothing in particular. Modelled on the existing
+`ops_cancellation_approval` flow rather than a new pattern. Approval is
+`core.is_clearing_founder()`, which admits admin and correctly excludes the read-only ERC and
+DCA founders.
+
+### 10.2 Why points exist, restated by Chan
+
+> "The use of the point system is also for the staff to track their progress and stay
+> accountable on their own. Velocity and accountability is important."
+
+This is a **design constraint, not a nice-to-have**: points are a self-tracking instrument
+for the person doing the work, not only a management readout. It is also why ask #4 is not a
+contradiction — a staff member keeps their points and velocity, and it is the *reliability
+score and hit-rate* (the judgement of them) that becomes founder-only.
+
+**Judgement call flagged for Chan:** he said "non-founder", so this was implemented as
+founder + admin only. Whether the **GM** should see reliability is genuinely ambiguous — the
+GM manages the team but is also measured by the same instrument. Including them is a one-line
+change; say the word.
