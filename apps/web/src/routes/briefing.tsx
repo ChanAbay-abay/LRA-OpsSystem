@@ -88,11 +88,11 @@ export function BriefingPage() {
   const { me } = useAuth();
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
 
-  const weekResource = useResource(() => api.get<Week | null>('/api/weeks/current'), []);
+  const weekResource = useResource((signal) => api.get<Week | null>('/api/weeks/current', { signal }), []);
   const week = weekResource.data;
 
   const briefingResource = useResource(
-    () => (week ? api.get<BriefingData>(`/api/briefing/${week.id}`) : Promise.resolve(null)),
+    (signal) => (week ? api.get<BriefingData>(`/api/briefing/${week.id}`, { signal }) : Promise.resolve(null)),
     [week?.id]
   );
 

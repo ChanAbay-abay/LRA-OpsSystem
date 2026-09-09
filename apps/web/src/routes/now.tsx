@@ -23,7 +23,7 @@ interface Member {
 
 export function NowPage() {
   const { me } = useAuth();
-  const resource = useResource(() => api.get<Member[]>('/api/members'), []);
+  const resource = useResource((signal) => api.get<Member[]>('/api/members', { signal }), []);
 
   return (
     <div>

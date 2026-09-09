@@ -35,6 +35,7 @@ import { toast } from 'sonner';
 import { supabase } from './supabase';
 import { api, ApiClientError } from './api';
 import { singleFlight } from './single-flight';
+import { subscribeSession } from './session-store';
 
 export interface Me {
   id: string;
@@ -111,19 +112,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const loadMe = React.useMemo(() => singleFlight(fetchMe), [fetchMe]);
 
   React.useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      if (data.session) void loadMe().finally(() => setLoading(false));
-      else setLoading(false);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+    // One subscription to `lib/session-store.ts` instead of this
+    // provider running its own independent `getSession()` bootstrap
+    // *and* its own `onAuthStateChange` listener side by side. The store
+    // already replays its `INITIAL_SESSION` value to a new subscriber,
+    // so there is nothing left here to race -- this callback is called
+    // with the exact session the SDK just committed, for the initial
+    // load and for every transition after it.
+    let first = true;
+    const unsubscribe = subscribeSession((next) => {
       setSession(next);
-      if (next) void loadMe();
-      else setMe(null);
+      if (next) {
+        void loadMe().finally(() => {
+          if (first) setLoading(false);
+          first = false;
+        });
+      } else {
+        setMe(null);
+        if (first) setLoading(false);
+        first = false;
+      }
     });
 
-    return () => sub.subscription.unsubscribe();
+    return unsubscribe;
   }, [loadMe]);
 
   const signIn = React.useCallback(async (email: string, password: string) => {

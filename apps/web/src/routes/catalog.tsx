@@ -81,8 +81,11 @@ export function CatalogPage() {
   const { me } = useAuth();
   const canEdit = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
 
-  const typesResource = useResource(() => api.get<TaskType[]>('/api/catalog'), []);
-  const templatesResource = useResource(() => api.get<RecurringTemplate[]>('/api/catalog/recurring'), []);
+  const typesResource = useResource((signal) => api.get<TaskType[]>('/api/catalog', { signal }), []);
+  const templatesResource = useResource(
+    (signal) => api.get<RecurringTemplate[]>('/api/catalog/recurring', { signal }),
+    []
+  );
 
   const [pricing, setPricing] = React.useState<TaskType | null>(null);
   const [editingType, setEditingType] = React.useState<TaskType | 'new' | null>(null);

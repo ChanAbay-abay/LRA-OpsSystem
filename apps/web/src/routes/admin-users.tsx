@@ -39,7 +39,7 @@ interface AdminUserRow {
 }
 
 export function AdminUsersPage() {
-  const resource = useResource(() => api.get<AdminUserRow[]>('/api/admin/users'), []);
+  const resource = useResource((signal) => api.get<AdminUserRow[]>('/api/admin/users', { signal }), []);
   const [open, setOpen] = React.useState(false);
 
   return (

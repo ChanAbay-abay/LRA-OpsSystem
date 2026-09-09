@@ -47,7 +47,7 @@ interface QueueTask {
 
 export function QueuePage() {
   const { me } = useAuth();
-  const resource = useResource(() => api.get<QueueTask[]>('/api/points/queue'), []);
+  const resource = useResource((signal) => api.get<QueueTask[]>('/api/points/queue', { signal }), []);
   const [rejecting, setRejecting] = React.useState<QueueTask | null>(null);
   const [decidingCancellation, setDecidingCancellation] = React.useState<QueueTask | null>(null);
 

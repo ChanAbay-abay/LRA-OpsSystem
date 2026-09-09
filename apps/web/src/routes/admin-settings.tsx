@@ -28,7 +28,7 @@ interface Settings {
 }
 
 export function AdminSettingsPage() {
-  const resource = useResource(() => api.get<Settings>('/api/settings'), []);
+  const resource = useResource((signal) => api.get<Settings>('/api/settings', { signal }), []);
   const [settings, setSettings] = React.useState<Settings | null>(null);
   const [saving, setSaving] = React.useState(false);
 

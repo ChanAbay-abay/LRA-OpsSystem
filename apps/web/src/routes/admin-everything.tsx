@@ -40,9 +40,9 @@ interface BlockRow {
 }
 
 export function AdminEverythingPage() {
-  const tasksResource = useResource(() => api.get<Task[]>('/api/tasks'), []);
-  const ledgerResource = useResource(() => api.get<LedgerRow[]>('/api/points/ledger'), []);
-  const blocksResource = useResource(() => api.get<BlockRow[]>('/api/blocks/open'), []);
+  const tasksResource = useResource((signal) => api.get<Task[]>('/api/tasks', { signal }), []);
+  const ledgerResource = useResource((signal) => api.get<LedgerRow[]>('/api/points/ledger', { signal }), []);
+  const blocksResource = useResource((signal) => api.get<BlockRow[]>('/api/blocks/open', { signal }), []);
 
   return (
     <div>

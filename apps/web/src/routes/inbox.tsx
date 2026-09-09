@@ -21,7 +21,7 @@ interface Notification {
 }
 
 export function InboxPage() {
-  const resource = useResource(() => api.get<Notification[]>('/api/notifications'), []);
+  const resource = useResource((signal) => api.get<Notification[]>('/api/notifications', { signal }), []);
 
   async function markRead(id: string) {
     await api.post(`/api/notifications/${id}/read`);

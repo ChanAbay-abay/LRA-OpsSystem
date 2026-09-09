@@ -37,8 +37,11 @@ interface LedgerRow {
 }
 
 export function PointsPage() {
-  const balanceResource = useResource(() => api.get<Balance[]>('/api/points/me').then((rows) => rows[0] ?? null), []);
-  const ledgerResource = useResource(() => api.get<LedgerRow[]>('/api/points/ledger'), []);
+  const balanceResource = useResource(
+    (signal) => api.get<Balance[]>('/api/points/me', { signal }).then((rows) => rows[0] ?? null),
+    []
+  );
+  const ledgerResource = useResource((signal) => api.get<LedgerRow[]>('/api/points/ledger', { signal }), []);
   const balance = balanceResource.data;
   const [oldestDays, setOldestDays] = React.useState<number | null>(null);
 

@@ -372,7 +372,7 @@ export function BoardPage() {
   // and only fall back to a toast if they fail.
   const { me } = useAuth();
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
-  const boardResource = useResource(() => api.get<Board>('/api/tasks/board'), []);
+  const boardResource = useResource((signal) => api.get<Board>('/api/tasks/board', { signal }), []);
   const [board, setBoard] = React.useState<Board | null>(null);
   const [activeTask, setActiveTask] = React.useState<Task | null>(null);
   const [blockTarget, setBlockTarget] = React.useState<Task | null>(null);

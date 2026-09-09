@@ -25,10 +25,13 @@ interface AuditRow {
 
 export function AdminAuditPage() {
   const [entityType, setEntityType] = React.useState('');
-  const resource = useResource(() => {
-    const q = entityType ? `?entityType=${encodeURIComponent(entityType)}` : '';
-    return api.get<AuditRow[]>(`/api/admin/audit${q}`);
-  }, [entityType]);
+  const resource = useResource(
+    (signal) => {
+      const q = entityType ? `?entityType=${encodeURIComponent(entityType)}` : '';
+      return api.get<AuditRow[]>(`/api/admin/audit${q}`, { signal });
+    },
+    [entityType]
+  );
 
   return (
     <div>
