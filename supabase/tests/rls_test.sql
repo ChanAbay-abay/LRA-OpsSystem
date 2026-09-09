@@ -1115,6 +1115,146 @@ select pg_temp.expect_blocked('read-only',
   'a read-only ADMIN cannot run core.purge_due_accounts',
   $sql$select core.purge_due_accounts()$sql$);
 
+-- =======================================================================
+-- The definition lock, and GM edit requests
+-- (20260910140000_ops_task_edit_requests.sql).
+--
+-- Once a task is committed and its week has left `planning`, its
+-- defining fields (title/description/task_type_id/owner_user_id/
+-- client_ref) are frozen for everyone except founder/admin -- NOT GM,
+-- even though GM passes `core.is_oversight()` everywhere else in this
+-- file. Status transitions, notes and blocks are untouched -- the
+-- regression that matters most is proven explicitly below. GM's only
+-- path to a locked definition is `ops.task_edit_requests`, decided by
+-- the clearing founder, who may not decide their own.
+--
+-- taskA is reused from the commitments section above: still committed,
+-- still owned by sales, sitting in the now-`open` week -- exactly the
+-- record this feature exists to protect.
+-- =======================================================================
+
+-- Captures a RETURNING id from an otherwise-normal expect_allowed check,
+-- so a legitimate INSERT can be asserted AND reused by a later step
+-- (approve/reject/withdraw) without a second, unprotected top-level
+-- statement that could abort the whole transaction if it ever regresses.
+create function pg_temp.expect_allowed_capture(p_area text, p_label text, p_sql text, p_key text)
+returns void language plpgsql as $$
+declare v_id uuid;
+begin
+  execute p_sql into v_id;
+  insert into t_meta (k, v) values (p_key, v_id);
+  insert into t_results (area, label, outcome, passed)
+  values (p_area, p_label, 'allowed', true);
+exception when others then
+  insert into t_results (area, label, outcome, passed)
+  values (p_area, p_label, 'REFUSED - expected success: ' || left(sqlerrm, 60), false);
+end $$;
+
+-- The clearing founder CAN still edit a locked committed task directly
+-- -- Chan's explicit "only admin and founder" exemption.
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('definition-lock',
+  'the clearing founder CAN edit a locked committed task''s description directly, no request needed',
+  $sql$update ops.tasks set description = 'founder note added directly'
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+-- Staff cannot rewrite what they committed to.
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('definition-lock',
+  'staff cannot rewrite a locked committed task''s title',
+  $sql$update ops.tasks set title = 'TAMPERED-definition' where id = (select v from t_meta where k='taskA')$sql$);
+
+-- THE regression that matters most: the definition lock must never
+-- become a progress lock. The owner can still move their own committed
+-- task exactly as before.
+select pg_temp.expect_allowed('definition-lock',
+  'staff CAN still move a locked committed task''s status (todo -> in_progress)',
+  $sql$update ops.tasks set status = 'in_progress' where id = (select v from t_meta where k='taskA')$sql$);
+
+-- Staff cannot even raise an edit request -- oversight only.
+select pg_temp.expect_blocked('edit-requests',
+  'staff cannot raise a task edit request at all',
+  $sql$insert into ops.task_edit_requests (task_id, requested_by, reason, change_title, proposed_title)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='sales'),
+               'trying to route around the lock myself', true, 'TEST-taskA (staff-forged)')$sql$);
+
+-- GM cannot edit the locked definition directly either -- not exempted,
+-- unlike founder/admin (Chan: "Only admin and founder... GM can flag").
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('definition-lock',
+  'GM cannot rewrite a locked committed task''s owner directly',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+-- GM's real path: raise a task edit request carrying the exact proposed
+-- change.
+select pg_temp.expect_allowed_capture('edit-requests',
+  'GM CAN raise a task edit request for a locked committed task',
+  $sql$insert into ops.task_edit_requests (task_id, requested_by, reason, change_title, proposed_title)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='gm'),
+               'client renamed the shipment reference on the BL', true, 'TEST-taskA (renamed)')
+       returning id$sql$,
+  'edit_req1');
+
+-- A read-only founder can neither raise nor approve one.
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_blocked('edit-requests',
+  'a read-only founder cannot raise a task edit request',
+  $sql$insert into ops.task_edit_requests (task_id, requested_by, reason, change_title, proposed_title)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='readonly'),
+               'read-only trying to raise a request anyway', true, 'TEST-taskA (RO-forged)')$sql$);
+
+select pg_temp.become((select uid from p where k='readonly_admin'));
+select pg_temp.expect_blocked('edit-requests',
+  'a read-only ADMIN cannot approve a task edit request -- the guard stands ahead of the clearing-founder/admin bypass',
+  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req1')$sql$);
+
+-- A non-clearing founder cannot approve one either (mirrors the
+-- cancellation ladder's founder2 precedent exactly).
+select pg_temp.become((select uid from p where k='founder2'));
+select pg_temp.expect_blocked('edit-requests',
+  'a non-clearing founder cannot approve a task edit request',
+  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req1')$sql$);
+
+-- GM (the requester, and not the clearing founder either) cannot
+-- approve its own request.
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('edit-requests',
+  'the GM requester cannot approve their own edit request',
+  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req1')$sql$);
+
+-- The self-approval guard specifically, isolated from the
+-- clearing-founder gate above: the clearing founder raises their OWN
+-- request and is still refused deciding it.
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed_capture('edit-requests',
+  'the clearing founder CAN raise their own edit request (fixture for the self-approval check below)',
+  $sql$insert into ops.task_edit_requests (task_id, requested_by, reason, change_description, proposed_description)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='founder'),
+               'adding my own context note via the request path', true, 'Founder note via edit-request path')
+       returning id$sql$,
+  'edit_req_self');
+
+select pg_temp.expect_blocked('edit-requests',
+  'the clearing founder cannot approve their own edit request, even though they hold the deciding seat',
+  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req_self')$sql$);
+
+-- The legitimate decision: the clearing founder approves GM's request,
+-- and the change actually lands atomically.
+select pg_temp.expect_allowed('edit-requests',
+  'the clearing founder CAN approve GM''s task edit request',
+  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req1')$sql$);
+
+select pg_temp.expect_rows('edit-requests',
+  'approval actually applied the proposed title to ops.tasks',
+  $sql$select count(*) from ops.tasks where id = (select v from t_meta where k='taskA')
+       and title = 'TEST-taskA (renamed)'$sql$, 1);
+
+select pg_temp.expect_rows('edit-requests',
+  'the approved request recorded after_values for the applied change',
+  $sql$select count(*) from ops.task_edit_requests where id = (select v from t_meta where k='edit_req1')
+       and status = 'approved' and after_values ->> 'title' = 'TEST-taskA (renamed)'$sql$, 1);
+
 reset role;
 
 -- ---------------------------------------------------------------------

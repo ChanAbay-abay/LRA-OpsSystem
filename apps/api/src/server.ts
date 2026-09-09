@@ -27,6 +27,7 @@ import jobsRoutes from './routes/jobs.js';
 import briefingRoutes from './routes/briefing.js';
 import nowRoutes from './routes/now.js';
 import scoreboardRoutes from './routes/scoreboard.js';
+import taskEditRequestsRoutes from './routes/task-edit-requests.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -133,6 +134,7 @@ export function buildServer() {
   app.register(briefingRoutes, { prefix: '/api/briefing' });
   app.register(nowRoutes, { prefix: '/api/now' });
   app.register(scoreboardRoutes, { prefix: '/api/scoreboard' });
+  app.register(taskEditRequestsRoutes, { prefix: '/api/task-edit-requests' });
 
   return app;
 }
