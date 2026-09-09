@@ -723,6 +723,13 @@ select pg_temp.expect_rows('CANARY', 'MUST FAIL: staff reads every test person',
 -- and restore, kept separate from every persona the attacks above
 -- depend on.
 
+-- These fixtures touch auth.users and core.* directly, so they must run as
+-- the owner, not as `authenticated` -- and clearing the claims matters as
+-- much as resetting the role, because core.is_system_caller() reads the JWT
+-- claims GUC, not current_user. Same trap as the Phase 3 fixture block above.
+reset role;
+select set_config('request.jwt.claims', null, true);
+
 insert into t_ids (k, v)
 select k, gen_random_uuid() from unnest(array['admin1','admin2','admin3','staff_del']) as k;
 insert into auth.users (id, email, instance_id, aud, role)
@@ -739,6 +746,9 @@ select t.v, 'test-' || t.k || '@lra.invalid',
 from t_ids t where t.k in ('admin1','admin2','admin3','staff_del');
 insert into core.memberships (user_id, module, position)
 select v, 'ops', 'other' from t_ids where k in ('admin1','admin2','admin3','staff_del');
+
+-- Back to `authenticated` for the attacks themselves.
+set local role authenticated;
 
 -- === Non-admin cannot soft-delete anyone ===============================
 
@@ -879,9 +889,16 @@ select pg_temp.expect_rows('purge',
   'purge_due_accounts purges exactly the one due account',
   $sql$select core.purge_due_accounts()$sql$, 1);
 
+-- Reading auth.users needs owner rights -- `authenticated` has no SELECT on
+-- it, and that is correct. Drop to the owner just for this one assertion,
+-- then go straight back; the purge itself was performed as admin above.
+reset role;
+select set_config('request.jwt.claims', null, true);
 select pg_temp.expect_rows('purge',
   'the auth.users login is gone after purge',
   $sql$select count(*) from auth.users where id = (select uid from p where k='staff_del')$sql$, 0);
+set local role authenticated;
+select pg_temp.become((select uid from p where k='admin1'));
 
 select pg_temp.expect_rows('purge',
   'core.users survives the purge -- ledger/task/audit attribution is never broken',

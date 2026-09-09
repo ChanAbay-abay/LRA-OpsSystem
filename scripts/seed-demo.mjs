@@ -143,10 +143,30 @@ async function purge() {
   //    itself; people does not, so it needs an explicit delete).
   await svc.schema('core').from('people').delete().in('email', PERSONAS.map((p) => p.email));
 
-  // 5. The auth users -- cascades to core.users -> core.memberships.
-  //    core.audit_logs rows naming these actors are left in place on
-  //    purpose: it is append-only by design, and a `.invalid` email in
-  //    a history table is harmless.
+  // 4b. Notes, memberships, notifications and outbox rows, then the
+  //     core.users rows themselves.
+  //
+  //     This used to rely on `delete auth.users` cascading down to
+  //     core.users. That cascade is GONE: migration 20260910090000
+  //     deliberately dropped the core.users -> auth.users FK so the
+  //     14-day purge can delete a login while keeping the person's
+  //     history attributed. The consequence for THIS script is that
+  //     deleting the auth user now orphans core.users instead of
+  //     removing it -- which is exactly what happened: four logins were
+  //     deleted while five core.users rows and fourteen tasks survived,
+  //     leaving accounts that could not be signed into and a ledger
+  //     emptied out from under still-'cleared' tasks. Delete explicitly.
+  if (taskIds.length) {
+    await svc.schema('ops').from('task_notes').delete().in('task_id', taskIds);
+  }
+  await svc.schema('core').from('memberships').delete().in('user_id', userIds);
+  await svc.schema('core').from('notifications').delete().in('user_id', userIds);
+  await svc.schema('core').from('notification_outbox').delete().in('recipient_id', userIds);
+  await svc.schema('core').from('users').delete().in('id', userIds);
+
+  // 5. The auth logins. core.audit_logs rows naming these actors are
+  //    left in place on purpose: it is append-only by design, and a
+  //    `.invalid` email in a history table is harmless.
   for (const u of authUsers) {
     const { error } = await svc.auth.admin.deleteUser(u.id);
     if (error) console.error(`  [warn] could not delete auth user ${u.email}: ${error.message}`);
