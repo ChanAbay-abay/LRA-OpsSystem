@@ -142,6 +142,42 @@ by-product and has no `core.people` / `core.users` / `core.memberships` rows beh
 inert, but it should be deleted once Chan confirms receipt, or it will show up as a ghost in
 `/admin/users`.
 
+### 9b. The invite redirect is silently discarded — **BLOCKS PHASE 2 in practice**
+
+Found and **reproduced** 2026-09-09 night, and it is the more serious half of this question.
+
+`inviteUserByEmail` now passes `redirectTo: <web app>/set-password`, and `/set-password` is
+built. **Supabase throws the redirect away.** Every value tested came back rewritten to the
+project's Site URL:
+
+| requested `redirect_to`                  | what Supabase returned  |
+|------------------------------------------|-------------------------|
+| `http://localhost:5173/set-password`      | `http://localhost:3000` |
+| `http://localhost:3000/set-password`      | `http://localhost:3000` |
+| `http://localhost:5175/`                  | `http://localhost:3000` |
+
+Note the third row: even the **path is stripped**. This is not a near miss, it is a total
+fallback to Site URL, which means the redirect allow-list does not contain these URLs at all.
+
+**Consequence today: an invited person lands on `http://localhost:3000`, where nothing is
+running, and can never set a password.** The whole invite path is cosmetically complete and
+functionally dead. This, not deliverability, is what actually blocks provisioning the three
+founder accounts.
+
+**Chan's fix, in the Supabase dashboard — Authentication → URL Configuration:**
+1. Set **Site URL** to the real web app origin (`http://localhost:5173` for now).
+2. Add to **Redirect URLs**: `http://localhost:5173/**`, and the production origin when
+   Phase 9 happens.
+
+Nothing in the codebase needs to change; the API already sends the right value.
+
+**The happy path itself is verified.** A genuine invite token was minted with
+`admin/generate_link` (which returns the link without sending mail), and the flow was driven
+in a real browser: token accepted, password set, signed in, landed in the app. So
+`/set-password` works — it is simply unreachable by anyone who gets a real invite until the
+dashboard is fixed. Three throwaway probe accounts were created for this and **all three were
+deleted**; only `ckca1221@gmail.com` remains, on purpose.
+
 ## 10. Where does the database live once HR and CRM are rebuilt?
 
 `LRA-OpsSystem` is currently the database's **system of record** — it owns every migration for
