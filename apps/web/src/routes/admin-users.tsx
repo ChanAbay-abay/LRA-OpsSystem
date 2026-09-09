@@ -13,6 +13,19 @@
  * knowing what "delete" means here; deleted rows render distinctly with
  * a days-remaining countdown and a Restore action, using DESIGN.md's
  * existing `danger` semantic token — no new colour invented for this.
+ *
+ * Read-only accounts (ERC, DCA — OPEN-QUESTIONS.md #5), added later
+ * still: `core.users.read_only` is the real guard (every write policy
+ * and definer function refuses one — see
+ * 20260910120100_core_read_only_accounts.sql), so this UI's job is only
+ * to make the flag visible and settable, never to imply it's the
+ * enforcement. An observer who looks like a full founder is the actual
+ * failure mode here, so the badge sits directly next to Authority
+ * rather than in a column someone would have to go looking for, and it
+ * repeats in the invite dialog so ERC/DCA are never provisioned as a
+ * silent afterthought. DESIGN.md's `info` semantic token, same pattern
+ * `board.tsx`'s Chip already uses for a non-alarming, deliberate state
+ * — read-only isn't an error, so it doesn't borrow `danger`.
  */
 import * as React from 'react';
 import { PageHeader } from '@/components/layout/app-shell';
@@ -44,10 +57,20 @@ interface AdminUserRow {
   authority: (typeof AUTHORITIES)[number];
   is_active: boolean;
   is_clearing_founder: boolean;
+  read_only: boolean;
   last_login: string | null;
   deleted_at: string | null;
   purge_due_at: string | null;
   opsMembership: { position: string; is_active: boolean } | null;
+}
+
+/** DESIGN.md's `info` semantic token — a deliberate, non-alarming state, not an error. Same pattern as `board.tsx`'s Chip. */
+function ReadOnlyBadge() {
+  return (
+    <span className="inline-flex h-5 items-center gap-1 rounded-xs border border-info-border bg-info-wash px-[7px] text-label text-info">
+      Read-only
+    </span>
+  );
 }
 
 /** Whole days remaining until purge, floored — "0 days left" still reads as "today", never negative. */
@@ -110,6 +133,7 @@ export function AdminUsersPage() {
                   <TableHead>Position</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Clearing founder</TableHead>
+                  <TableHead>Read-only</TableHead>
                   <TableHead>Last login</TableHead>
                   <TableHead />
                 </TableRow>
@@ -118,7 +142,12 @@ export function AdminUsersPage() {
                 {rows.map((r) => (
                   <TableRow key={r.id}>
                     <TableCell>{r.email}</TableCell>
-                    <TableCell className="text-eyebrow">{r.authority}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <span className="text-eyebrow">{r.authority}</span>
+                        {r.read_only ? <ReadOnlyBadge /> : null}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-eyebrow">{r.opsMembership?.position ?? '—'}</TableCell>
                     <TableCell>
                       {r.deleted_at && r.purge_due_at ? (
@@ -145,6 +174,9 @@ export function AdminUsersPage() {
                       ) : (
                         <span className="text-ink-3">—</span>
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <ReadOnlyToggle row={r} onDone={() => resource.reload()} />
                     </TableCell>
                     <TableCell className="num text-num-sm">
                       {r.last_login ? new Date(r.last_login).toLocaleString() : 'Never logged in'}
@@ -190,12 +222,88 @@ export function AdminUsersPage() {
   );
 }
 
+/**
+ * Toggling read-only either way is a permission change on the
+ * highest-privilege class of account (three founders, per
+ * OPEN-QUESTIONS.md #5) — confirmed the same way delete is, with the
+ * dialog stating plainly what the new state means rather than leaving
+ * a bare "Make read-only" to speak for itself.
+ */
+function ReadOnlyToggle({ row, onDone }: { row: AdminUserRow; onDone: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  async function handleConfirm() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.patch(`/api/admin/users/${row.id}`, { readOnly: !row.read_only });
+      setOpen(false);
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'Could not change read-only status');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <button className={`text-label ${row.read_only ? 'text-info' : 'text-ink-3 hover:text-ink'}`}>
+          {row.read_only ? 'Yes — remove' : 'Make read-only'}
+        </button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {row.read_only ? `Remove read-only from ${row.email}?` : `Make ${row.email} read-only?`}
+          </DialogTitle>
+          <DialogDescription>
+            {row.read_only ? (
+              <>
+                {row.email} will be able to submit, verify, clear, commit and change data again —
+                exactly like any other account at their authority level. Only do this if they are
+                no longer meant to be a strictly-observing account.
+              </>
+            ) : (
+              <>
+                {row.email} will keep seeing everything oversight sees, but every write —
+                submitting, verifying, clearing, committing, overriding points, editing the
+                catalog, all of it — will be refused by the database. This is the ERC/DCA shape:
+                an account that watches the business without being able to act in it.
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        {error ? (
+          <p role="alert" className="text-label text-danger">
+            {error}
+          </p>
+        ) : null}
+
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button loading={submitting} onClick={handleConfirm}>
+            {row.read_only ? 'Remove read-only' : 'Make read-only'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function InviteDialog({ onDone }: { onDone: () => void }) {
   const [email, setEmail] = React.useState('');
   const [firstName, setFirstName] = React.useState('');
   const [lastName, setLastName] = React.useState('');
   const [authority, setAuthority] = React.useState<(typeof AUTHORITIES)[number]>('staff');
   const [position, setPosition] = React.useState<(typeof POSITIONS)[number]>('other');
+  const [readOnly, setReadOnly] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -204,7 +312,7 @@ function InviteDialog({ onDone }: { onDone: () => void }) {
     setSubmitting(true);
     setError(null);
     try {
-      await api.post('/api/admin/users', { email, firstName, lastName, authority, position });
+      await api.post('/api/admin/users', { email, firstName, lastName, authority, position, readOnly });
       onDone();
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : 'Invite failed');
@@ -267,6 +375,22 @@ function InviteDialog({ onDone }: { onDone: () => void }) {
             </Select>
           </div>
         </div>
+
+        {authority === 'founder' ? (
+          <label className="flex items-start gap-2.5 rounded-lg border border-info-border bg-info-wash px-3 py-2.5">
+            <input
+              type="checkbox"
+              checked={readOnly}
+              onChange={(e) => setReadOnly(e.target.checked)}
+              className="mt-0.5 size-3.5 accent-info"
+            />
+            <span className="text-body-sm text-ink-2">
+              <span className="font-medium text-ink">Read-only (ERC / DCA).</span> Sees everything
+              oversight sees; every write is refused by the database. Use this for a brokerage that
+              only keeps tabs — not the clearing founder.
+            </span>
+          </label>
+        ) : null}
 
         {error ? (
           <p role="alert" className="text-label text-danger">

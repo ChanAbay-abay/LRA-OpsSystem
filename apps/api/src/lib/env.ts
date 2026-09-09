@@ -48,3 +48,21 @@ export function assertEnv(): void {
     process.exit(1);
   }
 }
+
+/**
+ * The web app's own base URL — used to build auth email redirects (the
+ * invite link that should land an invited user on `/set-password`, not
+ * nowhere). Deliberately not in REQUIRED: `WEB_APP_URL` is the explicit,
+ * correct value for production, but `CORS_ORIGIN`'s first entry is
+ * already the browser origin in dev, so a fresh checkout keeps working
+ * with zero extra config. Read lazily, same reason as every other name
+ * in this file — a snapshot at import time is how the origin bug was
+ * born in LRA-HR's first life.
+ */
+export function webAppUrl(): string {
+  const explicit = process.env.WEB_APP_URL;
+  if (explicit) return explicit.replace(/\/$/, '');
+  const corsOrigin = process.env.CORS_ORIGIN;
+  if (corsOrigin) return corsOrigin.split(',')[0].trim().replace(/\/$/, '');
+  return 'http://localhost:5173';
+}

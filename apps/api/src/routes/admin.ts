@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { ApiError } from '../lib/domain.js';
 import { authenticate, requireAuthority } from '../middleware/auth.js';
 import { serviceClient, writeAudit } from '../lib/supabase.js';
+import { webAppUrl } from '../lib/env.js';
 
 const AUTHORITIES = ['staff', 'gm', 'founder', 'admin'] as const;
 const POSITIONS = [
@@ -39,6 +40,12 @@ const inviteSchema = z.object({
   lastName: z.string().min(1),
   authority: z.enum(AUTHORITIES).default('staff'),
   position: z.enum(POSITIONS).default('other'),
+  // Strictly read-only founders (ERC, DCA) — OPEN-QUESTIONS.md #5. See
+  // core.read_only / core.is_read_only() in
+  // 20260910120100_core_read_only_accounts.sql: the database is the
+  // real guard, this only gets the flag onto the row in the first
+  // place.
+  readOnly: z.boolean().default(false),
 });
 
 const deleteSchema = z.object({
@@ -55,6 +62,10 @@ const patchSchema = z.object({
   // route; a 500 with a unique-violation from Postgres is the correct,
   // honest failure mode here.
   isClearingFounder: z.boolean().optional(),
+  // Strictly read-only (ERC, DCA) -- see inviteSchema.readOnly above.
+  // Toggling this is a permission change on the highest-privilege class
+  // of account in the platform, same weight as authority itself.
+  readOnly: z.boolean().optional(),
 });
 
 /** Next sequential LRA-### person code. Sequential, not client-supplied. */
@@ -85,8 +96,16 @@ export default async function adminRoutes(app: FastifyInstance) {
     //    in effect here: if the address is already invited/registered,
     //    Supabase returns an error we detect and fall back to lookup.
     let authUserId: string;
+    // redirectTo: without it, the invite link drops the user nowhere —
+    // Supabase's default redirect is the project's Site URL, not this
+    // app, and `/set-password` (the route built to consume the
+    // invite/recovery token) never gets a chance to run. webAppUrl()
+    // is env-driven (WEB_APP_URL, falling back to CORS_ORIGIN's first
+    // entry) rather than a hardcoded origin, so this keeps working
+    // across dev/prod without a code change.
     const { data: invited, error: inviteError } = await db.auth.admin.inviteUserByEmail(
-      body.email
+      body.email,
+      { redirectTo: `${webAppUrl()}/set-password` }
     );
 
     if (invited?.user) {
@@ -149,6 +168,7 @@ export default async function adminRoutes(app: FastifyInstance) {
         email: body.email,
         authority: body.authority,
         person_id: personId,
+        read_only: body.readOnly,
       });
       if (userError) throw userError;
     }
@@ -178,7 +198,12 @@ export default async function adminRoutes(app: FastifyInstance) {
       action: existingUser ? 'admin.users.repair' : 'admin.users.invite',
       entityType: 'core.users',
       entityId: authUserId,
-      newValues: { email: body.email, authority: body.authority, position: body.position },
+      newValues: {
+        email: body.email,
+        authority: body.authority,
+        position: body.position,
+        readOnly: body.readOnly,
+      },
     });
 
     return {
@@ -188,6 +213,7 @@ export default async function adminRoutes(app: FastifyInstance) {
         email: body.email,
         authority: body.authority,
         position: body.position,
+        readOnly: body.readOnly,
         invited: Boolean(invited?.user),
       },
     };
@@ -199,7 +225,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       .schema('core')
       .from('users')
       .select(
-        'id, email, authority, is_active, is_clearing_founder, last_login, person_id, created_at, deleted_at, deleted_by, purge_due_at'
+        'id, email, authority, is_active, is_clearing_founder, read_only, last_login, person_id, created_at, deleted_at, deleted_by, purge_due_at'
       );
     if (error) throw error;
 
@@ -228,6 +254,7 @@ export default async function adminRoutes(app: FastifyInstance) {
     if (body.isActive !== undefined) patch.is_active = body.isActive;
     if (body.authority !== undefined) patch.authority = body.authority;
     if (body.isClearingFounder !== undefined) patch.is_clearing_founder = body.isClearingFounder;
+    if (body.readOnly !== undefined) patch.read_only = body.readOnly;
 
     if (Object.keys(patch).length) {
       const { error } = await db.schema('core').from('users').update(patch).eq('id', id);
