@@ -18,6 +18,7 @@ import * as React from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   BookOpen,
+  CalendarCheck,
   ClipboardCheck,
   Coins,
   FileClock,
@@ -46,6 +47,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const items: NavItem[] = [
     { to: '/', label: 'Now', icon: Home, end: true },
     { to: '/board', label: 'Board', icon: KanbanSquare },
+    { to: '/briefing', label: 'Briefing', icon: CalendarCheck },
     { to: '/points', label: 'My points', icon: Coins },
     { to: '/inbox', label: 'Inbox', icon: Inbox },
     { to: '/catalog', label: 'Catalog', icon: BookOpen },

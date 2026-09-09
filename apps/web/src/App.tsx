@@ -14,6 +14,7 @@ import { AppShell } from '@/components/layout/app-shell';
 import { LoginPage } from '@/routes/login';
 import { NowPage } from '@/routes/now';
 import { BoardPage } from '@/routes/board';
+import { BriefingPage } from '@/routes/briefing';
 import { PointsPage } from '@/routes/points';
 import { QueuePage } from '@/routes/queue';
 import { InboxPage } from '@/routes/inbox';
@@ -62,6 +63,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <BoardPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/briefing"
+        element={
+          <ProtectedRoute>
+            <BriefingPage />
           </ProtectedRoute>
         }
       />

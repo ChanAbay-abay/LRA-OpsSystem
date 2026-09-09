@@ -73,6 +73,27 @@ export default async function weeksRoutes(app: FastifyInstance) {
     return { data };
   });
 
+  // Phase 6 — the Monday briefing. `open` only stamps a screen-state
+  // timestamp; `close` is the lock moment (`ops.close_briefing` moves
+  // the week planning -> open and audit-logs it), matching PRD.md §3.1
+  // exactly: the week is `open` once commitments are locked, not once
+  // the meeting starts.
+  app.post('/:id/briefing/open', { onRequest: requireOversight() }, async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { data, error } = await db.schema('ops').rpc('open_briefing', { p_week_id: id });
+    if (error) throw new ApiError(422, error.message, error.code ?? 'BRIEFING_OPEN_REFUSED');
+    return { data };
+  });
+
+  app.post('/:id/briefing/close', { onRequest: requireOversight() }, async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { data, error } = await db.schema('ops').rpc('close_briefing', { p_week_id: id });
+    if (error) throw new ApiError(422, error.message, error.code ?? 'BRIEFING_CLOSE_REFUSED');
+    return { data };
+  });
+
   app.post('/:id/close', { onRequest: requireOversight() }, async (req) => {
     const { id } = req.params as { id: string };
     const db = userClient(req.accessToken);

@@ -26,6 +26,7 @@ const TASK_STATUSES = [
   'cleared',
   'rejected',
   'cancelled',
+  'pending_cancellation',
 ] as const;
 
 const createSchema = z.object({
@@ -45,10 +46,26 @@ const patchSchema = z.object({
   clientRef: z.string().nullable().optional(),
 });
 
-const statusSchema = z.object({
-  to: z.enum(TASK_STATUSES),
-  reason: z.string().optional(),
-});
+// A cancellation FLAG needs its reason enforced the same way as a
+// points override (min 10 chars, checked in zod AND the DB trigger --
+// Chan's explicit ask to match that precedent exactly). A cancellation
+// REFUSAL needs the same bar but which transition is a refusal depends
+// on the task's current status, which zod cannot see -- that half is
+// checked in the route after the current row is fetched.
+const statusSchema = z
+  .object({
+    to: z.enum(TASK_STATUSES),
+    reason: z.string().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.to === 'pending_cancellation' && (!val.reason || val.reason.trim().length < 10)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['reason'],
+        message: 'a cancellation flag needs a written reason of at least 10 characters',
+      });
+    }
+  });
 
 const overrideSchema = z.object({
   points: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(5), z.literal(8), z.literal(13), z.literal(21)]),
@@ -64,7 +81,7 @@ const blockSchema = z.object({
 });
 
 /** Attach `ownerPosition` / `ownerName` to a batch of tasks, per Chan's ask that position mean something in the board's grouping. */
-async function enrichWithOwners<T extends { owner_user_id: string }>(
+export async function enrichWithOwners<T extends { owner_user_id: string }>(
   db: ReturnType<typeof serviceClient>,
   tasks: T[]
 ): Promise<(T & { ownerPosition: string | null; ownerName: string | null })[]> {
@@ -115,6 +132,15 @@ async function openBlockCounts(
   return counts;
 }
 
+/** Note counts keyed by task id, so board cards can show "who is actually narrating" at a glance (Chan's ask) without an N+1 query. */
+async function noteCounts(db: ReturnType<typeof serviceClient>, taskIds: string[]): Promise<Map<string, number>> {
+  if (!taskIds.length) return new Map();
+  const { data } = await db.schema('ops').from('task_notes').select('task_id').in('task_id', taskIds);
+  const counts = new Map<string, number>();
+  for (const row of data ?? []) counts.set(row.task_id, (counts.get(row.task_id) ?? 0) + 1);
+  return counts;
+}
+
 export default async function tasksRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
   app.addHook('onRequest', requireMembership('ops'));
@@ -136,7 +162,8 @@ export default async function tasksRoutes(app: FastifyInstance) {
     const svc = serviceClient();
     const enriched = await enrichWithOwners(svc, data ?? []);
     const counts = await openBlockCounts(svc, enriched.map((t) => t.id));
-    let result = enriched.map((t) => ({ ...t, openBlockCount: counts.get(t.id) ?? 0 }));
+    const notes = await noteCounts(svc, enriched.map((t) => t.id));
+    let result = enriched.map((t) => ({ ...t, openBlockCount: counts.get(t.id) ?? 0, noteCount: notes.get(t.id) ?? 0 }));
 
     if (q.stale === 'true') {
       const staleMs = 3 * 24 * 60 * 60 * 1000;
@@ -164,6 +191,7 @@ export default async function tasksRoutes(app: FastifyInstance) {
     const svc = serviceClient();
     const enriched = await enrichWithOwners(svc, data ?? []);
     const counts = await openBlockCounts(svc, enriched.map((t) => t.id));
+    const notes = await noteCounts(svc, enriched.map((t) => t.id));
 
     const columns: Record<string, unknown[]> = {
       backlog: [],
@@ -173,11 +201,19 @@ export default async function tasksRoutes(app: FastifyInstance) {
       submitted: [],
       verified: [],
       cleared: [],
+      // Not one of DESIGN.md's seven drag columns -- a flagged
+      // cancellation is a decision waiting on the clearing founder, not
+      // a place on the board's left-to-right custody chain, so the web
+      // client surfaces this as a banner above the columns rather than
+      // an eighth draggable one.
+      pending_cancellation: [],
     };
 
     for (const t of enriched) {
-      const card = { ...t, openBlockCount: counts.get(t.id) ?? 0 };
-      if ((counts.get(t.id) ?? 0) > 0 && !['cleared', 'cancelled'].includes(t.status)) {
+      const card = { ...t, openBlockCount: counts.get(t.id) ?? 0, noteCount: notes.get(t.id) ?? 0 };
+      if (t.status === 'pending_cancellation') {
+        columns.pending_cancellation.push(card);
+      } else if ((counts.get(t.id) ?? 0) > 0 && !['cleared', 'cancelled'].includes(t.status)) {
         columns.blocked.push(card);
       } else if (t.status === 'todo' && t.is_committed) {
         columns.this_week.push(card);
@@ -242,21 +278,138 @@ export default async function tasksRoutes(app: FastifyInstance) {
 
   // THE one transition endpoint. Whatever the caller asks for, the
   // database's own trigger decides whether it is legal — this route
-  // never special-cases a persona.
+  // never special-cases a persona. The cancellation ladder
+  // (todo/in_progress/submitted/verified -> pending_cancellation ->
+  // cancelled | <status before the flag>) goes through here too, same
+  // as verify/reject/clear — no separate "approve cancellation"
+  // endpoint, so there is exactly one place the ladder can be wrong.
   app.post('/:id/status', async (req) => {
     const { id } = req.params as { id: string };
     const body = statusSchema.parse(req.body);
     const db = userClient(req.accessToken);
 
+    // Needed to tell a cancellation DECISION (current status is
+    // pending_cancellation) apart from every other transition, since
+    // that is the only case where `cancellation_decision_reason` is the
+    // right column for `reason` rather than `rejected_reason`.
+    const { data: current } = await db.schema('ops').from('tasks').select('status').eq('id', id).maybeSingle();
+
+    if (
+      current?.status === 'pending_cancellation' &&
+      body.to !== 'pending_cancellation' &&
+      body.to !== 'cancelled' &&
+      (!body.reason || body.reason.trim().length < 10)
+    ) {
+      throw new ApiError(400, 'a cancellation refusal needs a written reason of at least 10 characters', 'VALIDATION_ERROR');
+    }
+
     const patch: Record<string, unknown> = { status: body.to };
     if (body.to === 'rejected' || (body.to === 'submitted' && body.reason)) {
       patch.rejected_reason = body.reason ?? null;
+    }
+    if (body.to === 'pending_cancellation') {
+      patch.cancellation_reason = body.reason ?? null;
+    }
+    if (current?.status === 'pending_cancellation' && body.to !== 'pending_cancellation') {
+      // Approval (-> cancelled) or refusal (-> the pre-flag status) --
+      // either way this is the decision reason, never rejected_reason.
+      patch.cancellation_decision_reason = body.reason ?? null;
     }
 
     const { data, error } = await db.schema('ops').from('tasks').update(patch).eq('id', id).select().single();
     if (error) {
       throw new ApiError(422, error.message, error.code ?? 'TRANSITION_REFUSED');
     }
+    return { data };
+  });
+
+  // Commit / uncommit — Phase 6. `ops.enforce_task_transition`'s
+  // commitment-lock guard is the real enforcement (owner-or-oversight,
+  // and refused once the task's week has left `planning`); this route
+  // just derives `committed_week_id`/`committed_points` from the task's
+  // current week and catalog snapshot so the client never has to send
+  // (or forge) either.
+  app.post('/:id/commit', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+
+    const { data: existing, error: fetchError } = await db
+      .schema('ops')
+      .from('tasks')
+      .select('week_id, catalog_points, points_override')
+      .eq('id', id)
+      .maybeSingle();
+    if (fetchError) throw fetchError;
+    if (!existing) throw new ApiError(404, 'task not found', 'NOT_FOUND');
+
+    const { data, error } = await db
+      .schema('ops')
+      .from('tasks')
+      .update({
+        is_committed: true,
+        committed_week_id: existing.week_id,
+        committed_points: existing.points_override ?? existing.catalog_points ?? null,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw new ApiError(422, error.message, error.code ?? 'COMMIT_REFUSED');
+    return { data };
+  });
+
+  app.delete('/:id/commit', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { data, error } = await db
+      .schema('ops')
+      .from('tasks')
+      .update({ is_committed: false, committed_week_id: null, committed_points: null })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw new ApiError(422, error.message, error.code ?? 'UNCOMMIT_REFUSED');
+    return { data };
+  });
+
+  // The worklog — a running narration distinct from the task's
+  // `description` (PRD addendum: "employees add descriptions as they
+  // continue with the tasks"). Append-only at the DB layer
+  // (`ops.forbid_task_note_mutation`); this route only ever INSERTs or
+  // SELECTs.
+  app.get('/:id/notes', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { data, error } = await db
+      .schema('ops')
+      .from('task_notes')
+      .select('*')
+      .eq('task_id', id)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+
+    const svc = serviceClient();
+    const authorIds = [...new Set((data ?? []).map((n) => n.author_user_id as string))];
+    const enriched = authorIds.length
+      ? await enrichWithOwners(svc, authorIds.map((owner_user_id) => ({ owner_user_id })))
+      : [];
+    const nameByAuthor = new Map(enriched.map((e) => [e.owner_user_id, e.ownerName]));
+
+    return {
+      data: (data ?? []).map((n) => ({ ...n, authorName: nameByAuthor.get(n.author_user_id) ?? null })),
+    };
+  });
+
+  app.post('/:id/notes', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = z.object({ body: z.string().trim().min(1).max(4000) }).parse(req.body);
+    const db = userClient(req.accessToken);
+    const { data, error } = await db
+      .schema('ops')
+      .from('task_notes')
+      .insert({ task_id: id, author_user_id: req.user.id, body: body.body })
+      .select()
+      .single();
+    if (error) throw new ApiError(422, error.message, error.code ?? 'NOTE_REFUSED');
     return { data };
   });
 

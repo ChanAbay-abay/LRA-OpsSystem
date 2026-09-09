@@ -9,6 +9,7 @@
 import type { FastifyInstance } from 'fastify';
 import { authenticate } from '../middleware/auth.js';
 import { serviceClient } from '../lib/supabase.js';
+import { loadOpsRoster } from '../lib/roster.js';
 
 export default async function meRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
@@ -38,40 +39,7 @@ export async function membersRoutes(app: FastifyInstance) {
   // still only returns active ops members, mirroring what RLS would
   // allow an oversight caller to see directly.
   app.get('/', async () => {
-    const db = serviceClient();
-    const { data: memberships, error } = await db
-      .schema('core')
-      .from('memberships')
-      .select('module, position, is_active, user_id, users:user_id(id, email, authority, person_id)')
-      .eq('module', 'ops')
-      .eq('is_active', true);
-
-    if (error) throw error;
-
-    const userIds = (memberships ?? [])
-      .map((m: Record<string, unknown>) => (m.users as { person_id: string | null } | null)?.person_id)
-      .filter((id): id is string => Boolean(id));
-
-    const { data: people } = userIds.length
-      ? await db.schema('core').from('people').select('id, first_name, last_name, display_name, is_active').in('id', userIds)
-      : { data: [] as Array<Record<string, unknown>> };
-
-    const peopleById = new Map((people ?? []).map((p) => [p.id as string, p]));
-
-    const members = (memberships ?? []).map((m: Record<string, unknown>) => {
-      const u = m.users as { id: string; email: string; authority: string; person_id: string | null } | null;
-      const person = u?.person_id ? peopleById.get(u.person_id) : undefined;
-      return {
-        userId: u?.id,
-        email: u?.email,
-        authority: u?.authority,
-        position: m.position,
-        name: person
-          ? (person.display_name as string) ?? `${person.first_name} ${person.last_name}`
-          : u?.email,
-      };
-    });
-
+    const members = await loadOpsRoster(serviceClient());
     return { data: members };
   });
 }
