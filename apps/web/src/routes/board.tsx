@@ -267,7 +267,7 @@ function TaskCard({
               }}
               className={cn(
                 'num text-num-xs flex items-center gap-1 rounded-sm px-0.5 hover:bg-surface-2',
-                task.noteCount > 0 ? 'text-ink-3' : 'text-hairline-strong opacity-0 group-hover:opacity-100'
+                task.noteCount > 0 ? 'text-ink-3' : 'text-hairline-strong opacity-0 focus-visible:opacity-100 group-hover:opacity-100'
               )}
             >
               <MessageSquare className="size-3" aria-hidden /> {task.noteCount > 0 ? task.noteCount : ''}

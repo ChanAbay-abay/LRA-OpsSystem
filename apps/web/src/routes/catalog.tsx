@@ -143,8 +143,19 @@ export function CatalogPage() {
         {(rows) => (
           <div className="rounded-xl border border-hairline bg-surface">
             {rows.map((t) => (
-              <div key={t.id} className={`flex items-start gap-4 border-b border-hairline px-4 py-3 last:border-0 ${!t.is_active ? 'opacity-60' : ''}`}>
-                <div className="w-28 shrink-0 text-eyebrow text-ink-3">{t.category}</div>
+              // Below `sm` (640px) this stacks into two lines --
+              // category, then title/note, then a footer row holding
+              // both the points and the action buttons -- instead of
+              // five flex siblings fighting for a 375px-wide row. At
+              // `sm`+ the footer wrapper is `contents` (removed from
+              // layout, not rendering), so its two children rejoin the
+              // row as direct flex siblings and the ≥640px layout is
+              // pixel-identical to before.
+              <div
+                key={t.id}
+                className={`flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-0 sm:flex-row sm:items-start sm:gap-4 ${!t.is_active ? 'opacity-60' : ''}`}
+              >
+                <div className="text-eyebrow text-ink-3 sm:w-28 sm:shrink-0">{t.category}</div>
                 <div className="flex-1">
                   <p className="text-strong text-ink">
                     {t.name} {t.is_recurring ? <span className="text-eyebrow text-ink-3">· recurring</span> : null}
@@ -152,39 +163,41 @@ export function CatalogPage() {
                   </p>
                   <p className="text-body-sm text-ink-3">{t.guideline_note}</p>
                 </div>
-                <div className="flex w-20 shrink-0 flex-col items-end justify-center">
-                  {t.default_points != null ? (
-                    <span className={`num text-num-md ${isPlaceholder(t) ? 'text-pending border-b border-dashed border-current' : 'text-ink'}`}>
-                      {t.default_points}
-                    </span>
-                  ) : (
-                    <span className="num text-num-sm text-pending">DRAFT</span>
-                  )}
-                  {t.default_points != null && isPlaceholder(t) ? (
-                    <span className="text-micro text-pending">placeholder</span>
+                <div className="flex items-center justify-between gap-3 sm:contents">
+                  <div className="flex w-20 shrink-0 flex-col items-end justify-center">
+                    {t.default_points != null ? (
+                      <span className={`num text-num-md ${isPlaceholder(t) ? 'text-pending border-b border-dashed border-current' : 'text-ink'}`}>
+                        {t.default_points}
+                      </span>
+                    ) : (
+                      <span className="num text-num-sm text-pending">DRAFT</span>
+                    )}
+                    {t.default_points != null && isPlaceholder(t) ? (
+                      <span className="text-micro text-pending">placeholder</span>
+                    ) : null}
+                  </div>
+                  {canEdit ? (
+                    <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                      <Button variant="secondary" size="sm" onClick={() => setPricing(t)}>
+                        Price
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setEditingType(t)}>
+                        Edit
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        title={t.is_active ? 'Deactivate' : 'Reactivate'}
+                        onClick={() => toggleActive(t)}
+                      >
+                        {t.is_active ? <Archive className="size-4" aria-hidden /> : <ArchiveRestore className="size-4" aria-hidden />}
+                      </Button>
+                      <Button variant="ghost" size="sm" title="Delete permanently (only if never used)" onClick={() => setDeletingType(t)}>
+                        <Trash2 className="size-4 text-danger" aria-hidden />
+                      </Button>
+                    </div>
                   ) : null}
                 </div>
-                {canEdit ? (
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <Button variant="secondary" size="sm" onClick={() => setPricing(t)}>
-                      Price
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => setEditingType(t)}>
-                      Edit
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      title={t.is_active ? 'Deactivate' : 'Reactivate'}
-                      onClick={() => toggleActive(t)}
-                    >
-                      {t.is_active ? <Archive className="size-4" aria-hidden /> : <ArchiveRestore className="size-4" aria-hidden />}
-                    </Button>
-                    <Button variant="ghost" size="sm" title="Delete permanently (only if never used)" onClick={() => setDeletingType(t)}>
-                      <Trash2 className="size-4 text-danger" aria-hidden />
-                    </Button>
-                  </div>
-                ) : null}
               </div>
             ))}
           </div>
@@ -213,8 +226,12 @@ export function CatalogPage() {
         {(rows) => (
           <div className="rounded-xl border border-hairline bg-surface">
             {rows.map((t) => (
-              <div key={t.id} className={`flex items-start gap-4 border-b border-hairline px-4 py-3 last:border-0 ${!t.is_active ? 'opacity-60' : ''}`}>
-                <div className="w-28 shrink-0 text-eyebrow text-ink-3">{t.position}</div>
+              // Same stacking fix as the task-type list above.
+              <div
+                key={t.id}
+                className={`flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-0 sm:flex-row sm:items-start sm:gap-4 ${!t.is_active ? 'opacity-60' : ''}`}
+              >
+                <div className="text-eyebrow text-ink-3 sm:w-28 sm:shrink-0">{t.position}</div>
                 <div className="flex-1">
                   <p className="text-strong text-ink">
                     {t.title}
@@ -225,7 +242,7 @@ export function CatalogPage() {
                   </p>
                 </div>
                 {canEdit ? (
-                  <div className="flex shrink-0 items-center gap-1.5">
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                     <Button variant="ghost" size="sm" onClick={() => setEditingTemplate(t)}>
                       Edit
                     </Button>

@@ -58,6 +58,7 @@ export function QueuePage() {
   // "Verify" is any GM's job and is unaffected.
   const clearDisabled = nextAction === 'cleared' && !canClear;
   const clearDisabledReason = 'Only the clearing founder can approve this.';
+  const refuseDisabledReason = 'Only the clearing founder can refuse this.';
 
   async function approve(task: QueueTask) {
     try {
@@ -109,7 +110,7 @@ export function QueuePage() {
                     variant="secondary"
                     size="sm"
                     disabled={!canClear}
-                    title={!canClear ? clearDisabledReason : undefined}
+                    title={!canClear ? refuseDisabledReason : undefined}
                     onClick={() => setDecidingCancellation(t)}
                   >
                     Refuse
