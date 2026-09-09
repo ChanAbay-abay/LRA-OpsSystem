@@ -67,8 +67,21 @@ errors, not code faults:
 - A `/set-password` run showed "server can't be reached", which looked like a product bug. It
   was a deliberately non-standard dev port fighting `CORS_ORIGIN`.
 
-**Do:** before reporting a negative, prove the instrument can produce a positive. State
-plainly which findings were reproduced and which were reasoned.
+A fourth, from the other direction — a check that would have reported a **false pass/fail** on
+security policy. This query, written to confirm every write policy guards on `is_read_only`:
+
+```sql
+(qual::text || coalesce(with_check::text,'')) like '%is_read_only%'
+```
+
+returns `NULL` for every INSERT policy, because INSERT policies have `qual = NULL` and
+`NULL || anything` is NULL in SQL. The guard was present; the check could not see it. Correct
+form is `coalesce(qual::text,'') || coalesce(with_check::text,'')`.
+
+**Do:** before reporting a negative, prove the instrument can produce a positive. When
+auditing security policy, run the check against a case you know is guarded AND one you know
+is not, and confirm it separates them. State plainly which findings were reproduced and which
+were reasoned.
 
 ---
 
