@@ -18,6 +18,20 @@
  * sets that flag is Phase 6, deliberately not built yet (blocked on the
  * founder pricing the catalog). Dropping into Blocked opens the
  * required block dialog before anything commits, per DESIGN.md §7.3.
+ *
+ * The board stays at Chan's decided seven columns (2026-09-09) — no
+ * eighth `pending_cancellation` column. A task flagged for cancellation
+ * instead stays rendered in the column its `pre_cancellation_status`
+ * resolves to (the API does that placement) with a distinct "awaiting
+ * decision" treatment reusing DESIGN.md's `--pending` semantic, and it
+ * is not draggable — the trigger would refuse every transition off
+ * `pending_cancellation` except the clearing founder's own decision, so
+ * a drag that silently snapped back would be a lie. `useDraggable`'s own
+ * `disabled` option is used rather than a hand-rolled guard, which also
+ * gets `aria-disabled` and the removal of pointer/keyboard activation
+ * for free. The banner (`flaggedForCancellation`, from the API's
+ * separate `flagged` list) remains the founder's action surface;
+ * placement in-column is the visibility fix.
  */
 import * as React from 'react';
 import {
@@ -68,12 +82,20 @@ interface Task {
   noteCount: number;
   ownerName: string | null;
   ownerPosition: string | null;
+  // Present once a cancellation has been flagged (PLAN.md's cancellation
+  // ladder). `pre_cancellation_status` is what places the card back in
+  // its real column while `status` itself reads `pending_cancellation`.
+  pre_cancellation_status: string | null;
+  cancellation_reason: string | null;
+  cancellation_requested_at: string | null;
 }
 
-type Board = Record<
-  'backlog' | 'this_week' | 'in_progress' | 'blocked' | 'submitted' | 'verified' | 'cleared' | 'pending_cancellation',
-  Task[]
->;
+type Board = Record<'backlog' | 'this_week' | 'in_progress' | 'blocked' | 'submitted' | 'verified' | 'cleared', Task[]> & {
+  // Not a column — the same flagged tasks that also sit in their real
+  // column above, kept as a flat list so the banner doesn't have to scan
+  // all seven columns to build itself.
+  flagged: Task[];
+};
 
 const COLUMNS: { id: keyof Board; label: string; droppable: boolean }[] = [
   { id: 'backlog', label: 'Backlog', droppable: true },
@@ -141,10 +163,22 @@ function TaskCard({
   onFlagCancellation?: (task: Task) => void;
   onOpenNotes?: (task: Task) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform } = useDraggable({ id: task.id, data: task });
+  const pendingCancellation = task.status === 'pending_cancellation';
+  // `disabled` strips dnd-kit's pointer/keyboard activators for us
+  // (listeners come back `undefined`) and sets `aria-disabled` on its
+  // own `attributes` object — the same mechanism DESIGN.md §7.3 asks
+  // for, not a hand-rolled `onPointerDown` guard that could drift out of
+  // sync with the real reason (the trigger refuses every transition off
+  // `pending_cancellation` except the clearing founder's decision).
+  const { attributes, listeners, setNodeRef, transform } = useDraggable({
+    id: task.id,
+    data: task,
+    disabled: pendingCancellation,
+  });
   const style = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${dragging ? 1.02 : 1})` }
     : undefined;
+  const describedById = `pending-cancellation-${task.id}`;
 
   return (
     <div
@@ -154,15 +188,38 @@ function TaskCard({
       {...attributes}
       role="button"
       tabIndex={0}
-      aria-roledescription="draggable task card"
-      aria-label={`${task.title}, ${task.points_override ?? task.catalog_points ?? 'unpriced'} points, owned by ${task.ownerName ?? 'unknown'}`}
+      aria-roledescription={pendingCancellation ? 'task awaiting a cancellation decision' : 'draggable task card'}
+      aria-describedby={pendingCancellation ? describedById : undefined}
+      aria-label={
+        pendingCancellation
+          ? `${task.title}, flagged for cancellation, not draggable. Waiting on the clearing founder's decision.`
+          : `${task.title}, ${task.points_override ?? task.catalog_points ?? 'unpriced'} points, owned by ${task.ownerName ?? 'unknown'}`
+      }
       className={cn(
-        'group relative flex flex-col gap-2 rounded-lg border border-hairline bg-surface p-3 text-left',
-        'hover:border-[#CBD2E0] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+        'group relative flex flex-col gap-2 rounded-lg border p-3 text-left',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+        pendingCancellation
+          ? 'cursor-not-allowed border-dashed border-pending-border bg-pending-wash/70'
+          : 'border-hairline bg-surface hover:border-[#CBD2E0]',
         dragging && 'shadow-drag opacity-90',
-        task.openBlockCount > 0 && 'bg-[repeating-linear-gradient(45deg,#EEF1F5,#EEF1F5_4px,#E4E9F0_4px,#E4E9F0_8px)]'
+        !pendingCancellation && task.openBlockCount > 0 && 'bg-[repeating-linear-gradient(45deg,#EEF1F5,#EEF1F5_4px,#E4E9F0_4px,#E4E9F0_8px)]'
       )}
     >
+      {pendingCancellation ? (
+        <>
+          {/* Screen-reader-only: the "why" behind aria-disabled, per DESIGN.md §7.3's requirement that the non-draggable state be explained, not just asserted. */}
+          <span id={describedById} className="sr-only">
+            This task cannot be dragged while a cancellation decision is pending with the clearing founder.
+          </span>
+          <span
+            className="inline-flex w-fit items-center gap-1 rounded-xs border border-pending-border bg-white/70 px-1.5 py-0.5 text-micro text-pending"
+            title={task.cancellation_reason ?? undefined}
+          >
+            <XOctagon className="size-3" aria-hidden />
+            Awaiting cancellation decision
+          </span>
+        </>
+      ) : null}
       {onFlagCancellation ? (
         <button
           type="button"
@@ -264,7 +321,11 @@ function Column({
           <TaskCard
             key={t.id}
             task={t}
-            onFlagCancellation={onFlagCancellation && !['cleared', 'cancelled'].includes(t.status) ? onFlagCancellation : undefined}
+            onFlagCancellation={
+              onFlagCancellation && !['cleared', 'cancelled', 'pending_cancellation'].includes(t.status)
+                ? onFlagCancellation
+                : undefined
+            }
             onOpenNotes={onOpenNotes}
           />
         ))}
@@ -427,7 +488,7 @@ export function BoardPage() {
     );
   }
 
-  const flaggedForCancellation = board.pending_cancellation ?? [];
+  const flaggedForCancellation = board.flagged ?? [];
 
   return (
     <div>

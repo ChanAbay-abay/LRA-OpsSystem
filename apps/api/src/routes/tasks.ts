@@ -193,6 +193,15 @@ export default async function tasksRoutes(app: FastifyInstance) {
     const counts = await openBlockCounts(svc, enriched.map((t) => t.id));
     const notes = await noteCounts(svc, enriched.map((t) => t.id));
 
+    // Chan's decision (2026-09-09): the board stays at seven columns —
+    // an eighth `pending_cancellation` column would sit empty almost all
+    // the time and horizontal space is the board's scarcest resource.
+    // But a flagged task must not disappear from view while it awaits a
+    // decision, so it stays rendered in the column its
+    // `pre_cancellation_status` resolves to (not hidden, not moved) —
+    // the web client is what applies the "at risk" visual treatment and
+    // makes the card non-draggable. `flagged` below is the SEPARATE list
+    // the founder's banner reads from; it is not a column.
     const columns: Record<string, unknown[]> = {
       backlog: [],
       this_week: [],
@@ -201,36 +210,51 @@ export default async function tasksRoutes(app: FastifyInstance) {
       submitted: [],
       verified: [],
       cleared: [],
-      // Not one of DESIGN.md's seven drag columns -- a flagged
-      // cancellation is a decision waiting on the clearing founder, not
-      // a place on the board's left-to-right custody chain, so the web
-      // client surfaces this as a banner above the columns rather than
-      // an eighth draggable one.
-      pending_cancellation: [],
+    };
+    const flagged: unknown[] = [];
+
+    // Maps a real task_status to the column it renders in when nothing
+    // else (a block) overrides that. Used for a task's own status, and
+    // for a flagged cancellation's `pre_cancellation_status` snapshot —
+    // literally "the column it held before being flagged", per Chan's
+    // decision above.
+    const statusColumn = (status: string, isCommitted: boolean): keyof typeof columns | null => {
+      switch (status) {
+        case 'todo':
+          return isCommitted ? 'this_week' : 'backlog';
+        case 'in_progress':
+          return 'in_progress';
+        case 'submitted':
+          return 'submitted';
+        case 'verified':
+          return 'verified';
+        case 'cleared':
+          return 'cleared';
+        default:
+          return null;
+      }
     };
 
     for (const t of enriched) {
       const card = { ...t, openBlockCount: counts.get(t.id) ?? 0, noteCount: notes.get(t.id) ?? 0 };
+
       if (t.status === 'pending_cancellation') {
-        columns.pending_cancellation.push(card);
-      } else if ((counts.get(t.id) ?? 0) > 0 && !['cleared', 'cancelled'].includes(t.status)) {
-        columns.blocked.push(card);
-      } else if (t.status === 'todo' && t.is_committed) {
-        columns.this_week.push(card);
-      } else if (t.status === 'todo') {
-        columns.backlog.push(card);
-      } else if (t.status === 'in_progress') {
-        columns.in_progress.push(card);
-      } else if (t.status === 'submitted') {
-        columns.submitted.push(card);
-      } else if (t.status === 'verified') {
-        columns.verified.push(card);
-      } else if (t.status === 'cleared') {
-        columns.cleared.push(card);
+        const col = statusColumn(t.pre_cancellation_status ?? 'todo', t.is_committed);
+        if (col) columns[col].push(card);
+        flagged.push(card);
+        continue;
       }
+
+      if ((counts.get(t.id) ?? 0) > 0 && !['cleared', 'cancelled'].includes(t.status)) {
+        columns.blocked.push(card);
+        continue;
+      }
+
+      const col = statusColumn(t.status, t.is_committed);
+      if (col) columns[col].push(card);
     }
 
-    return { data: columns };
+    return { data: { ...columns, flagged } };
   });
 
   app.post('/', async (req) => {
