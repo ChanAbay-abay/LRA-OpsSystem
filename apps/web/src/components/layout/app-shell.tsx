@@ -23,16 +23,31 @@
  * their own content to the column (see routes/catalog.tsx); `<main>`
  * itself no longer offers an invisible horizontal escape hatch to hide
  * the next instance of that bug.
+ *
+ * The shell owns the viewport (`h-screen overflow-hidden`) and `<main>`
+ * is the only scroller (Chan, 2026-09-09). The sidebar is navigation:
+ * it has to stay put while a long board or briefing scrolls past it,
+ * the same way it does in Linear or Notion.
  */
 import type { ReactNode } from 'react';
 import { MobileSidebarTrigger, Sidebar } from './sidebar';
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-screen flex-col bg-canvas md:flex-row">
+    <div className="flex h-screen flex-col overflow-hidden bg-canvas md:flex-row">
       <Sidebar />
       <MobileSidebarTrigger />
-      <main className="flex-1 overflow-y-auto overflow-x-hidden">
+      {/*
+        `min-h-0` is what actually makes the scroll happen HERE and not
+        on the document (Chan: "when scrolling, it scrolls the whole
+        page … it should just scroll the right section, not the nav on
+        the left"). A flex child's default `min-height: auto` refuses to
+        shrink below its content, so `overflow-y-auto` on it never has
+        anything to scroll and the overflow escapes to the page — taking
+        the sidebar with it. The wrapper above is `h-screen
+        overflow-hidden` so there is no page scroll left to escape to.
+      */}
+      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <div className="mx-auto max-w-app px-6 py-6 lg:px-8">{children}</div>
       </main>
     </div>

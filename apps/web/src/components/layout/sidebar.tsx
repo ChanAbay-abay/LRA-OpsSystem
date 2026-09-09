@@ -64,7 +64,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   ];
 
   return (
-    <div className="flex h-full w-sidebar shrink-0 flex-col bg-navy-900 on-navy">
+    <div className="flex h-full w-sidebar shrink-0 flex-col overflow-y-auto bg-navy-900 on-navy">
       <div className="flex items-center gap-2 p-4">
         <div className="flex size-6 items-center justify-center rounded bg-brand-600 text-[11px] font-bold text-white">
           L
