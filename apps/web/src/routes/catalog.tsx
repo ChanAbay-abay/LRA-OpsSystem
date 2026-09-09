@@ -352,7 +352,12 @@ function PriceDialog({ type, onClose, onDone }: { type: TaskType; onClose: () =>
 function TypeDialog({ type, onClose, onDone }: { type: TaskType | null; onClose: () => void; onDone: () => void }) {
   const [name, setName] = React.useState(type?.name ?? '');
   const [category, setCategory] = React.useState(type?.category ?? '');
-  const [note, setNote] = React.useState(type?.guideline_note ?? '');
+  // Show the note WITHOUT the placeholder marker, exactly as PriceDialog does --
+  // the marker is a status flag, not part of the guidance text, and leaving it in
+  // an editable field invites someone to edit around it.
+  const [note, setNote] = React.useState(
+    (type?.guideline_note ?? '').replace(/^(PLACEHOLDER|DRAFT)\s*—\s*/, ''),
+  );
   const [points, setPoints] = React.useState<number | null>(type?.default_points ?? null);
   const [isRecurring, setIsRecurring] = React.useState(type?.is_recurring ?? false);
   const [submitting, setSubmitting] = React.useState(false);
@@ -362,7 +367,15 @@ function TypeDialog({ type, onClose, onDone }: { type: TaskType | null; onClose:
     setSubmitting(true);
     setError(null);
     try {
-      const body = { name, category, guidelineNote: note, defaultPoints: points, isRecurring };
+      // Both dialogs can set a point value, so both must be able to clear the
+      // placeholder marker -- otherwise repricing through Edit silently leaves
+      // the type counted as unpriced and the banner never counts down.
+      // The marker is re-attached only when the points are still the untouched
+      // placeholder value, so renaming a type does not quietly certify its price.
+      const stillUnpriced =
+        type != null && isPlaceholder(type) && points === (type.default_points ?? null);
+      const guidelineNote = stillUnpriced ? `PLACEHOLDER — ${note}` : note;
+      const body = { name, category, guidelineNote, defaultPoints: points, isRecurring };
       if (type) {
         await api.patch(`/api/catalog/${type.id}`, body);
       } else {
