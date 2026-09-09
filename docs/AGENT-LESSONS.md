@@ -95,3 +95,25 @@ actual rule.
 **Do:** mirror the database's own condition (here: "terminal tasks are frozen"). The same
 principle is why `lib/task-permissions.ts` mirrors the transition ladder rather than
 re-deriving it per component — and why it may be **stricter** than the database, never looser.
+
+---
+
+## 6. A refusal on one rung is not proof that no path exists
+
+**2026-09-10.** An agent reported that the founder's own recurring task "has no route to
+`cleared` at all." Driving the real ladder over HTTP proved otherwise: submitted by the
+founder, verified by the **GM**, cleared by the founder — 200 at every step, 3 points, 3
+ledger rows. The agent had almost certainly tried founder-verifies-own-task, been correctly
+refused, and generalised from that one refusal.
+
+The rung it missed: `submitted -> verified` branches on whether the *owner* is a GM. The
+founder is not, so the requirement is a `core.is_gm()` caller who is not the owner — which a
+GM satisfies. And `verified -> cleared` has no owner-is-not-caller check at all.
+
+**Do:** before reporting a deadlock, enumerate every actor who could satisfy the blocked rung
+and try each one. Report "X cannot do this" rather than "this is impossible" unless you have
+actually tried the alternatives.
+
+**Do not dismiss such reports either** — commit 52e00ea fixed a case where three rules really
+did deadlock. That is precisely why the claim was worth checking instead of believing or
+ignoring.
