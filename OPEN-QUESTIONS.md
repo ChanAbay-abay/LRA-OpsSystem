@@ -93,7 +93,18 @@ and `security definer` RPC — not as a fourth authority value, because the read
 identical to a founder's and only the write half differs. The governance worry above is
 resolved by construction: an uncle who was not in the briefing cannot clear anything.
 
-**Still needed from Chan:** the actual email addresses for the ERC and DCA accounts, and
+**Chan, 2026-09-09: ERC and DCA are placeholders for now**, exactly like the existing founder
+demo account, and both get a quick-switch pill on `/login`. Provisioned as
+`erc-demo@ops-demo.invalid` and `dca-demo@ops-demo.invalid` by `scripts/seed-demo.mjs`,
+`authority = 'founder'`, `is_clearing_founder = false`, `position = 'founder'`.
+
+**They are NOT read-only yet.** `core.users.read_only` does not exist on the database until
+the migration is applied, so today they hold full founder write access — they cannot clear
+points (that needs the clearing flag) but they can verify, close a briefing and resolve
+blocks. The seed prints a loud warning saying so, and re-running it after the migration sets
+the flag.
+
+**Still needed from Chan, when the real accounts are made:** the actual email addresses, and
 whether the LRA founder account is his father's or a shared brokerage inbox.
 
 ## 6. Leaderboard visibility — settled, but worth watching
@@ -119,7 +130,7 @@ not build anything. Confirm the subdomain once Porkbun is set up.
 as it can be locally; he does not want to add hosting cost this early. Phase 9 stays last, and
 nothing before it should assume a deployed URL.
 
-## 9. Do the invite emails actually land? — **BLOCKS PHASE 2 in practice**
+## 9. Do the invite emails actually land? — **ANSWERED: yes**
 
 Locked: provisioning uses `inviteUserByEmail`, so no credential ever passes through this
 system, an agent, or a chat log. **That depends on the GM, Sales and Broker each having a
@@ -136,6 +147,11 @@ Supabase Auth returned **HTTP 200** with `confirmation_sent_at` set, so the invi
 and handed to the mail sender. **That proves the API call, not the inbox** — Supabase's built-in
 SMTP is rate limited on the free tier and is a common spam-folder casualty. The open half of
 this question is now only whether Chan actually *received* it.
+
+**ANSWERED — Chan, 2026-09-09: the email arrived.** Supabase's built-in SMTP works for this
+project, and the `createUser` + one-time-password fallback is not needed. What remains open is
+**9b below**, which is a different failure entirely: the mail lands, but the link inside it
+goes nowhere useful.
 
 The `auth.users` row `1a4a6ca2-cbab-477a-90f5-29f54b198d68` exists for that address as a
 by-product and has no `core.people` / `core.users` / `core.memberships` rows behind it. It is

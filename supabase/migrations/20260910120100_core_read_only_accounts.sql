@@ -909,7 +909,16 @@ begin
   join ops.task_types tt on tt.id = rt.task_type_id
   join core.memberships m
     on m.position = rt.position and m.module = 'ops' and m.is_active
-  join core.users u on u.id = m.user_id and u.is_active
+  -- A read-only account is excluded from recurring generation entirely.
+  -- ERC and DCA hold `position = 'founder'` so that they read what a
+  -- founder reads, and this join would otherwise hand them a copy of
+  -- every founder-positioned recurring task -- work they are forbidden
+  -- from ever moving, submitting or clearing. Observed on 2026-09-09:
+  -- seeding gave ERC "Clear the approval queue". Assigning someone work
+  -- the database will refuse them is the precise failure this whole
+  -- feature exists to prevent, and it would also pollute their
+  -- reliability score with commitments they cannot act on.
+  join core.users u on u.id = m.user_id and u.is_active and not u.read_only
   where rt.is_active and tt.is_active
   on conflict (owner_user_id, week_id, recurring_template_id) where recurring_template_id is not null
   do nothing;

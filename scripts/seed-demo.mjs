@@ -68,12 +68,31 @@ const PURGE = process.argv.includes('--purge');
 /** Opt-in. Without it, an existing account's password is never touched. */
 const ROTATE = process.argv.includes('--rotate-passwords');
 
+// Chan, 2026-09-09: three founder accounts, not one. LRA clears points;
+// ERC and DCA are the other two brokerages and are strictly READ-ONLY —
+// they exist so their principals can keep tabs on progress and change
+// nothing. `readOnly` maps to `core.users.read_only`, which the database
+// guards on every write policy, trigger and security-definer RPC.
+// See OPEN-QUESTIONS.md #5.
 const PERSONAS = [
   { key: 'founder', firstName: 'Founder', lastName: 'Demo', authority: 'founder', position: 'founder', isClearingFounder: true },
   { key: 'gm', firstName: 'GM', lastName: 'Demo', authority: 'gm', position: 'gm' },
   { key: 'sales', firstName: 'Sales', lastName: 'Demo', authority: 'staff', position: 'sales' },
   { key: 'broker', firstName: 'Broker', lastName: 'Demo', authority: 'staff', position: 'broker' },
+  { key: 'erc', firstName: 'ERC', lastName: 'Demo', authority: 'founder', position: 'founder', readOnly: true },
+  { key: 'dca', firstName: 'DCA', lastName: 'Demo', authority: 'founder', position: 'founder', readOnly: true },
 ].map((p) => ({ ...p, email: `${p.key}-demo@${DEMO_DOMAIN}` }));
+
+/**
+ * True once we have learned that `core.users.read_only` does not exist
+ * yet. The read-only migration (20260910120100) is applied by hand in the
+ * Supabase SQL editor, so this script has to run correctly on both sides
+ * of it: it sets the flag when the column is there, and says loudly that
+ * it could not when it is not. It must never fail silently — an ERC
+ * account that looks provisioned but can still write is the exact defect
+ * the flag exists to prevent.
+ */
+let readOnlyColumnMissing = false;
 
 const svc = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
 
@@ -196,23 +215,33 @@ async function upsertPerson(persona) {
   return data.id;
 }
 
+/** Postgres 42703 / PostgREST PGRST204: the column is not there. */
+function isMissingColumn(error) {
+  if (!error) return false;
+  return error.code === '42703' || error.code === 'PGRST204' || /read_only/.test(error.message ?? '');
+}
+
 async function upsertCoreUser(authUserId, personId, persona) {
-  const { data: existing } = await svc.schema('core').from('users').select('id').eq('id', authUserId).maybeSingle();
-  if (existing) {
-    await svc
-      .schema('core')
-      .from('users')
-      .update({ authority: persona.authority, person_id: personId, is_active: true, is_clearing_founder: Boolean(persona.isClearingFounder) })
-      .eq('id', authUserId);
-    return;
-  }
-  const { error } = await svc.schema('core').from('users').insert({
-    id: authUserId,
-    email: persona.email,
+  const base = {
     authority: persona.authority,
     person_id: personId,
+    is_active: true,
     is_clearing_founder: Boolean(persona.isClearingFounder),
-  });
+  };
+  const { data: existing } = await svc.schema('core').from('users').select('id').eq('id', authUserId).maybeSingle();
+
+  // Try WITH read_only first, and fall back only on a missing column —
+  // never on any other error, which would hide a real failure.
+  const attempt = async (payload) =>
+    existing
+      ? svc.schema('core').from('users').update(payload).eq('id', authUserId)
+      : svc.schema('core').from('users').insert({ id: authUserId, email: persona.email, ...payload });
+
+  let { error } = await attempt({ ...base, read_only: Boolean(persona.readOnly) });
+  if (isMissingColumn(error)) {
+    readOnlyColumnMissing = true;
+    ({ error } = await attempt(base));
+  }
   if (error) throw error;
 }
 
@@ -236,7 +265,7 @@ async function upsertMembership(authUserId, persona) {
 }
 
 async function seed() {
-  console.log(`=== LRA Ops :: seeding four demo accounts (@${DEMO_DOMAIN}) ===\n`);
+  console.log(`=== LRA Ops :: seeding ${PERSONAS.length} demo accounts (@${DEMO_DOMAIN}) ===\n`);
 
   const credentials = [];
   const clients = {};
@@ -441,7 +470,19 @@ async function transition(client, taskId, to, extra = {}) {
 async function flagCancellation(client, taskId, reason) {
   const { data: current, error } = await client.schema('ops').from('tasks').select('status').eq('id', taskId).single();
   if (error) throw new Error(`flagCancellation ${taskId}: could not read current status: ${error.message}`);
-  if (current.status === 'pending_cancellation' || current.status === 'cancelled') {
+  // Skip by the database's own rule, not by a list of states that
+  // happened to come up. `ops.freeze_cleared_task` refuses ANY update to
+  // a cleared or cancelled task -- the record is closed and the ledger is
+  // append-only -- so flagging one for cancellation is not "already done",
+  // it is illegal. Enumerating only pending_cancellation/cancelled here
+  // meant a re-run against a cleared task died with a fatal error partway
+  // through seeding.
+  const TERMINAL = new Set(['cleared', 'cancelled']);
+  if (TERMINAL.has(current.status)) {
+    console.log(`  [skip] task ${taskId} is ${current.status} and frozen; cannot be flagged for cancellation`);
+    return current;
+  }
+  if (current.status === 'pending_cancellation') {
     console.log(`  [skip] task ${taskId} is already ${current.status}, leaving the cancellation flag as-is`);
     return current;
   }
@@ -691,6 +732,15 @@ async function seedWeek(clients) {
 try {
   if (PURGE) await purge();
   else await seed();
+  if (readOnlyColumnMissing) {
+    console.warn(
+      '\n[WARNING] core.users.read_only does not exist on this database yet, so the\n' +
+        '          ERC and DCA accounts were created WITHOUT the read-only flag. They\n' +
+        '          currently have full founder write access, which is NOT what they are\n' +
+        '          for. Apply supabase/APPLY-READONLY-AND-CATALOG-POINTS.sql in the\n' +
+        '          Supabase SQL editor, then re-run this script to set the flag.'
+    );
+  }
 } catch (err) {
   console.error('\n[fatal]', err.message ?? err);
   process.exit(1);
