@@ -78,12 +78,20 @@ function QueueList() {
 
   const nextAction = me?.authority === 'founder' || me?.authority === 'admin' ? 'cleared' : 'verified';
   const canClear = me?.isClearingFounder ?? false;
+  // ERC / DCA land on this list only via `?view=list` -- FounderDigest is
+  // their default founder landing, and it is gated the same way. Checked
+  // ahead of the clearing-seat rule below, same ordering the database's
+  // own `core.is_read_only()` uses against every write predicate it
+  // guards (see task-permissions.ts).
+  const readOnly = me?.readOnly ?? false;
   // Only the "Clear" step and cancellation decisions are the clearing
   // founder's own seat (PLAN.md §2.5 item 6 / core.is_clearing_founder());
   // "Verify" is any GM's job and is unaffected.
-  const clearDisabled = nextAction === 'cleared' && !canClear;
-  const clearDisabledReason = 'Only the clearing founder can approve this.';
-  const refuseDisabledReason = 'Only the clearing founder can refuse this.';
+  const clearDisabled = (nextAction === 'cleared' && !canClear) || readOnly;
+  const clearDisabledReason = readOnly ? 'Your account is read-only.' : 'Only the clearing founder can approve this.';
+  const refuseDisabledReason = readOnly ? 'Your account is read-only.' : 'Only the clearing founder can refuse this.';
+  const verifyDisabledReason = readOnly ? 'Your account is read-only.' : undefined;
+  const rejectDisabledReason = readOnly ? 'Your account is read-only.' : undefined;
 
   async function approve(task: QueueTask) {
     try {
@@ -125,8 +133,8 @@ function QueueList() {
                   <Button
                     variant="destructive"
                     size="sm"
-                    disabled={!canClear}
-                    title={!canClear ? clearDisabledReason : undefined}
+                    disabled={!canClear || readOnly}
+                    title={!canClear || readOnly ? clearDisabledReason : undefined}
                     onClick={() => approveCancellation(t)}
                   >
                     Approve cancellation
@@ -134,8 +142,8 @@ function QueueList() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={!canClear}
-                    title={!canClear ? refuseDisabledReason : undefined}
+                    disabled={!canClear || readOnly}
+                    title={!canClear || readOnly ? refuseDisabledReason : undefined}
                     onClick={() => setDecidingCancellation(t)}
                   >
                     Refuse
@@ -151,13 +159,19 @@ function QueueList() {
                   <Button
                     variant={nextAction === 'cleared' ? 'clear' : 'primary'}
                     size="sm"
-                    disabled={clearDisabled}
-                    title={clearDisabled ? clearDisabledReason : undefined}
+                    disabled={nextAction === 'cleared' ? clearDisabled : readOnly}
+                    title={nextAction === 'cleared' ? (clearDisabled ? clearDisabledReason : undefined) : verifyDisabledReason}
                     onClick={() => approve(t)}
                   >
                     {nextAction === 'cleared' ? 'Clear' : 'Verify'}
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => setRejecting(t)}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={readOnly}
+                    title={rejectDisabledReason}
+                    onClick={() => setRejecting(t)}
+                  >
                     Reject
                   </Button>
                 </div>

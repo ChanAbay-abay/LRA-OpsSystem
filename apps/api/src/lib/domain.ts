@@ -48,6 +48,14 @@ export interface AuthUser {
   // authority would light that control up incorrectly (the exact defect
   // this field exists to close).
   isClearingFounder: boolean;
+  // Mirrors `core.users.read_only` / `core.is_read_only()`
+  // (supabase/migrations/20260910120100_core_read_only_accounts.sql):
+  // a strictly read-only founder account (ERC, DCA) that sees exactly
+  // what oversight sees and may write nothing at all. The database is
+  // still the real gate -- every write policy checks
+  // `core.is_read_only()` first -- this field only lets the web app
+  // hide/disable the write affordances before the request is even made.
+  readOnly: boolean;
 }
 
 export function isOversight(authority: Authority): boolean {

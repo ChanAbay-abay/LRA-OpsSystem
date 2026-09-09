@@ -50,6 +50,12 @@ export interface Me {
   // founder has authority 'founder' too, and that inference is exactly
   // the bug this field exists to close.
   isClearingFounder: boolean;
+  // Mirrors `core.users.read_only` (a strictly read-only founder
+  // account -- ERC, DCA -- see OPEN-QUESTIONS.md #5 and
+  // supabase/migrations/20260910120100_core_read_only_accounts.sql).
+  // `lib/task-permissions.ts` is the single place this gates write
+  // affordances; nothing else should re-derive it.
+  readOnly: boolean;
 }
 
 interface AuthContextValue {

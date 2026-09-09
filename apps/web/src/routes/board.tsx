@@ -521,8 +521,14 @@ export function BoardPage() {
   // and only fall back to a toast if they fail.
   const { me } = useAuth();
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
+  // ERC / DCA: read exactly what oversight reads, write nothing. The
+  // "flag for cancellation" affordance is oversight-only to begin with
+  // (Chan, 2026-09-09), so a read-only oversight account gets the same
+  // "stays blank" treatment a non-oversight account already gets --
+  // there is precedent for absence here, not a disabled control.
+  const canWrite = !me?.readOnly;
   const actor: Actor | null = me
-    ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder }
+    ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder, readOnly: me.readOnly }
     : null;
 
   const boardResource = useResource((signal) => api.get<Board>('/api/tasks/board', { signal }), []);
@@ -680,7 +686,11 @@ export function BoardPage() {
           title="Board"
           description="Drag to move. Every drop goes through the same check a button click would."
           actions={
-            <Button onClick={() => setCreateOpen(true)}>
+            <Button
+              onClick={() => setCreateOpen(true)}
+              disabled={me?.readOnly}
+              title={me?.readOnly ? 'Your account is read-only.' : undefined}
+            >
               <Plus className="size-3.5" aria-hidden />
               New task
             </Button>
@@ -739,7 +749,11 @@ export function BoardPage() {
         title="Board"
         description="Drag to move. Every drop goes through the same check a button click would."
         actions={
-          <Button onClick={() => setCreateOpen(true)}>
+          <Button
+            onClick={() => setCreateOpen(true)}
+            disabled={me?.readOnly}
+            title={me?.readOnly ? 'Your account is read-only.' : undefined}
+          >
             <Plus className="size-3.5" aria-hidden />
             New task
           </Button>
@@ -844,7 +858,7 @@ export function BoardPage() {
               actor={actor}
               isDragging={activeTask != null}
               dropRefusal={activeTask ? moveRefusal(activeTask, c.id, actor) : null}
-              onFlagCancellation={isOversight ? setCancelTarget : undefined}
+              onFlagCancellation={isOversight && canWrite ? setCancelTarget : undefined}
               onOpenNotes={setNotesTarget}
               onOpenDetail={openDetail}
             />
@@ -860,7 +874,7 @@ export function BoardPage() {
           task={detailTarget}
           onClose={() => setDetailTarget(null)}
           onChanged={load}
-          onFlagCancellation={isOversight ? (t) => setCancelTarget(t) : undefined}
+          onFlagCancellation={isOversight && canWrite ? (t) => setCancelTarget(t) : undefined}
           onDeclareBlock={(t) => setBlockTarget(t)}
         />
       ) : null}
@@ -1030,7 +1044,8 @@ function TaskDetailDialog({
   const [error, setError] = React.useState<string | null>(null);
   const closed = task.status === 'cleared' || task.status === 'cancelled';
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
-  const canResolveBlock = isOversight || task.owner_user_id === me?.id;
+  const readOnly = me?.readOnly ?? false;
+  const canResolveBlock = (isOversight || task.owner_user_id === me?.id) && !readOnly;
 
   const loadNotes = React.useCallback(() => {
     api
@@ -1097,7 +1112,7 @@ function TaskDetailDialog({
     openBlockCount: blocks == null ? task.openBlockCount : openBlocks.length,
   };
   const actor: Actor | null = me
-    ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder }
+    ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder, readOnly: me.readOnly }
     : null;
 
   const statusAction: { to: BoardColumn; label: string; hint: string; variant?: 'primary' | 'secondary' } | null =
@@ -1286,6 +1301,8 @@ function TaskDetailDialog({
 
         {closed ? (
           <p className="text-body-sm text-ink-3">This task is closed — the record is frozen and takes no new notes.</p>
+        ) : readOnly ? (
+          <p className="text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
         ) : (
           <div className="flex flex-col gap-2">
             <textarea
@@ -1303,6 +1320,8 @@ function TaskDetailDialog({
           {!closed && task.status !== 'pending_cancellation' && openBlocks.length === 0 ? (
             <Button
               variant="secondary"
+              disabled={readOnly}
+              title={readOnly ? 'Your account is read-only.' : undefined}
               onClick={() => {
                 onClose();
                 onDeclareBlock(task);
@@ -1327,7 +1346,7 @@ function TaskDetailDialog({
           <Button variant="secondary" onClick={onClose}>
             Close
           </Button>
-          {!closed ? (
+          {!closed && !readOnly ? (
             <Button loading={submitting} disabled={!body.trim()} onClick={addNote}>
               Add note
             </Button>
@@ -1345,11 +1364,13 @@ function TaskDetailDialog({
 // conversation" path; the full detail dialog above contains the same
 // worklog in its wider context.
 function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; onClose: () => void; onNoteAdded: () => void }) {
+  const { me } = useAuth();
   const [notes, setNotes] = React.useState<Note[] | null>(null);
   const [body, setBody] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const closed = task.status === 'cleared' || task.status === 'cancelled';
+  const readOnly = me?.readOnly ?? false;
 
   const load = React.useCallback(() => {
     api
@@ -1398,6 +1419,8 @@ function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; onClose: 
         </div>
         {closed ? (
           <p className="text-body-sm text-ink-3">This task is closed — no new notes can be added.</p>
+        ) : readOnly ? (
+          <p className="text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
         ) : (
           <div className="flex flex-col gap-2">
             <textarea
@@ -1413,7 +1436,7 @@ function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; onClose: 
           <Button variant="secondary" onClick={onClose}>
             Close
           </Button>
-          {!closed ? (
+          {!closed && !readOnly ? (
             <Button loading={submitting} disabled={!body.trim()} onClick={submit}>
               Add note
             </Button>

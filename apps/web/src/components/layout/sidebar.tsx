@@ -20,6 +20,7 @@ import {
   BookOpen,
   CalendarCheck,
   ClipboardCheck,
+  Eye,
   Gauge,
   Coins,
   FileClock,
@@ -146,7 +147,21 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
       ) : null}
 
       <div className="mt-auto border-t border-white/10 p-3">
-        <div className="mb-2 truncate text-body-sm text-on-dark-2">{me?.email}</div>
+        <div className="mb-1.5 truncate text-body-sm text-on-dark-2">{me?.email}</div>
+        {me?.readOnly ? (
+          // Task 3: say why, once, calmly. A read-only founder (ERC/DCA)
+          // is a legitimate account type, not an error state, so this is
+          // a neutral chip -- DESIGN.md's on-navy neutrals, not the
+          // amber/red semantic tokens -- next to identity, not a banner
+          // repeated on every screen.
+          <span
+            className="mb-2 inline-flex w-fit items-center gap-1 rounded-xs border border-white/15 bg-white/[.06] px-1.5 py-0.5 text-micro text-on-dark-3"
+            title="This account can see everything but change nothing."
+          >
+            <Eye className="size-3" aria-hidden />
+            Read-only
+          </span>
+        ) : null}
         <button
           type="button"
           onClick={() => void signOut()}

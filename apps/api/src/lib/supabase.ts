@@ -132,7 +132,7 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
   const { data: profile, error } = await db
     .schema('core')
     .from('users')
-    .select('id, email, authority, person_id, is_active, is_clearing_founder')
+    .select('id, email, authority, person_id, is_active, is_clearing_founder, read_only')
     .eq('id', userId)
     .single();
 
@@ -160,5 +160,7 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
     // clearing founder. Read from the same row as `authority` above, not
     // a second round trip, and not re-derived from a JWT claim.
     isClearingFounder: profile.authority === 'admin' || profile.is_clearing_founder === true,
+    // `core.users.read_only` verbatim -- see `core.is_read_only()`.
+    readOnly: profile.read_only === true,
   };
 }

@@ -87,6 +87,12 @@ interface BriefingData {
 export function BriefingPage() {
   const { me } = useAuth();
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
+  // ERC / DCA sit on this shared-display screen with everyone else, so
+  // the write controls stay visible-but-disabled rather than vanishing
+  // (task-permissions.ts's rule: absence for a whole meaningless surface,
+  // a reason for a control inside a screen they legitimately read).
+  const readOnly = me?.readOnly ?? false;
+  const readOnlyReason = 'Your account is read-only.';
 
   const weekResource = useResource((signal) => api.get<Week | null>('/api/weeks/current', { signal }), []);
   const week = weekResource.data;
@@ -158,11 +164,21 @@ export function BriefingPage() {
           isOversight && week && week.state === 'planning' ? (
             <div className="flex gap-2">
               {!week.briefing_opened_at ? (
-                <Button variant="secondary" onClick={openBriefing}>
+                <Button
+                  variant="secondary"
+                  onClick={openBriefing}
+                  disabled={readOnly}
+                  title={readOnly ? readOnlyReason : undefined}
+                >
                   Open the briefing
                 </Button>
               ) : null}
-              <Button variant="destructive" onClick={() => setConfirmingClose(true)}>
+              <Button
+                variant="destructive"
+                onClick={() => setConfirmingClose(true)}
+                disabled={readOnly}
+                title={readOnly ? readOnlyReason : undefined}
+              >
                 Close the briefing
               </Button>
             </div>
@@ -176,7 +192,11 @@ export function BriefingPage() {
         empty={
           <div className="mx-auto max-w-[420px] rounded-xl border border-hairline bg-surface p-8 text-center">
             <p className="mb-3 text-body text-ink-2">This week hasn't been opened.</p>
-            {isOversight ? <Button onClick={openTheWeek}>Open the week</Button> : null}
+            {isOversight ? (
+              <Button onClick={openTheWeek} disabled={readOnly} title={readOnly ? readOnlyReason : undefined}>
+                Open the week
+              </Button>
+            ) : null}
           </div>
         }
         isEmpty={(w) => !w}
@@ -205,6 +225,7 @@ export function BriefingPage() {
                   locked={week.state !== 'planning'}
                   meId={me?.id}
                   isOversight={isOversight}
+                  readOnly={readOnly}
                   onCommit={commit}
                   onUncommit={uncommit}
                 />
@@ -413,6 +434,7 @@ function CommitSection({
   locked,
   meId,
   isOversight,
+  readOnly,
   onCommit,
   onUncommit,
 }: {
@@ -422,6 +444,7 @@ function CommitSection({
   locked: boolean;
   meId?: string;
   isOversight: boolean;
+  readOnly: boolean;
   onCommit: (taskId: string) => void;
   onUncommit: (taskId: string) => void;
 }) {
@@ -435,7 +458,12 @@ function CommitSection({
       ) : null}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
         {visibleRoster.map((person) => {
-          const canAct = isOversight || person.userId === meId;
+          // Read-only oversight (ERC/DCA) reads every card in this
+          // grid, same as a real founder would -- it just never gets
+          // the commit/uncommit affordance, on any row, including its
+          // own (a read-only account has no `person_id` of its own to
+          // match here anyway).
+          const canAct = (isOversight || person.userId === meId) && !readOnly;
           const theirCommitted = committed[person.userId] ?? [];
           const theirCandidates = candidates[person.userId] ?? [];
           const total = theirCommitted.reduce((sum, t) => sum + (t.committed_points ?? 0), 0);

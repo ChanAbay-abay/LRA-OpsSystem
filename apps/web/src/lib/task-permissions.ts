@@ -65,6 +65,14 @@ export interface Actor {
   id: string;
   authority: 'staff' | 'gm' | 'founder' | 'admin';
   isClearingFounder: boolean;
+  // Mirrors `core.users.read_only` / `core.is_read_only()`
+  // (supabase/migrations/20260910120100_core_read_only_accounts.sql):
+  // a strictly read-only founder account (ERC, DCA). Checked FIRST in
+  // `moveRefusal`, ahead of the admin bypass, because that is where the
+  // migration places `core.is_read_only()` in every write-path
+  // predicate it touches — a read-only caller's own JWT always carries
+  // authority, so the admin bypass would otherwise sail straight through.
+  readOnly: boolean;
 }
 
 /**
@@ -73,6 +81,10 @@ export interface Actor {
  */
 export function moveRefusal(task: MovableTask, to: BoardColumn, actor: Actor | null): string | null {
   if (!actor) return 'You are not signed in.';
+
+  // Checked before the admin bypass, exactly where the trigger checks
+  // `core.is_read_only()` in every write-path predicate it touches.
+  if (actor.readOnly) return 'Your account is read-only.';
 
   // The trigger's rule 1: admin bypasses the ladder unconditionally.
   if (actor.authority === 'admin') return null;

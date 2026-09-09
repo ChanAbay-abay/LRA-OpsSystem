@@ -79,7 +79,12 @@ interface RecurringTemplate {
 
 export function CatalogPage() {
   const { me } = useAuth();
-  const canEdit = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
+  // ERC / DCA hold `founder` authority but write nothing (OPEN-QUESTIONS.md
+  // #5), so they get the same "stays blank" treatment staff already gets
+  // for this whole price/edit/deactivate/delete cluster -- it is already
+  // an all-or-nothing `canEdit ? … : null` per row, so absence here is
+  // the existing pattern, not a new one.
+  const canEdit = (me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin') && !me?.readOnly;
 
   const typesResource = useResource((signal) => api.get<TaskType[]>('/api/catalog', { signal }), []);
   const templatesResource = useResource(

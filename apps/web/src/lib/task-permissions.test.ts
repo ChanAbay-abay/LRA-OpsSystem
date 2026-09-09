@@ -26,12 +26,26 @@ const ALL_COLUMNS = [
   'cleared',
 ] as const;
 
-const SALES: Actor = { id: 'u-sales', authority: 'staff', isClearingFounder: false };
-const BROKER: Actor = { id: 'u-broker', authority: 'staff', isClearingFounder: false };
-const GM: Actor = { id: 'u-gm', authority: 'gm', isClearingFounder: false };
-const FOUNDER: Actor = { id: 'u-founder', authority: 'founder', isClearingFounder: true };
-const OTHER_FOUNDER: Actor = { id: 'u-founder-2', authority: 'founder', isClearingFounder: false };
-const ADMIN: Actor = { id: 'u-admin', authority: 'admin', isClearingFounder: false };
+const SALES: Actor = { id: 'u-sales', authority: 'staff', isClearingFounder: false, readOnly: false };
+const BROKER: Actor = { id: 'u-broker', authority: 'staff', isClearingFounder: false, readOnly: false };
+const GM: Actor = { id: 'u-gm', authority: 'gm', isClearingFounder: false, readOnly: false };
+const FOUNDER: Actor = { id: 'u-founder', authority: 'founder', isClearingFounder: true, readOnly: false };
+const OTHER_FOUNDER: Actor = {
+  id: 'u-founder-2',
+  authority: 'founder',
+  isClearingFounder: false,
+  readOnly: false,
+};
+const ADMIN: Actor = { id: 'u-admin', authority: 'admin', isClearingFounder: false, readOnly: false };
+// ERC / DCA: a strictly read-only founder — same authority as FOUNDER,
+// same isClearingFounder shape as a non-seated founder, but must be
+// refused everything a plain staff member would be allowed.
+const READ_ONLY_FOUNDER: Actor = {
+  id: 'u-erc',
+  authority: 'founder',
+  isClearingFounder: false,
+  readOnly: true,
+};
 
 function task(over: Partial<MovableTask> = {}): MovableTask {
   return {
@@ -139,6 +153,21 @@ test('admin bypasses the ladder, exactly as the trigger does', () => {
 
 test('a signed-out caller is refused everything', () => {
   assert.equal(canDragTask(task(), [...ALL_COLUMNS], null), false);
+});
+
+test('a read-only founder is refused every move, even one an oversight actor would otherwise get', () => {
+  assert.deepEqual(allowed(task(), READ_ONLY_FOUNDER), []);
+  assert.equal(canDragTask(task(), [...ALL_COLUMNS], READ_ONLY_FOUNDER), false);
+  assert.match(dragRefusal(task(), [...ALL_COLUMNS], READ_ONLY_FOUNDER) ?? '', /read-only/);
+});
+
+test('read-only refuses even a clearing-eligible verified task, and beats the admin bypass', () => {
+  const verified = task({ status: 'verified' });
+  assert.match(moveRefusal(verified, 'cleared', READ_ONLY_FOUNDER) ?? '', /read-only/);
+  // Sanity: the same actor shape with readOnly false (a real founder)
+  // would not be refused by this rule at all — proves the assertion
+  // above is about read-only, not about founder-ness.
+  assert.equal(moveRefusal(verified, 'cleared', OTHER_FOUNDER)?.includes('read-only'), false);
 });
 
 test('dragRefusal prefers a task-specific reason over the universal ones', () => {

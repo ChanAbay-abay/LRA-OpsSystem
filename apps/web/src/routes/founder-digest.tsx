@@ -236,6 +236,12 @@ export function FounderDigest() {
   const [working, setWorking] = React.useState(false);
   const [sendingBack, setSendingBack] = React.useState(false);
 
+  // `me.isClearingFounder` is already false for ERC/DCA (read-only
+  // founders are never the seated clearing founder — see
+  // OPEN-QUESTIONS.md #5), so the whole bulk-approve/send-back/flagging
+  // action surface below is already absent for them via this one flag.
+  // No separate `readOnly` check is needed on this screen; if that ever
+  // changes (a read-only clearing founder), gate on `!me?.readOnly` too.
   const canClear = me?.isClearingFounder ?? false;
 
   const digest = resource.status === 'ready' ? resource.data : null;

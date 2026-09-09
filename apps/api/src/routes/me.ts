@@ -29,6 +29,9 @@ export default async function meRoutes(app: FastifyInstance) {
         // seated clearing founder must see a disabled control, same as a
         // GM would.
         isClearingFounder: req.user.isClearingFounder,
+        // See domain.ts's `AuthUser.readOnly` -- the client-side mirror
+        // in task-permissions.ts gates every write affordance on this.
+        readOnly: req.user.readOnly,
       },
     };
   });
