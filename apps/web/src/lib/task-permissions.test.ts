@@ -14,7 +14,14 @@
  */
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { canDragTask, dragRefusal, moveRefusal, type Actor, type MovableTask } from './task-permissions';
+import {
+  canDragTask,
+  definitionLockRefusal,
+  dragRefusal,
+  moveRefusal,
+  type Actor,
+  type MovableTask,
+} from './task-permissions';
 
 const ALL_COLUMNS = [
   'backlog',
@@ -175,4 +182,44 @@ test('dragRefusal prefers a task-specific reason over the universal ones', () =>
   // one about THIS task, not "This week is set in the briefing".
   const reason = dragRefusal(task({ status: 'cleared' }), [...ALL_COLUMNS], SALES);
   assert.ok(reason && !reason.includes('Monday briefing'));
+});
+
+// ---------------------------------------------------------------------
+// definitionLockRefusal — mirrors `ops.enforce_task_transition`'s guard
+// 2b (20260910140000_ops_task_edit_requests.sql). Asserted against the
+// same actor fixtures the ladder above uses.
+// ---------------------------------------------------------------------
+
+test('an uncommitted task is never definition-locked, whatever the week state', () => {
+  assert.equal(definitionLockRefusal({ is_committed: false }, 'open', SALES), null);
+  assert.equal(definitionLockRefusal({ is_committed: false }, 'closed', GM), null);
+});
+
+test('a committed task in a still-planning week is not locked', () => {
+  assert.equal(definitionLockRefusal({ is_committed: true }, 'planning', SALES), null);
+  assert.equal(definitionLockRefusal({ is_committed: true }, null, SALES), null);
+});
+
+test('once committed and the week has left planning, staff and GM are refused — the exact trigger sentence', () => {
+  const staffRefusal = definitionLockRefusal({ is_committed: true }, 'open', SALES);
+  const gmRefusal = definitionLockRefusal({ is_committed: true }, 'open', GM);
+  assert.match(staffRefusal ?? '', /locked once the week has left planning/);
+  assert.match(staffRefusal ?? '', /ask the GM to raise a task edit request/);
+  assert.equal(staffRefusal, gmRefusal);
+});
+
+test('founder and admin bypass the definition lock — is_founder(), not is_oversight()', () => {
+  assert.equal(definitionLockRefusal({ is_committed: true }, 'open', FOUNDER), null);
+  assert.equal(definitionLockRefusal({ is_committed: true }, 'closed', ADMIN), null);
+  // A non-clearing founder still bypasses — the lock's exemption is
+  // is_founder(), not is_clearing_founder().
+  assert.equal(definitionLockRefusal({ is_committed: true }, 'open', OTHER_FOUNDER), null);
+});
+
+test('a read-only founder (ERC/DCA) is still locked out — founder authority alone is not the exemption', () => {
+  assert.notEqual(definitionLockRefusal({ is_committed: true }, 'open', READ_ONLY_FOUNDER), null);
+});
+
+test('no signed-in actor: the lock still applies (a null actor never bypasses)', () => {
+  assert.notEqual(definitionLockRefusal({ is_committed: true }, 'open', null), null);
 });

@@ -51,10 +51,12 @@ import { Button } from '@/components/ui/button';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { EditRequestCard } from '@/components/tasks/edit-request-diff';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { buildFieldDiffs, type DiffResolvers, type TaskEditRequest } from '@/lib/task-edit-requests';
 
 interface DigestTask {
   id: string;
@@ -226,6 +228,217 @@ function TaskRow({ task, trailing }: { task: DigestTask; trailing?: React.ReactN
       <span className={cn('num w-10 shrink-0 text-right text-num-xs', ageTone(task.ageHours))}>{task.ageHours}h</span>
       {trailing}
     </div>
+  );
+}
+
+interface EditRequestTaskType {
+  id: string;
+  name: string;
+}
+interface EditRequestMember {
+  userId: string;
+  name: string | null;
+  email: string | null;
+}
+interface EditRequestTaskLookup {
+  id: string;
+  title: string;
+}
+
+/**
+ * Task 3 — the clearing founder's (and admin's) decision surface for a
+ * GM's task edit request. Lives on /queue (this screen IS what a founder
+ * sees at /queue by default) as a section, not a separate screen: it is
+ * one more thing "waiting on you", the exact question this whole page
+ * already organizes around, and a request is rare enough next to
+ * verify/clear volume that a dedicated screen would sit empty most of
+ * the time — see PLAN.md §10.1's own framing of it as an exception path,
+ * not a parallel workflow. `EditRequestCard` (components/tasks/
+ * edit-request-diff.tsx) is the SAME component the requester's own task
+ * modal renders their history with, so an approver and a requester are
+ * reading literally the same diff, never two summaries that could drift.
+ *
+ * Read-only for anyone who can see /queue but isn't the clearing founder
+ * — same "you can see everything here, but only the clearing founder can
+ * bank it" honesty the points section above already uses. A requester
+ * never gets decide buttons on their own request even when they ARE the
+ * clearing founder (self-approval is refused by the DB trigger; the UI
+ * simply never offers it, matching Task 3's brief).
+ */
+function EditRequestsSection({ canClear, meId }: { canClear: boolean; meId: string | undefined }) {
+  const resource = useResource(
+    (signal) => api.get<TaskEditRequest[]>('/api/task-edit-requests?status=pending', { signal }),
+    []
+  );
+  const [types, setTypes] = React.useState<EditRequestTaskType[]>([]);
+  const [members, setMembers] = React.useState<EditRequestMember[]>([]);
+  const [tasksById, setTasksById] = React.useState<Map<string, EditRequestTaskLookup>>(new Map());
+  const [rejecting, setRejecting] = React.useState<TaskEditRequest | null>(null);
+  const [working, setWorking] = React.useState<string | null>(null);
+
+  const pending = resource.status === 'ready' ? (resource.data ?? []) : [];
+
+  // Lookups only paid for once there is at least one request to render —
+  // the common case (nothing pending) costs nothing extra.
+  React.useEffect(() => {
+    if (!pending.length) return;
+    let cancelled = false;
+    Promise.all([
+      api.get<EditRequestTaskType[]>('/api/catalog'),
+      api.get<EditRequestMember[]>('/api/members'),
+      api.get<EditRequestTaskLookup[]>('/api/tasks'),
+    ])
+      .then(([t, m, tasks]) => {
+        if (cancelled) return;
+        setTypes(t);
+        setMembers(m);
+        setTasksById(new Map(tasks.map((x) => [x.id, x])));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending.length]);
+
+  const resolve: DiffResolvers = {
+    taskTypeName: (id) => types.find((t) => t.id === id)?.name ?? 'Unknown type',
+    memberName: (id) => members.find((m) => m.userId === id)?.name ?? members.find((m) => m.userId === id)?.email ?? 'Unknown',
+  };
+
+  async function approve(req: TaskEditRequest) {
+    setWorking(req.id);
+    try {
+      // `api.post` always sends `Content-Type: application/json` — an
+      // omitted body then leaves a zero-length payload under that header,
+      // which Fastify's default JSON parser refuses outright
+      // (`FST_ERR_CTP_EMPTY_JSON_BODY`), a real 400 reproduced against the
+      // live API while wiring this up. `/status`'s callers never hit this
+      // because they always send `{ to }`; this route genuinely has
+      // nothing to say, so an explicit empty object is the fix, not a
+      // guess.
+      await api.post(`/api/task-edit-requests/${req.id}/approve`, {});
+      toast.success('Change applied to the task.');
+      resource.reload();
+    } catch (err) {
+      toast.error(err instanceof ApiClientError ? err.message : 'Could not approve the request');
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  if (resource.status === 'loading') return null;
+  if (resource.status !== 'ready' || pending.length === 0) return null;
+
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-strong text-ink">Task edit requests — your decision</h2>
+      {!canClear ? (
+        <p className="rounded-lg border border-hairline bg-surface-2 px-3 py-2 text-body-sm text-ink-3">
+          You can see every pending request here, but only the clearing founder can decide one.
+        </p>
+      ) : null}
+      <div className="overflow-hidden rounded-xl border border-pending-border bg-surface">
+        {pending.map((req) => {
+          const isOwnRequest = req.requested_by === meId;
+          const canDecide = canClear && !isOwnRequest;
+          return (
+            <EditRequestCard
+              key={req.id}
+              request={req}
+              diffs={buildFieldDiffs(req, resolve)}
+              taskTitle={tasksById.get(req.task_id)?.title ?? 'Unknown task'}
+              actions={
+                <div className="flex items-center gap-2">
+                  {canClear && isOwnRequest ? (
+                    <p className="text-micro text-ink-3">You raised this — the other founder or admin must decide it.</p>
+                  ) : null}
+                  {canDecide ? (
+                    <>
+                      <Button
+                        variant="clear"
+                        size="sm"
+                        loading={working === req.id}
+                        onClick={() => approve(req)}
+                      >
+                        <CheckCircle2 className="size-3.5" aria-hidden />
+                        Approve
+                      </Button>
+                      <Button variant="secondary" size="sm" disabled={working === req.id} onClick={() => setRejecting(req)}>
+                        Reject
+                      </Button>
+                    </>
+                  ) : null}
+                </div>
+              }
+            />
+          );
+        })}
+      </div>
+
+      {rejecting ? (
+        <RejectEditRequestDialog
+          request={rejecting}
+          taskTitle={tasksById.get(rejecting.task_id)?.title ?? 'this task'}
+          onClose={() => setRejecting(null)}
+          onDone={() => {
+            setRejecting(null);
+            resource.reload();
+          }}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function RejectEditRequestDialog({
+  request,
+  taskTitle,
+  onClose,
+  onDone,
+}: {
+  request: TaskEditRequest;
+  taskTitle: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [reason, setReason] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post(`/api/task-edit-requests/${request.id}/reject`, { reason });
+      toast.success('Request rejected. The task is unchanged.');
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'Could not reject the request');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Reject the change request for "{taskTitle}"</DialogTitle>
+        </DialogHeader>
+        <p className="text-body-sm text-ink-2">The task's definition stays exactly as it is. The requester sees this reason.</p>
+        <ReasonTextarea value={reason} onChange={setReason} placeholder="Why isn't this change happening?" />
+        {error ? <p className="text-label text-danger">{error}</p> : null}
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="destructive" loading={submitting} disabled={reason.trim().length < 10} onClick={submit}>
+            Reject request
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -493,6 +706,8 @@ export function FounderDigest() {
                 </div>
               </section>
             ) : null}
+
+            <EditRequestsSection canClear={canClear} meId={me?.id} />
 
             <Fold title="In progress" count={d.inProgress.length}>
               {d.inProgress.map((t) => (

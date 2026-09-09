@@ -143,6 +143,7 @@ test('lifecycle across a real HTTP boundary: create -> commit -> submit -> verif
   if (typeof address !== 'object' || address === null) throw new Error('server did not report a TCP address');
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
+  let createdWeekId: string | null = null;
   let createdTaskId: string | undefined;
 
   try {
@@ -176,10 +177,55 @@ test('lifecycle across a real HTTP boundary: create -> commit -> submit -> verif
       return;
     }
 
-    // Current week, created idempotently if this is the first call today.
-    const weekRes = await call(founderToken, 'POST', '/api/weeks', {});
-    assert.equal(weekRes.status, 200, `POST /api/weeks: ${JSON.stringify(weekRes.body)}`);
-    const weekId = (weekRes.body!.data as { id: string }).id;
+    // An ISOLATED week of this test's own, not the current one.
+    //
+    // This used to call `POST /api/weeks`, which returns the *current*
+    // week -- and the test then silently depended on that week still
+    // being in `planning`. The moment anyone closes the Monday briefing
+    // (an ordinary Monday action, and exactly what the commitment lock
+    // exists to do) the week moves to `open`, commits are refused, and
+    // this test fails with "commitments are locked for this week"
+    // through no fault of the code it is testing. There is deliberately
+    // no reopen path (PRD.md §6.2), so that failure would persist until
+    // the following Monday.
+    //
+    // That is the same bug class this project has hit twice before --
+    // see docs/AGENT-LESSONS.md: a fixture must never depend on live,
+    // mutable state. So the test now owns its week outright.
+    //
+    // Service role is correct here: this is fixture setup, not the
+    // behaviour under test. Everything actually being asserted below
+    // still goes over real HTTP as real personas.
+    //
+    // The date is deliberately historical and fixed, so it can never
+    // collide with a real week, and it is looked up before insert so a
+    // run whose cleanup was interrupted heals itself instead of dying
+    // on the unique constraint.
+    const svcSetup = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const TEST_WEEK_START = '2020-01-06'; // a Monday, long before LRA Ops existed
+    const { data: existingWeek } = await svcSetup
+      .schema('ops')
+      .from('weeks')
+      .select('id')
+      .eq('week_start', TEST_WEEK_START)
+      .maybeSingle();
+
+    let weekId: string;
+    if (existingWeek) {
+      weekId = existingWeek.id as string;
+    } else {
+      const { data: madeWeek, error: weekErr } = await svcSetup
+        .schema('ops')
+        .from('weeks')
+        .insert({ week_start: TEST_WEEK_START, state: 'planning' }) // week_end is GENERATED
+        .select('id')
+        .single();
+      assert.ok(!weekErr, `could not create the isolated test week: ${weekErr?.message}`);
+      weekId = madeWeek!.id as string;
+      createdWeekId = weekId;
+    }
 
     // A priced, active catalog type -- 'Client follow-up' is seeded at
     // a known placeholder value (2 points, migration 20260909180000),
@@ -279,6 +325,16 @@ test('lifecycle across a real HTTP boundary: create -> commit -> submit -> verif
         // eslint has no opinion here; this is test hygiene, not a
         // production path -- log and move on.
         console.warn(`[lifecycle-integration] cleanup of task ${createdTaskId} failed: ${error.message}`);
+      }
+    }
+    // The isolated week goes last: its tasks reference it. Only remove a
+    // week THIS run created, so a concurrent run is never pulled out
+    // from under itself.
+    if (createdWeekId) {
+      const svc = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+      const { error } = await svc.schema('ops').from('weeks').delete().eq('id', createdWeekId);
+      if (error) {
+        console.warn(`[lifecycle-integration] cleanup of week ${createdWeekId} failed: ${error.message}`);
       }
     }
     await app.close();

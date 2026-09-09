@@ -70,6 +70,7 @@ import {
 import {
   Ban,
   CheckCircle2,
+  Lock,
   MessageSquare,
   Pencil,
   Plus,
@@ -89,6 +90,8 @@ import {
   buildTaskMenuItems,
   type TaskMenuHandlers,
 } from '@/components/tasks/task-card-menu';
+import { TaskEditRequestDialog } from '@/components/tasks/task-edit-request-dialog';
+import { EditRequestCard } from '@/components/tasks/edit-request-diff';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Button } from '@/components/ui/button';
 import {
@@ -107,12 +110,14 @@ import { cn } from '@/lib/utils';
 import {
   COLUMN_LABEL,
   COLUMN_STATUS,
+  definitionLockRefusal,
   dragRefusal,
   moveRefusal,
   type Actor,
   type BoardColumn,
   type MovableTask,
 } from '@/lib/task-permissions';
+import { buildFieldDiffs, type DiffResolvers, type TaskEditRequest } from '@/lib/task-edit-requests';
 
 interface Task {
   id: string;
@@ -211,6 +216,7 @@ function TaskCard({
   dragging,
   draggable = true,
   pinnedReason,
+  definitionLocked,
   actor,
   menuHandlers,
   onFlagCancellation,
@@ -223,6 +229,8 @@ function TaskCard({
   draggable?: boolean;
   /** Why not, for the tooltip and the screen-reader description. */
   pinnedReason?: string | null;
+  /** True once this task is committed and its week has left `planning` (PLAN.md §10.1) — title/description/type/owner/client ref are frozen for everyone but a founder/admin. Progress (status/notes/blocks) is untouched; this is purely a face-value indicator, the modal is where it's explained. */
+  definitionLocked?: boolean;
   /** Present on every real render; omitted only for the DragOverlay copy, which has no menu of its own. */
   actor?: Actor | null;
   menuHandlers?: TaskMenuHandlers<Task>;
@@ -365,6 +373,14 @@ function TaskCard({
           {initials(task.ownerName)}
         </div>
         <div className="flex items-center gap-3">
+          {definitionLocked ? (
+            <span
+              className="flex items-center text-ink-3"
+              title="This task's definition is locked for the week — status, notes and blocks are still open."
+            >
+              <Lock className="size-3" aria-hidden />
+            </span>
+          ) : null}
           {task.carry_over_count > 0 ? (
             <span className={cn('num text-num-xs flex items-center gap-1', task.carry_over_count >= 3 ? 'text-danger' : 'text-ink-3')}>
               <RotateCcw className="size-3" aria-hidden /> {task.carry_over_count}w
@@ -412,6 +428,7 @@ function Column({
   tasks,
   meId,
   actor,
+  weekStateById,
   isDragging,
   dropRefusal,
   menuHandlers,
@@ -424,6 +441,8 @@ function Column({
   tasks: Task[];
   meId: string | undefined;
   actor: Actor | null;
+  /** This task's week's `state` — the definition lock's other half, see `definitionLockRefusal`. */
+  weekStateById: Map<string, string>;
   /** A drag is in flight somewhere on the board. */
   isDragging: boolean;
   /** Null when the dragged card may land here; otherwise why it may not. */
@@ -445,12 +464,14 @@ function Column({
 
   const renderCard = (t: Task) => {
     const pinned = dragRefusal(t, COLUMN_IDS, actor);
+    const definitionLocked = definitionLockRefusal(t, weekStateById.get(t.week_id), actor) != null;
     return (
     <TaskCard
       key={t.id}
       task={t}
       draggable={pinned === null}
       pinnedReason={pinned}
+      definitionLocked={definitionLocked}
       actor={actor}
       menuHandlers={menuHandlers}
       onFlagCancellation={
@@ -558,6 +579,21 @@ export function BoardPage() {
 
   const boardResource = useResource((signal) => api.get<Board>('/api/tasks/board', { signal }), []);
   const [board, setBoard] = React.useState<Board | null>(null);
+  // The definition lock (PLAN.md §10.1) fires on a task's WEEK leaving
+  // `planning`, and the board's own task rows carry no week state --
+  // `week_id` only. A dozen recent weeks is comfortably enough to cover
+  // every task a live board can show (nothing here holds a week open
+  // past its own close), so one small fetch beats joining week state
+  // into every task row server-side for a UI-only concern.
+  const weeksResource = useResource(
+    (signal) => api.get<{ id: string; state: string }[]>('/api/weeks?limit=12', { signal }),
+    []
+  );
+  const weekStateById = React.useMemo(() => {
+    const m = new Map<string, string>();
+    for (const w of weeksResource.data ?? []) m.set(w.id, w.state);
+    return m;
+  }, [weeksResource.data]);
   const [activeTask, setActiveTask] = React.useState<Task | null>(null);
   const [blockTarget, setBlockTarget] = React.useState<Task | null>(null);
   const [cancelTarget, setCancelTarget] = React.useState<Task | null>(null);
@@ -919,6 +955,7 @@ export function BoardPage() {
               tasks={visible[c.id]}
               meId={me?.id}
               actor={actor}
+              weekStateById={weekStateById}
               isDragging={activeTask != null}
               dropRefusal={activeTask ? moveRefusal(activeTask, c.id, actor) : null}
               menuHandlers={menuHandlers}
@@ -936,6 +973,7 @@ export function BoardPage() {
       {detailTarget ? (
         <TaskDetailDialog
           task={detailTarget}
+          weekState={weekStateById.get(detailTarget.week_id) ?? null}
           onClose={() => setDetailTarget(null)}
           onChanged={load}
           onFlagCancellation={isOversight && canWrite ? (t) => setCancelTarget(t) : undefined}
@@ -1088,12 +1126,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
  */
 function TaskDetailDialog({
   task,
+  weekState,
   onClose,
   onChanged,
   onFlagCancellation,
   onDeclareBlock,
 }: {
   task: Task;
+  /** The task's own week's `state` (`ops.weeks.state`) — null when the week isn't in the recent set `BoardPage` fetched. */
+  weekState?: string | null;
   onClose: () => void;
   onChanged: () => void;
   onFlagCancellation?: (task: Task) => void;
@@ -1179,6 +1220,61 @@ function TaskDetailDialog({
     ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder, readOnly: me.readOnly }
     : null;
 
+  // PLAN.md §10.1 — the definition lock. `lockRefusal` is the trigger's
+  // own sentence (task-permissions.ts's `definitionLockRefusal`, a
+  // faithful mirror of `ops.enforce_task_transition` guard 2b); reused
+  // verbatim here instead of writing a second vocabulary for the same
+  // refusal. `null` means the definition is still open to a direct edit.
+  const lockRefusal = definitionLockRefusal(task, weekState, actor);
+  const isGm = me?.authority === 'gm';
+  const [requestingChange, setRequestingChange] = React.useState(false);
+  const [editRequests, setEditRequests] = React.useState<TaskEditRequest[] | null>(null);
+  const [lookupTypes, setLookupTypes] = React.useState<{ id: string; name: string }[]>([]);
+  const [lookupMembers, setLookupMembers] = React.useState<{ userId: string; name: string | null; email: string | null }[]>([]);
+
+  const loadEditRequests = React.useCallback(() => {
+    api
+      .get<TaskEditRequest[]>(`/api/task-edit-requests?taskId=${task.id}`)
+      .then(setEditRequests)
+      .catch(() => setEditRequests([]));
+  }, [task.id]);
+
+  // Every ops member can read this task's edit-request history (the same
+  // "everyone is in the loop" RLS the migration's SELECT policy grants) —
+  // Task 4's "close the loop" for the requester happens simply by this
+  // section existing and always reflecting the real status, not by a
+  // separate notification surface.
+  React.useEffect(() => {
+    loadEditRequests();
+  }, [loadEditRequests]);
+
+  // Name/type lookups for the diff renderer, fetched only once a request
+  // actually exists to show (or the requester is about to raise one) —
+  // no point paying for two extra requests on the common case of a task
+  // with no edit-request history at all.
+  React.useEffect(() => {
+    if (!requestingChange && !editRequests?.length) return;
+    let cancelled = false;
+    Promise.all([
+      api.get<{ id: string; name: string }[]>('/api/catalog'),
+      api.get<{ userId: string; name: string | null; email: string | null }[]>('/api/members'),
+    ])
+      .then(([types, members]) => {
+        if (cancelled) return;
+        setLookupTypes(types);
+        setLookupMembers(members);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [requestingChange, editRequests?.length]);
+
+  const diffResolve: DiffResolvers = {
+    taskTypeName: (id) => lookupTypes.find((t) => t.id === id)?.name ?? 'Unknown type',
+    memberName: (id) => lookupMembers.find((m) => m.userId === id)?.name ?? lookupMembers.find((m) => m.userId === id)?.email ?? 'Unknown',
+  };
+
   const statusAction: { to: BoardColumn; label: string; hint: string; variant?: 'primary' | 'secondary' } | null =
     task.status === 'todo' || task.status === 'in_progress'
       ? {
@@ -1218,6 +1314,7 @@ function TaskDetailDialog({
   }
 
   return (
+    <>
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       {/*
         Chan, 2026-09-10 (PLAN.md §10 #3): "once the modal is tall
@@ -1256,7 +1353,37 @@ function TaskDetailDialog({
               Blocked
             </Chip>
           ) : null}
+          {lockRefusal ? (
+            <Chip>
+              <Lock className="size-3 shrink-0" aria-hidden />
+              Definition locked
+            </Chip>
+          ) : null}
         </div>
+
+        {/*
+          Task 1 (PLAN.md §10.1): this is a normal state of the week, not
+          an error — same banner geometry as the statusAction row below
+          it, not the danger-toned refusal treatment. The message is the
+          trigger's own sentence (`definitionLockRefusal`), so it never
+          drifts from what the database will actually say if someone
+          tries anyway. Progress (status/notes/blocks) is never affected
+          by this and nothing here implies it is — the statusAction row
+          right below stays fully live.
+        */}
+        {lockRefusal ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface-2 px-3 py-2.5">
+            <p className="flex max-w-[400px] items-start gap-1.5 text-body-sm text-ink-2">
+              <Lock className="mt-0.5 size-3.5 shrink-0 text-ink-3" aria-hidden />
+              {lockRefusal}
+            </p>
+            {isGm && !readOnly ? (
+              <Button variant="secondary" size="sm" onClick={() => setRequestingChange(true)}>
+                Request a change
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
 
         {statusAction ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface-2 px-3 py-2.5">
@@ -1358,6 +1485,7 @@ function TaskDetailDialog({
             </ul>
           )}
         </div>
+
         </div>
 
         {/*
@@ -1370,10 +1498,35 @@ function TaskDetailDialog({
           rule — a note's own text always wraps (`break-words`), but this
           is the backstop for anything that doesn't (a long unbroken
           token, a pasted table).
+
+          Task 4's change-request history (closing the loop — "the GM
+          should be able to see what happened to their request") shares
+          THIS scroll region rather than sitting in the fixed area above
+          with the chips/fields/blocks. Reproduced defect it fixes: a
+          first attempt put it in the fixed area, which grew past the
+          dialog's 85vh cap on a task with real history and the
+          flexbox algorithm silently clipped the overflow from the
+          bottom — hiding not just this section but the ENTIRE worklog
+          panel below it, with no scrollbar to hint anything was
+          missing (confirmed present in the DOM via `innerText`,
+          invisible on screen). Both this list and the worklog are
+          unbounded, append-only histories, so sharing the one scroll
+          region Chan's own design already carves out is the correct
+          fix, not a second one.
         */}
         <div className="flex min-h-[96px] flex-1 flex-col overflow-hidden">
           <p className="mb-1 shrink-0 text-eyebrow text-ink-3">Worklog</p>
           <div className="flex flex-1 flex-col gap-3 overflow-y-auto overflow-x-auto rounded-lg border border-hairline bg-surface p-3">
+            {editRequests && editRequests.length > 0 ? (
+              <div className="-mx-3 -mt-3 mb-1 border-b border-hairline pb-3">
+                <p className="px-3 pt-3 text-eyebrow text-ink-3">Change requests</p>
+                <div className="mt-1">
+                  {editRequests.map((r) => (
+                    <EditRequestCard key={r.id} request={r} diffs={buildFieldDiffs(r, diffResolve)} />
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {!notes ? (
               <p className="text-body-sm text-ink-3">Loading…</p>
             ) : notes.length === 0 ? (
@@ -1447,6 +1600,15 @@ function TaskDetailDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    {requestingChange ? (
+      <TaskEditRequestDialog
+        task={task}
+        onClose={() => setRequestingChange(false)}
+        onCreated={loadEditRequests}
+      />
+    ) : null}
+    </>
   );
 }
 

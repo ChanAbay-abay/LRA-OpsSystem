@@ -203,3 +203,38 @@ export function dragRefusal(task: MovableTask, columns: BoardColumn[], actor: Ac
 export function canDragTask(task: MovableTask, columns: BoardColumn[], actor: Actor | null): boolean {
   return dragRefusal(task, columns, actor) === null;
 }
+
+/**
+ * The exact sentence `ops.enforce_task_transition`'s guard 2b raises
+ * (20260910140000_ops_task_edit_requests.sql), reproduced verbatim so the
+ * UI never invents a second vocabulary for the same refusal. Once a
+ * committed task's week has left `planning`, its definition — title,
+ * description, catalog type, owner, client reference — is frozen for
+ * everyone but a founder or admin. The trigger's exemption is
+ * `core.is_founder()`, not `core.is_oversight()`: a GM is refused here
+ * exactly like staff, on purpose — a GM's only path to change a locked
+ * task's definition is a task edit request (PLAN.md §10.1).
+ *
+ * Progress — status, notes, blocks — is never affected by this guard and
+ * this function says nothing about it; see `moveRefusal` for that ladder.
+ */
+export interface DefinitionLockable {
+  is_committed: boolean;
+}
+
+export function definitionLockRefusal(
+  task: DefinitionLockable,
+  weekState: string | null | undefined,
+  actor: Actor | null
+): string | null {
+  if (!task.is_committed) return null;
+  if (weekState == null || weekState === 'planning') return null;
+  // A read-only founder (ERC/DCA) never reaches the founder bypass: the
+  // trigger's `core.is_read_only()` check (statement 0) refuses them
+  // before guard 2b is ever evaluated, exactly like every other write.
+  if (actor && !actor.readOnly && (actor.authority === 'founder' || actor.authority === 'admin')) return null;
+  return (
+    "a committed task's definition (title/description/type/owner/client reference) is locked " +
+    'once the week has left planning; ask the GM to raise a task edit request'
+  );
+}
