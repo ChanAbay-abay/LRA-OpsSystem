@@ -13,6 +13,7 @@ import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppShell } from '@/components/layout/app-shell';
 import { SkeletonRows } from '@/components/ui/resource-state';
 import { LoginPage } from '@/routes/login';
+import { SetPasswordPage } from '@/routes/set-password';
 import { NowPage } from '@/routes/now';
 import { BoardPage } from '@/routes/board';
 import { BriefingPage } from '@/routes/briefing';
@@ -103,6 +104,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/set-password" element={<SetPasswordPage />} />
       <Route
         path="/"
         element={

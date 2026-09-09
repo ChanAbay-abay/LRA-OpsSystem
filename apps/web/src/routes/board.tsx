@@ -72,6 +72,7 @@ import {
   CheckCircle2,
   MessageSquare,
   Pencil,
+  Plus,
   RotateCcw,
   Search,
   Undo2,
@@ -81,6 +82,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/app-shell';
+import { CreateTaskDialog } from '@/components/tasks/create-task-dialog';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Button } from '@/components/ui/button';
 import {
@@ -530,6 +532,7 @@ export function BoardPage() {
   const [cancelTarget, setCancelTarget] = React.useState<Task | null>(null);
   const [notesTarget, setNotesTarget] = React.useState<Task | null>(null);
   const [detailTarget, setDetailTarget] = React.useState<Task | null>(null);
+  const [createOpen, setCreateOpen] = React.useState(false);
 
   const [ownerFilter, setOwnerFilter] = React.useState<string>(
     () => localStorage.getItem(OWNER_FILTER_KEY) ?? 'all'
@@ -632,6 +635,21 @@ export function BoardPage() {
       if (!b) return b;
       const from = findColumn(task.id);
       if (!from) return b;
+      // A status change can resolve to the SAME visual column it started
+      // in -- e.g. a `rejected` task (renders in Backlog) legally moving
+      // to `todo` (also Backlog) on rework, or the drop simply landing
+      // back near its own column. Spreading `[from]: …filter…` and then
+      // `[to]: [...b[to], …]` in one object literal is safe when they're
+      // different keys, but when `from === to` the second assignment
+      // reads `b[to]` -- the ORIGINAL, unfiltered array -- and appends
+      // the updated task on top of it, duplicating the card on screen
+      // and inflating the column's point total. Reproduced: dragging a
+      // Returned task toward a disabled column resolved onto Backlog,
+      // its own column, and doubled it. Same-column updates go through
+      // `map`, never `filter` + append.
+      if (from === to) {
+        return { ...b, [from]: b[from].map((t) => (t.id === task.id ? { ...t, status } : t)) };
+      }
       const next: Board = { ...b, [from]: b[from].filter((t) => t.id !== task.id), [to]: [...b[to], { ...task, status }] };
       return next;
     });
@@ -658,10 +676,22 @@ export function BoardPage() {
   if (!board) {
     return (
       <div>
-        <PageHeader title="Board" description="Drag to move. Every drop goes through the same check a button click would." />
+        <PageHeader
+          title="Board"
+          description="Drag to move. Every drop goes through the same check a button click would."
+          actions={
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus className="size-3.5" aria-hidden />
+              New task
+            </Button>
+          }
+        />
         <ResourceView resource={boardResource} skeleton={<SkeletonBoard columns={COLUMNS.length} />}>
           {() => null}
         </ResourceView>
+        {createOpen ? (
+          <CreateTaskDialog onClose={() => setCreateOpen(false)} onCreated={load} />
+        ) : null}
       </div>
     );
   }
@@ -705,7 +735,16 @@ export function BoardPage() {
 
   return (
     <div>
-      <PageHeader title="Board" description="Drag to move. Every drop goes through the same check a button click would." />
+      <PageHeader
+        title="Board"
+        description="Drag to move. Every drop goes through the same check a button click would."
+        actions={
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="size-3.5" aria-hidden />
+            New task
+          </Button>
+        }
+      />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative">
@@ -854,6 +893,10 @@ export function BoardPage() {
           onClose={() => setNotesTarget(null)}
           onNoteAdded={load}
         />
+      ) : null}
+
+      {createOpen ? (
+        <CreateTaskDialog onClose={() => setCreateOpen(false)} onCreated={load} />
       ) : null}
     </div>
   );
