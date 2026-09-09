@@ -65,6 +65,8 @@ if (!SUPABASE_URL || !SERVICE_KEY || !ANON_KEY) {
 
 const DEMO_DOMAIN = 'ops-demo.invalid';
 const PURGE = process.argv.includes('--purge');
+/** Opt-in. Without it, an existing account's password is never touched. */
+const ROTATE = process.argv.includes('--rotate-passwords');
 
 const PERSONAS = [
   { key: 'founder', firstName: 'Founder', lastName: 'Demo', authority: 'founder', position: 'founder', isClearingFounder: true },
@@ -221,10 +223,11 @@ async function seed() {
   let anyRotated = false;
 
   for (const persona of PERSONAS) {
-    const password = generatePassword();
     let authUser = await findAuthUserByEmail(persona.email);
+    let password = null;   // only known for accounts this run actually created
 
     if (!authUser) {
+      password = generatePassword();
       const { data, error } = await svc.auth.admin.createUser({
         email: persona.email,
         password,
@@ -233,22 +236,44 @@ async function seed() {
       if (error) throw error;
       authUser = data.user;
       console.log(`  created ${persona.email}`);
-    } else {
+    } else if (ROTATE) {
+      password = generatePassword();
       const { error } = await svc.auth.admin.updateUserById(authUser.id, { password });
       if (error) throw error;
       anyRotated = true;
-      console.log(`  found ${persona.email}, password reset`);
+      console.log(`  found ${persona.email}, password ROTATED (--rotate-passwords)`);
+    } else {
+      console.log(`  found ${persona.email}, password left alone`);
     }
 
     const personId = await upsertPerson(persona);
     await upsertCoreUser(authUser.id, personId, persona);
     await upsertMembership(authUser.id, persona);
 
-    credentials.push({ role: persona.key, email: persona.email, password });
+    if (password) credentials.push({ role: persona.key, email: persona.email, password });
 
+    // Seeding runs as each persona so it exercises RLS exactly as production
+    // traffic does -- which needs a session. Earlier this script reset the
+    // password on every run purely to obtain one, silently invalidating any
+    // credentials already handed out. Three separate people lost access that
+    // way. The admin API can mint a session WITHOUT touching the password,
+    // so a re-run no longer costs anyone their login.
     const anon = createClient(SUPABASE_URL, ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
-    const { error: signInError } = await anon.auth.signInWithPassword({ email: persona.email, password });
-    if (signInError) throw new Error(`could not sign in as ${persona.email}: ${signInError.message}`);
+    if (password) {
+      const { error: signInError } = await anon.auth.signInWithPassword({ email: persona.email, password });
+      if (signInError) throw new Error(`could not sign in as ${persona.email}: ${signInError.message}`);
+    } else {
+      const { data: link, error: linkError } = await svc.auth.admin.generateLink({
+        type: 'magiclink',
+        email: persona.email,
+      });
+      if (linkError) throw new Error(`could not mint a session for ${persona.email}: ${linkError.message}`);
+      const { error: otpError } = await anon.auth.verifyOtp({
+        token_hash: link.properties.hashed_token,
+        type: 'magiclink',
+      });
+      if (otpError) throw new Error(`could not verify session for ${persona.email}: ${otpError.message}`);
+    }
     clients[persona.key] = anon;
   }
 
@@ -351,10 +376,30 @@ async function createTask(client, { weekId, ownerUserId, taskTypeId, title, desc
 // trigger treats a same-state transition as illegal, not a no-op --
 // without this guard, reusing an existing task via `createTask` above
 // would throw the moment `seedWeek` tried to replay its transitions.
+// Forward-only ladder. A re-run replays the same script against tasks that
+// have ALREADY advanced, so an exact-match check is not enough: asking a
+// `verified` task to go to `submitted` is a real backwards transition and the
+// trigger rightly refuses it ("only a founder may send a verified task back to
+// the GM"). Anything already at or past the target -- or parked in a terminal
+// side state -- is left exactly where it is.
+const LADDER = { todo: 0, in_progress: 1, submitted: 2, verified: 3, cleared: 4 };
+
 async function transition(client, taskId, to, extra = {}) {
   const { data: current, error: readError } = await client.schema('ops').from('tasks').select('status').eq('id', taskId).single();
   if (readError) throw new Error(`transition ${taskId} -> ${to}: could not read current status: ${readError.message}`);
   if (current.status === to) return current;
+
+  const here = LADDER[current.status];
+  const there = LADDER[to];
+  if (here === undefined) {
+    // rejected / cancelled / pending_cancellation: already at its demo resting state.
+    console.log(`  [skip] task ${taskId} is ${current.status}, leaving it there`);
+    return current;
+  }
+  if (there !== undefined && here >= there) {
+    console.log(`  [skip] task ${taskId} is already ${current.status}, past ${to}`);
+    return current;
+  }
 
   const { data, error } = await client.schema('ops').from('tasks').update({ status: to, ...extra }).eq('id', taskId).select().single();
   if (error) throw new Error(`transition ${taskId} -> ${to} failed: ${error.message}`);
@@ -424,15 +469,24 @@ async function seedWeek(clients) {
   });
   await transition(clients.broker, t3.id, 'submitted');
   await transition(clients.gm, t3.id, 'verified');
-  const { error: overrideError } = await clients.founder
-    .schema('ops')
-    .from('tasks')
-    .update({
-      points_override: 8,
-      points_override_reason: 'Demo seed: catalog is still DRAFT/unpriced, override stands in for a real value.',
-    })
-    .eq('id', t3.id);
-  if (overrideError) throw new Error(`points override on ${t3.id} failed: ${overrideError.message}`);
+  // Only on the first run: once this task reaches `cleared` the freeze trigger
+  // closes the record for good, so replaying the override on a re-run is both
+  // pointless and correctly refused ("a cleared or cancelled task is frozen").
+  const { data: t3now } = await clients.founder
+    .schema('ops').from('tasks').select('status').eq('id', t3.id).single();
+  if (t3now?.status !== 'cleared' && t3now?.status !== 'cancelled') {
+    const { error: overrideError } = await clients.founder
+      .schema('ops')
+      .from('tasks')
+      .update({
+        points_override: 8,
+        points_override_reason: 'Demo seed: catalog is still DRAFT/unpriced, override stands in for a real value.',
+      })
+      .eq('id', t3.id);
+    if (overrideError) throw new Error(`points override on ${t3.id} failed: ${overrideError.message}`);
+  } else {
+    console.log(`  [skip] task ${t3.id} is already ${t3now.status}; override and clear left alone`);
+  }
   await transition(clients.founder, t3.id, 'cleared');
 
   // Rejected -- shows the "Returned" ledger state.

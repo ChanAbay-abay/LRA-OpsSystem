@@ -102,7 +102,10 @@ begin
         using errcode = '42501';
     end if;
 
-    select w.state into v_week_state from ops.weeks w where w.id = new.week_id;
+    -- `for share`: without a row lock this is a read-committed TOCTOU window --
+    -- a commit landing while close_briefing is mid-transaction would still see
+    -- 'planning'. See 20260909190000.
+    select w.state into v_week_state from ops.weeks w where w.id = new.week_id for share;
     if v_week_state is not null and v_week_state <> 'planning' then
       raise exception 'commitments are locked for this week' using errcode = '42501';
     end if;
