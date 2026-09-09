@@ -406,6 +406,61 @@ async function transition(client, taskId, to, extra = {}) {
   return data;
 }
 
+// Cancellation is a separate two-rung ladder, not another step on
+// `LADDER` above (ops_cancellation_approval.sql): a workable status ->
+// `pending_cancellation` (GM/founder flags, reason required), then
+// `pending_cancellation` -> `cancelled` (clearing founder approves) or
+// -> whatever status it held before (clearing founder refuses, reason
+// required). `transition()` treats `pending_cancellation` as a terminal
+// resting state on purpose, which is correct for a task left flagged
+// and undecided but wrong for the flag-then-decide pair these two
+// helpers make back to back -- reusing `transition()` for the decision
+// call would silently no-op instead of deciding it. Each helper reads
+// current status first so a re-run of this script is idempotent without
+// replaying a decision that already happened.
+async function flagCancellation(client, taskId, reason) {
+  const { data: current, error } = await client.schema('ops').from('tasks').select('status').eq('id', taskId).single();
+  if (error) throw new Error(`flagCancellation ${taskId}: could not read current status: ${error.message}`);
+  if (current.status === 'pending_cancellation' || current.status === 'cancelled') {
+    console.log(`  [skip] task ${taskId} is already ${current.status}, leaving the cancellation flag as-is`);
+    return current;
+  }
+  const { data, error: updateError } = await client
+    .schema('ops')
+    .from('tasks')
+    .update({ status: 'pending_cancellation', cancellation_reason: reason })
+    .eq('id', taskId)
+    .select()
+    .single();
+  if (updateError) throw new Error(`flagCancellation ${taskId} failed: ${updateError.message}`);
+  return data;
+}
+
+async function decideCancellation(client, taskId, decision, reason) {
+  const { data: current, error } = await client
+    .schema('ops')
+    .from('tasks')
+    .select('status, pre_cancellation_status')
+    .eq('id', taskId)
+    .single();
+  if (error) throw new Error(`decideCancellation ${taskId}: could not read current status: ${error.message}`);
+  if (current.status !== 'pending_cancellation') {
+    console.log(`  [skip] task ${taskId} is ${current.status}, not awaiting a cancellation decision`);
+    return current;
+  }
+  const to = decision === 'approve' ? 'cancelled' : current.pre_cancellation_status;
+  const extra = decision === 'approve' ? {} : { cancellation_decision_reason: reason };
+  const { data, error: updateError } = await client
+    .schema('ops')
+    .from('tasks')
+    .update({ status: to, ...extra })
+    .eq('id', taskId)
+    .select()
+    .single();
+  if (updateError) throw new Error(`decideCancellation ${taskId} failed: ${updateError.message}`);
+  return data;
+}
+
 // Each demo task in this script gets at most one block, so "a block
 // already exists for this task" is enough to say the row was already
 // seeded -- same re-run bug as the tasks themselves (task_blocks has no
@@ -460,9 +515,12 @@ async function seedWeek(clients) {
   await transition(clients.sales, t2.id, 'submitted');
   await transition(clients.gm, t2.id, 'verified');
 
-  // Full lifecycle to cleared, with a points override (the catalog stays
-  // DRAFT/unpriced on purpose -- see OPEN-QUESTIONS.md #3) -- exercises
-  // the ledger, the clearing-founder guard, and the outbox in one go.
+  // Full lifecycle to cleared, with a points override -- the catalog is
+  // priced (placeholder Fibonacci values, see
+  // 20260909180000_placeholder_points_and_admin_clearing.sql), so this
+  // is a founder overriding that default for a specific task, not
+  // standing in for a missing one -- exercises the ledger, the
+  // clearing-founder guard, and the outbox in one go.
   const t3 = await createTask(clients.broker, {
     weekId, ownerUserId: brokerId, taskTypeId: fileEntryType,
     title: 'File import entry for shipment #DEMO-1234',
@@ -480,7 +538,7 @@ async function seedWeek(clients) {
       .from('tasks')
       .update({
         points_override: 8,
-        points_override_reason: 'Demo seed: catalog is still DRAFT/unpriced, override stands in for a real value.',
+        points_override_reason: 'This entry had an unusual documentary discrepancy that took most of a day to resolve with BOC -- bumping above the standard 5 to reflect the actual work.',
       })
       .eq('id', t3.id);
     if (overrideError) throw new Error(`points override on ${t3.id} failed: ${overrideError.message}`);
@@ -518,6 +576,62 @@ async function seedWeek(clients) {
     reason: 'Need the client-confirmed delivery address from sales before booking a truck.', created_by: brokerId,
   });
 
+  // Three cancellation scenarios -- a Cebu brokerage's actual reasons
+  // for flagging a task, not test narration, so a fresh purge+reseed
+  // demonstrates the whole flow (board's at-risk treatment, the
+  // founder's decision banner) without anyone hand-flagging a task.
+
+  // Flagged, then the clearing founder APPROVES it -- the client
+  // cancelled the booking outright, so the trucking arrangement is
+  // genuinely dead work.
+  const t7 = await createTask(clients.broker, {
+    weekId, ownerUserId: brokerId, taskTypeId: truckingType,
+    title: 'Arrange trucking for shipment #DEMO-3210',
+  });
+  await transition(clients.broker, t7.id, 'in_progress');
+  await flagCancellation(
+    clients.gm,
+    t7.id,
+    'Client cancelled the booking before pickup; there is no shipment left to truck.'
+  );
+  await decideCancellation(clients.founder, t7.id, 'approve');
+
+  // Flagged, then the clearing founder REFUSES it -- BOC released the
+  // shipment on its own overnight, which looked like the hold resolved
+  // itself, but the broker still owes the client the discrepancy
+  // write-up and the release paperwork isn't closed out yet.
+  const t8 = await createTask(clients.broker, {
+    weekId, ownerUserId: brokerId, taskTypeId: holdType,
+    title: 'Resolve BOC alert on shipment #DEMO-6655',
+  });
+  await transition(clients.broker, t8.id, 'in_progress');
+  await flagCancellation(
+    clients.gm,
+    t8.id,
+    'BOC released the shipment on its own overnight; this looks like it resolved itself.'
+  );
+  await decideCancellation(
+    clients.founder,
+    t8.id,
+    'refuse',
+    'The discrepancy still needs to be written up and the release paperwork closed out -- keep this open.'
+  );
+
+  // Flagged and left undecided -- the client has said they are not
+  // renewing, but the founder has not ruled on it yet. This is the
+  // at-risk board treatment and the founder's decision banner, both
+  // deliberately left visible rather than resolved.
+  const t9 = await createTask(clients.sales, {
+    weekId, ownerUserId: salesId, taskTypeId: followUpType,
+    title: 'Follow up with a client on their standing arrangement',
+  });
+  await transition(clients.sales, t9.id, 'in_progress');
+  await flagCancellation(
+    clients.gm,
+    t9.id,
+    'Client told sales they are not renewing next quarter; confirm before we stop billing them.'
+  );
+
   // A carry-over -- simulated directly (system client) as already having
   // rolled over once from last week, so the board's age badge has
   // something to show without actually closing the live current week.
@@ -548,7 +662,10 @@ async function seedWeek(clients) {
   if (genError) console.error(`  [warn] generate_recurring_tasks failed: ${genError.message}`);
   else console.log(`  generated ${gen?.[0]?.created_count ?? 0} recurring task(s) for week ${weekStart}`);
 
-  console.log(`  week ${weekStart}: 6 hand-seeded tasks (in progress / pending-founder / cleared / rejected / 2 blocked) + 1 simulated carry-over`);
+  console.log(
+    `  week ${weekStart}: 9 hand-seeded tasks (in progress / pending-founder / cleared / rejected / ` +
+      '2 blocked / cancelled / refused-cancellation / pending-cancellation) + 1 simulated carry-over'
+  );
 }
 
 try {
