@@ -42,6 +42,15 @@ const templateSchema = z.object({
 
 const templatePatchSchema = templateSchema.partial().extend({ isActive: z.boolean().optional() });
 
+// Exported so the duplicate-recurring-template message can be unit
+// tested without a live database (see test/catalog.test.ts) -- mirrors
+// the task-type route's inline `a task type named "..." already
+// exists` string, but names the routine AND the position, since
+// `uq_ops_recurring_templates_title` (20260909210000) is keyed on both.
+export function duplicateTemplateMessage(position: string, title: string): string {
+  return `the ${position} role already has a weekly routine called "${title}"`;
+}
+
 function toRow(body: z.infer<typeof typeSchema>) {
   return {
     name: body.name,
@@ -171,6 +180,12 @@ export default async function catalogRoutes(app: FastifyInstance) {
       })
       .select()
       .single();
+    // `uq_ops_recurring_templates_title` (20260909210000) is real; give
+    // it the same named treatment as `uq_ops_task_types_name` above
+    // instead of falling through to the central handler's generic 409.
+    if (error?.code === '23505') {
+      throw new ApiError(409, duplicateTemplateMessage(body.position, body.title), 'DUPLICATE_NAME');
+    }
     if (error) throw error;
     return { data };
   });
@@ -194,6 +209,25 @@ export default async function catalogRoutes(app: FastifyInstance) {
       .eq('id', id)
       .select()
       .single();
+    // Same named-409 treatment as POST /recurring above. `patch`/`body`
+    // carry the same value when the field was actually sent (mirroring
+    // the task-type PATCH branch's `patch.name ?? body.name` above); if
+    // a clash comes from a field this PATCH didn't touch (e.g. only
+    // `isActive` changed but the row's existing title now collides with
+    // one just reactivated), we don't have the untouched value without
+    // another round trip, so fall back to a message that still names
+    // what we do know rather than the constraint name.
+    if (error?.code === '23505') {
+      const title = typeof patch.title === 'string' ? patch.title : body.title;
+      const position = typeof patch.position === 'string' ? patch.position : body.position;
+      throw new ApiError(
+        409,
+        title && position
+          ? duplicateTemplateMessage(position, title)
+          : 'a recurring template with that position and title already exists',
+        'DUPLICATE_NAME'
+      );
+    }
     if (error) throw error;
     return { data };
   });

@@ -22,6 +22,20 @@ describe('mapPostgrestError', () => {
     assert.doesNotMatch(mapped.message, /uq_ops_task_types_name/);
   });
 
+  // Alongside the task-type case above: 20260909210000 added
+  // `uq_ops_recurring_templates_title`, the same shape of constraint on
+  // a different table, so the central mapping must treat it the same
+  // way -- 409, with the raw constraint name never echoed back.
+  test('23505 unique_violation on the recurring-template title constraint maps to 409', () => {
+    const mapped = mapPostgrestError({
+      code: '23505',
+      message: 'duplicate key value violates unique constraint "uq_ops_recurring_templates_title"',
+    });
+    assert.ok(mapped);
+    assert.equal(mapped.statusCode, 409);
+    assert.doesNotMatch(mapped.message, /uq_ops_recurring_templates_title/);
+  });
+
   test('23503 foreign_key_violation maps to 409', () => {
     const mapped = mapPostgrestError({ code: '23503', message: 'update or delete on table violates foreign key constraint' });
     assert.ok(mapped);

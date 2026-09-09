@@ -143,19 +143,35 @@ export function CatalogPage() {
         {(rows) => (
           <div className="rounded-xl border border-hairline bg-surface">
             {rows.map((t) => (
-              // Below `sm` (640px) this stacks into two lines --
+              // Below `lg` (1024px) this stacks into two lines --
               // category, then title/note, then a footer row holding
               // both the points and the action buttons -- instead of
-              // five flex siblings fighting for a 375px-wide row. At
-              // `sm`+ the footer wrapper is `contents` (removed from
+              // five flex siblings fighting for a content column that,
+              // below `lg`, is never wide enough to hold them.
+              //
+              // Originally this switched at `sm` (640px), which is a
+              // *viewport* breakpoint measured with no idea the fixed
+              // 240px `<aside>` (app-shell.tsx) is also on screen from
+              // `md` (768px) up. At 768px wide that leaves a ~528px
+              // content column for a desktop row that needs ~612px --
+              // the row silently overflowed `<main>`'s own scroll
+              // container sideways (defect: Deactivate/Delete
+              // unreachable at 768px, no visible scrollbar). `lg` is the
+              // first breakpoint where the column (viewport minus the
+              // 240px sidebar minus the `lg:px-8` page padding) is
+              // reliably wider than the row's fixed-width siblings need
+              // -- verified at 375/640/768/1024/1440 against the real
+              // authenticated app, not a static harness.
+              //
+              // At `lg`+ the footer wrapper is `contents` (removed from
               // layout, not rendering), so its two children rejoin the
-              // row as direct flex siblings and the ≥640px layout is
+              // row as direct flex siblings and the desktop layout is
               // pixel-identical to before.
               <div
                 key={t.id}
-                className={`flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-0 sm:flex-row sm:items-start sm:gap-4 ${!t.is_active ? 'opacity-60' : ''}`}
+                className={`flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-0 lg:flex-row lg:items-start lg:gap-4 ${!t.is_active ? 'opacity-60' : ''}`}
               >
-                <div className="text-eyebrow text-ink-3 sm:w-28 sm:shrink-0">{t.category}</div>
+                <div className="text-eyebrow text-ink-3 lg:w-28 lg:shrink-0">{t.category}</div>
                 <div className="flex-1">
                   <p className="text-strong text-ink">
                     {t.name} {t.is_recurring ? <span className="text-eyebrow text-ink-3">· recurring</span> : null}
@@ -163,7 +179,7 @@ export function CatalogPage() {
                   </p>
                   <p className="text-body-sm text-ink-3">{t.guideline_note}</p>
                 </div>
-                <div className="flex items-center justify-between gap-3 sm:contents">
+                <div className="flex items-center justify-between gap-3 lg:contents">
                   <div className="flex w-20 shrink-0 flex-col items-end justify-center">
                     {t.default_points != null ? (
                       <span className={`num text-num-md ${isPlaceholder(t) ? 'text-pending border-b border-dashed border-current' : 'text-ink'}`}>
@@ -229,9 +245,9 @@ export function CatalogPage() {
               // Same stacking fix as the task-type list above.
               <div
                 key={t.id}
-                className={`flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-0 sm:flex-row sm:items-start sm:gap-4 ${!t.is_active ? 'opacity-60' : ''}`}
+                className={`flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-0 lg:flex-row lg:items-start lg:gap-4 ${!t.is_active ? 'opacity-60' : ''}`}
               >
-                <div className="text-eyebrow text-ink-3 sm:w-28 sm:shrink-0">{t.position}</div>
+                <div className="text-eyebrow text-ink-3 lg:w-28 lg:shrink-0">{t.position}</div>
                 <div className="flex-1">
                   <p className="text-strong text-ink">
                     {t.title}
