@@ -449,7 +449,7 @@ begin
   if old.status = 'pending_cancellation' and new.status = old.pre_cancellation_status then
     insert into core.notification_outbox
       (recipient_id, module, event_type, entity_type, entity_id, title, body, link)
-    select distinct r, 'ops', 'ops.task.cancellation_refused', 'ops.task', new.id,
+    select distinct r, 'ops'::core.module, 'ops.task.cancellation_refused', 'ops.task', new.id,
            'Cancellation refused', coalesce(new.cancellation_decision_reason, ''), '/board'
     from unnest(array_remove(array[new.owner_user_id, old.cancellation_requested_by], null)) as r;
   end if;

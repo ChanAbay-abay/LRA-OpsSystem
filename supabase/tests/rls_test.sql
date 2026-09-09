@@ -218,7 +218,11 @@ select pg_temp.expect_rows('read-scoping',
 select pg_temp.become((select uid from p where k='founder'));
 select pg_temp.expect_rows('read-scoping',
   'oversight (founder) sees every test person',
-  $sql$select count(*) from core.people where person_code like 'TEST-%'$sql$, 5);
+  $sql$select count(*) from core.people where person_code like 'TEST-%'$sql$,
+  -- Counted from the persona table, never hardcoded: a later attack added a
+  -- sixth persona (founder2, for the cancellation ladder) and this assertion
+  -- went red because it still expected 5. The invariant is "sees ALL of them".
+  (select count(*)::int from t_ids));
 
 -- === Attack 23: privilege escalation on core.users ====================
 
@@ -691,7 +695,11 @@ set local role authenticated;
 
 select pg_temp.become((select uid from p where k='sales'));
 select pg_temp.expect_rows('CANARY', 'MUST FAIL: staff reads every test person',
-  $sql$select count(*) from core.people where person_code like 'TEST-%'$sql$, 5);
+  $sql$select count(*) from core.people where person_code like 'TEST-%'$sql$,
+  -- Counted from the persona table, never hardcoded: a later attack added a
+  -- sixth persona (founder2, for the cancellation ladder) and this assertion
+  -- went red because it still expected 5. The invariant is "sees ALL of them".
+  (select count(*)::int from t_ids));
 
 reset role;
 
