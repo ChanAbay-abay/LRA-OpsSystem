@@ -1,6 +1,6 @@
 # LRA Ops — Open Questions
 
-**Revision 2, 2026-09-08.** Unresolved decisions, each with the assumption the plan runs on
+**Revision 3, 2026-09-09.** Unresolved decisions, each with the assumption the plan runs on
 until Chan answers.
 
 Items marked **BLOCKS PHASE N** must be answered before that build phase in `PLAN.md`.
@@ -59,6 +59,12 @@ remain.
 **The founder must review and price the catalog before the first real Monday briefing.**
 Commitments made against DRAFT values are not commitments. No assumption is safe here.
 
+**Chan, 2026-09-09 — partially answered.** Arbitrary Fibonacci values were assigned so the
+system can be exercised end to end during testing. **The `PLACEHOLDER —` prefix and the
+`/catalog` banner deliberately stay**, because the numbers are a stand-in, not a decision.
+Chan will sit down with the team to value each standard task. Until he does, this item is
+still open and the gate on Phase 6 still stands.
+
 ## 4. Do the three new people need `core.people` codes assigned by hand?
 
 **Assumption:** provisioning generates `LRA-002`, `LRA-003`, `LRA-004` sequentially, with Chan
@@ -74,10 +80,21 @@ The old HR README said Chan's father *and his two eldest brothers* each get thei
 - **A)** One founder account for now; the other two are added when they want in.
 - **B)** All three provisioned in Phase 2.
 
-**Assumption: A.** `core.users.authority` is a plain column, so adding the other two is two
-invites and nothing else. But if all three approve points, **any of them can clear a task**,
-and that is worth Chan confirming before the first week runs — a task cleared by an uncle who
-was not in the briefing is a governance question, not a bug.
+**ANSWERED — Chan, 2026-09-09: three founder accounts, but only one of them can act.**
+
+- **LRA** — the clearing founder. Clears points. `is_clearing_founder = true`.
+- **ERC** and **DCA** — **strictly read-only.** They exist so the other two brokerages can
+  keep tabs on everyone's progress. They see everything oversight sees and change nothing.
+- Chan's admin account also clears, unchanged.
+
+This is why "founder" is no longer sufficient as a write permission. Read-only is implemented
+as `core.users.read_only` + `core.is_read_only()`, guarded on **every** write policy, trigger
+and `security definer` RPC — not as a fourth authority value, because the read scope is
+identical to a founder's and only the write half differs. The governance worry above is
+resolved by construction: an uncle who was not in the briefing cannot clear anything.
+
+**Still needed from Chan:** the actual email addresses for the ERC and DCA accounts, and
+whether the LRA founder account is his father's or a shared brokerage inbox.
 
 ## 6. Leaderboard visibility — settled, but worth watching
 
@@ -98,6 +115,10 @@ founder.
 subdomain, own `CORS_ORIGIN`. Built in CI and shipped as `dist/` — the box has 1 core and must
 not build anything. Confirm the subdomain once Porkbun is set up.
 
+**Chan, 2026-09-09 — deliberately deferred.** Deployment waits until the system is as complete
+as it can be locally; he does not want to add hosting cost this early. Phase 9 stays last, and
+nothing before it should assume a deployed URL.
+
 ## 9. Do the invite emails actually land? — **BLOCKS PHASE 2 in practice**
 
 Locked: provisioning uses `inviteUserByEmail`, so no credential ever passes through this
@@ -108,6 +129,18 @@ The documented fallback is `auth.admin.createUser` with a one-time password Chan
 person and the user must change on first login. It is written up in `scripts/provision.md` but
 not built unless invites stall. **If Chan already knows the invites will not be read, say so
 and the fallback gets built in Phase 2 instead of after it.**
+
+**Tested 2026-09-09, 21:45.** A live invite was sent to `ckca1221@gmail.com` (Chan's second
+address, deliberately not accepted — this was a deliverability probe, not a provisioning run).
+Supabase Auth returned **HTTP 200** with `confirmation_sent_at` set, so the invite was accepted
+and handed to the mail sender. **That proves the API call, not the inbox** — Supabase's built-in
+SMTP is rate limited on the free tier and is a common spam-folder casualty. The open half of
+this question is now only whether Chan actually *received* it.
+
+The `auth.users` row `1a4a6ca2-cbab-477a-90f5-29f54b198d68` exists for that address as a
+by-product and has no `core.people` / `core.users` / `core.memberships` rows behind it. It is
+inert, but it should be deleted once Chan confirms receipt, or it will show up as a ghost in
+`/admin/users`.
 
 ## 10. Where does the database live once HR and CRM are rebuilt?
 
