@@ -177,9 +177,21 @@ where k <> 'other';   -- 'other' is deliberately not an ops member -- the read-s
 create temp view p as select k, v as uid from t_ids;
 grant select on p to authenticated;
 
+-- Force the fixture state rather than accepting whatever the live app left
+-- behind. `do nothing` meant that once anyone actually ran a briefing, the
+-- current week stayed 'open' and two commitment assertions failed for reasons
+-- that had nothing to do with the code under test. Everything here is inside
+-- the transaction this file rolls back, so the real week is untouched.
 insert into ops.weeks (week_start, state)
 values (ops.week_start_for(now()), 'planning')
-on conflict (week_start) do nothing;
+on conflict (week_start) do update
+  set state              = 'planning',
+      briefing_opened_at = null,
+      briefing_closed_at = null,
+      briefing_closed_by = null,
+      closed_at          = null,
+      closed_by          = null,
+      rolled_over_at     = null;
 
 insert into core.notifications (user_id, title, message)
 select v, 'TEST notification', 'seeded for the update-guard attack'

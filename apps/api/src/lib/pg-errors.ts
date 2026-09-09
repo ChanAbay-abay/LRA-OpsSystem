@@ -68,6 +68,28 @@ export function mapPostgrestError(error: unknown): MappedError | null {
         code: 'NOT_FOUND',
         message: 'Not found, or you do not have permission to do that.',
       };
+    // Contention, not a bug in the request. `20260909190000` made the
+    // commitment guard take a `for share` lock on ops.weeks so a commit
+    // landing while close_briefing is mid-transaction cannot slip past
+    // it. That is correct, but it means a commit CAN now block, and a
+    // block that outlives the statement timeout is cancelled by
+    // Postgres. Left unmapped those arrive as an opaque 500 -- which is
+    // very likely what the tester saw as an intermittent, self-healing
+    // 500 on POST /api/tasks/:id/commit right after a restart.
+    //
+    // 503 with Retry-After semantics is the honest answer: nothing is
+    // wrong with what the caller asked for, it just could not be served
+    // this instant. Reasoned from the lock's behaviour, not reproduced
+    // with concurrent sessions.
+    case '55P03': // lock_not_available
+    case '57014': // query_canceled (statement timeout, incl. lock waits)
+    case '40001': // serialization_failure
+    case '40P01': // deadlock_detected
+      return {
+        statusCode: 503,
+        code: 'BUSY',
+        message: 'The system was busy and could not complete that just now. Please try again.',
+      };
     default:
       return null;
   }

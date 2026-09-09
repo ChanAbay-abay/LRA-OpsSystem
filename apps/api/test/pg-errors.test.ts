@@ -55,8 +55,23 @@ describe('mapPostgrestError', () => {
     assert.doesNotMatch(mapped.message, /coerce/i);
   });
 
+  test('contention codes map to a retryable 503, not an opaque 500', () => {
+    // 20260909190000 made the commitment guard take a `for share` lock, so a
+    // commit can now legitimately block; a block outliving the statement
+    // timeout is cancelled as 57014. Nothing is wrong with the request, so it
+    // must not read as a server fault.
+    for (const code of ['55P03', '57014', '40001', '40P01']) {
+      const mapped = mapPostgrestError({ code, message: 'canceling statement due to statement timeout' });
+      assert.ok(mapped, `${code} should be mapped`);
+      assert.equal(mapped.statusCode, 503, `${code} should be 503`);
+      assert.equal(mapped.code, 'BUSY');
+    }
+  });
+
   test('an unmapped code stays unmapped (caller keeps its generic 500)', () => {
-    assert.equal(mapPostgrestError({ code: '57014', message: 'canceling statement due to statement timeout' }), null);
+    // 22P02 (invalid_text_representation) is a genuine "should never happen"
+    // -- it means we sent Postgres something malformed, which is our bug.
+    assert.equal(mapPostgrestError({ code: '22P02', message: 'invalid input syntax for type uuid' }), null);
   });
 
   test('a plain Error with no code is not mistaken for a PostgREST error', () => {
