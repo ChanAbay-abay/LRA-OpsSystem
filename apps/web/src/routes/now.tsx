@@ -7,8 +7,9 @@
  * member can see the rest of the ops team, which is the Phase 1
  * "demoable" bar (PLAN.md §7).
  */
-import * as React from 'react';
 import { PageHeader } from '@/components/layout/app-shell';
+import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { useResource } from '@/lib/use-resource';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 
@@ -22,15 +23,7 @@ interface Member {
 
 export function NowPage() {
   const { me } = useAuth();
-  const [members, setMembers] = React.useState<Member[] | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    api
-      .get<Member[]>('/api/members')
-      .then(setMembers)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load team'));
-  }, []);
+  const resource = useResource(() => api.get<Member[]>('/api/members'), []);
 
   return (
     <div>
@@ -49,29 +42,30 @@ export function NowPage() {
 
         <h2 className="mb-3 text-eyebrow text-ink-3">The ops team</h2>
 
-        {error ? <p className="text-label text-danger">{error}</p> : null}
-        {!members && !error ? <p className="text-body-sm text-ink-3">Loading…</p> : null}
-        {members && members.length === 0 ? (
-          <p className="text-body-sm text-ink-3">
-            Nobody has been provisioned into the ops module yet. Use Provisioning to invite
-            the GM, Sales and Broker.
-          </p>
-        ) : null}
-
-        <ul className="flex flex-col gap-2">
-          {members?.map((m) => (
-            <li
-              key={m.userId}
-              className="flex items-center justify-between rounded-md border border-hairline px-3 py-2"
-            >
-              <div>
-                <p className="text-strong text-ink">{m.name}</p>
-                <p className="text-body-sm text-ink-3">{m.email}</p>
-              </div>
-              <span className="text-eyebrow text-ink-3">{m.position}</span>
-            </li>
-          ))}
-        </ul>
+        <ResourceView
+          resource={resource}
+          skeleton={<SkeletonRows rows={3} height={48} />}
+          empty={
+            <p className="text-body-sm text-ink-3">
+              Nobody has been provisioned into the ops module yet. Use Provisioning to invite the GM, Sales and Broker.
+            </p>
+          }
+          isEmpty={(members) => members.length === 0}
+        >
+          {(members) => (
+            <ul className="flex flex-col gap-2">
+              {members.map((m) => (
+                <li key={m.userId} className="flex items-center justify-between rounded-md border border-hairline px-3 py-2">
+                  <div>
+                    <p className="text-strong text-ink">{m.name}</p>
+                    <p className="text-body-sm text-ink-3">{m.email}</p>
+                  </div>
+                  <span className="text-eyebrow text-ink-3">{m.position}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </ResourceView>
       </div>
     </div>
   );

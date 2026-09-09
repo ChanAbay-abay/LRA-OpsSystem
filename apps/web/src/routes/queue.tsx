@@ -6,6 +6,12 @@
  * visible to everyone" is the point, so age is server-computed.
  * `clear` (the green button) exists on no other screen in the app
  * (DESIGN.md §5.1) and only renders here, only for the clearing founder.
+ *
+ * Flagged cancellations (`queueKind: 'cancellation_decision'`) share
+ * this screen but never this screen's Verify/Clear button — Chan was
+ * explicit that approving a cancellation and clearing points must never
+ * be one ambiguous control, so they get their own row shape and their
+ * own destructive-styled decision buttons.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
@@ -13,6 +19,8 @@ import { PageHeader } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 
@@ -23,24 +31,32 @@ interface QueueTask {
   catalog_points: number | null;
   points_override: number | null;
   ageHours: number;
+  queueKind: 'verify_or_clear' | 'cancellation_decision';
+  pre_cancellation_status: string | null;
+  cancellation_reason: string | null;
 }
 
 export function QueuePage() {
   const { me } = useAuth();
-  const [rows, setRows] = React.useState<QueueTask[] | null>(null);
+  const resource = useResource(() => api.get<QueueTask[]>('/api/points/queue'), []);
   const [rejecting, setRejecting] = React.useState<QueueTask | null>(null);
-
-  const load = React.useCallback(() => {
-    api.get<QueueTask[]>('/api/points/queue').then(setRows).catch(() => toast.error('Could not load the queue'));
-  }, []);
-  React.useEffect(() => load(), [load]);
+  const [decidingCancellation, setDecidingCancellation] = React.useState<QueueTask | null>(null);
 
   const nextAction = me?.authority === 'founder' || me?.authority === 'admin' ? 'cleared' : 'verified';
 
   async function approve(task: QueueTask) {
     try {
       await api.post(`/api/tasks/${task.id}/status`, { to: nextAction });
-      load();
+      resource.reload();
+    } catch (err) {
+      toast.error(err instanceof ApiClientError ? err.message : 'Refused');
+    }
+  }
+
+  async function approveCancellation(task: QueueTask) {
+    try {
+      await api.post(`/api/tasks/${task.id}/status`, { to: 'cancelled' });
+      resource.reload();
     } catch (err) {
       toast.error(err instanceof ApiClientError ? err.message : 'Refused');
     }
@@ -49,27 +65,48 @@ export function QueuePage() {
   return (
     <div>
       <PageHeader title="Approvals" description="Oldest first. Age is measured from the server clock, not the browser's." />
-      <div className="rounded-xl border border-hairline bg-surface">
-        {rows?.length ? (
-          rows.map((t) => (
-            <div key={t.id} className="flex items-center gap-4 border-b border-hairline px-4 py-3 last:border-0">
-              <span className="flex-1 text-body">{t.title}</span>
-              <span className="num text-num-md text-ink-2">{t.points_override ?? t.catalog_points ?? '—'}</span>
-              <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : t.ageHours >= 8 ? 'text-pending' : 'text-ink-3'}`}>
-                {t.ageHours}h
-              </span>
-              <Button variant={nextAction === 'cleared' ? 'clear' : 'primary'} size="sm" onClick={() => approve(t)}>
-                {nextAction === 'cleared' ? 'Clear' : 'Verify'}
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => setRejecting(t)}>
-                Reject
-              </Button>
-            </div>
-          ))
-        ) : (
-          <p className="p-4 text-body-sm text-ink-3">Nothing waiting on you.</p>
+      <ResourceView
+        resource={resource}
+        skeleton={<SkeletonRows rows={4} height={52} />}
+        empty={<p className="rounded-xl border border-hairline bg-surface p-4 text-body-sm text-ink-3">Nothing waiting on you.</p>}
+        isEmpty={(rows) => rows.length === 0}
+      >
+        {(rows) => (
+          <div className="rounded-xl border border-hairline bg-surface">
+            {rows.map((t) =>
+              t.queueKind === 'cancellation_decision' ? (
+                <div key={t.id} className="flex items-center gap-4 border-b border-hairline bg-danger-wash/40 px-4 py-3 last:border-0">
+                  <div className="flex-1">
+                    <span className="text-body">{t.title}</span>
+                    <p className="text-label text-danger">Flagged for cancellation — {t.cancellation_reason}</p>
+                  </div>
+                  <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : 'text-ink-3'}`}>{t.ageHours}h</span>
+                  <Button variant="destructive" size="sm" onClick={() => approveCancellation(t)}>
+                    Approve cancellation
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => setDecidingCancellation(t)}>
+                    Refuse
+                  </Button>
+                </div>
+              ) : (
+                <div key={t.id} className="flex items-center gap-4 border-b border-hairline px-4 py-3 last:border-0">
+                  <span className="flex-1 text-body">{t.title}</span>
+                  <span className="num text-num-md text-ink-2">{t.points_override ?? t.catalog_points ?? '—'}</span>
+                  <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : t.ageHours >= 8 ? 'text-pending' : 'text-ink-3'}`}>
+                    {t.ageHours}h
+                  </span>
+                  <Button variant={nextAction === 'cleared' ? 'clear' : 'primary'} size="sm" onClick={() => approve(t)}>
+                    {nextAction === 'cleared' ? 'Clear' : 'Verify'}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => setRejecting(t)}>
+                    Reject
+                  </Button>
+                </div>
+              )
+            )}
+          </div>
         )}
-      </div>
+      </ResourceView>
 
       {rejecting ? (
         <RejectDialog
@@ -77,7 +114,18 @@ export function QueuePage() {
           onClose={() => setRejecting(null)}
           onDone={() => {
             setRejecting(null);
-            load();
+            resource.reload();
+          }}
+        />
+      ) : null}
+
+      {decidingCancellation ? (
+        <RefuseCancellationDialog
+          task={decidingCancellation}
+          onClose={() => setDecidingCancellation(null)}
+          onDone={() => {
+            setDecidingCancellation(null);
+            resource.reload();
           }}
         />
       ) : null}
@@ -117,6 +165,50 @@ function RejectDialog({ task, onClose, onDone }: { task: QueueTask; onClose: () 
           </Button>
           <Button variant="destructive" loading={submitting} disabled={reason.trim().length < 10} onClick={submit}>
             Reject
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Refusing a flagged cancellation returns the task to whatever status
+// it held before the flag (`pre_cancellation_status`) — the DB trigger
+// enforces this is the ONLY legal non-approval target, so the client
+// just has to send it back.
+function RefuseCancellationDialog({ task, onClose, onDone }: { task: QueueTask; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post(`/api/tasks/${task.id}/status`, { to: task.pre_cancellation_status ?? 'todo', reason });
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'Could not refuse the cancellation');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Refuse cancellation of "{task.title}"</DialogTitle>
+        </DialogHeader>
+        <p className="text-body-sm text-ink-3">The task returns to {task.pre_cancellation_status ?? 'its prior status'}.</p>
+        <ReasonTextarea value={reason} onChange={setReason} placeholder="Why should this stay open?" />
+        {error ? <p className="text-label text-danger">{error}</p> : null}
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="destructive" loading={submitting} disabled={reason.trim().length < 10} onClick={submit}>
+            Refuse cancellation
           </Button>
         </DialogFooter>
       </DialogContent>

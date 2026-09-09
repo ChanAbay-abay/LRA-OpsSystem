@@ -12,6 +12,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { useResource } from '@/lib/use-resource';
 import { api, ApiClientError } from '@/lib/api';
 
 interface Settings {
@@ -26,13 +28,13 @@ interface Settings {
 }
 
 export function AdminSettingsPage() {
+  const resource = useResource(() => api.get<Settings>('/api/settings'), []);
   const [settings, setSettings] = React.useState<Settings | null>(null);
   const [saving, setSaving] = React.useState(false);
 
-  const load = React.useCallback(() => {
-    api.get<Settings>('/api/settings').then(setSettings);
-  }, []);
-  React.useEffect(() => load(), [load]);
+  React.useEffect(() => {
+    if (resource.status === 'ready' && resource.data) setSettings(resource.data);
+  }, [resource.status, resource.data]);
 
   async function save() {
     if (!settings) return;
@@ -56,12 +58,14 @@ export function AdminSettingsPage() {
     }
   }
 
-  if (!settings) return <p className="text-body-sm text-ink-3">Loading…</p>;
-
   return (
     <div>
       <PageHeader title="Ops settings" description="Recurring cap, staleness, reliability window, leaderboard visibility." />
-      <div className="grid max-w-xl grid-cols-2 gap-4 rounded-xl border border-hairline bg-surface p-5">
+      <ResourceView resource={resource} skeleton={<SkeletonRows rows={1} height={240} />}>
+        {() =>
+          settings ? (
+            <>
+              <div className="grid max-w-xl grid-cols-2 gap-4 rounded-xl border border-hairline bg-surface p-5">
         <Field label="Recurring cap (0–1)">
           <Input
             type="number" step="0.01" min={0} max={0.99}
@@ -122,11 +126,15 @@ export function AdminSettingsPage() {
           <Input value={settings.timezone} onChange={(e) => setSettings({ ...settings, timezone: e.target.value })} />
         </Field>
       </div>
-      <div className="mt-4">
-        <Button loading={saving} onClick={save}>
-          Save settings
-        </Button>
-      </div>
+              <div className="mt-4">
+                <Button loading={saving} onClick={save}>
+                  Save settings
+                </Button>
+              </div>
+            </>
+          ) : null
+        }
+      </ResourceView>
     </div>
   );
 }

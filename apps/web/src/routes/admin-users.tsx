@@ -21,6 +21,8 @@ import {
 } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { useResource } from '@/lib/use-resource';
 import { api, ApiClientError } from '@/lib/api';
 
 const AUTHORITIES = ['staff', 'gm', 'founder', 'admin'] as const;
@@ -37,18 +39,8 @@ interface AdminUserRow {
 }
 
 export function AdminUsersPage() {
-  const [rows, setRows] = React.useState<AdminUserRow[] | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+  const resource = useResource(() => api.get<AdminUserRow[]>('/api/admin/users'), []);
   const [open, setOpen] = React.useState(false);
-
-  const load = React.useCallback(() => {
-    api
-      .get<AdminUserRow[]>('/api/admin/users')
-      .then(setRows)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load users'));
-  }, []);
-
-  React.useEffect(() => load(), [load]);
 
   return (
     <div>
@@ -63,76 +55,80 @@ export function AdminUsersPage() {
             <InviteDialog
               onDone={() => {
                 setOpen(false);
-                load();
+                resource.reload();
               }}
             />
           </Dialog>
         }
       />
 
-      {error ? <p className="mb-4 text-label text-danger">{error}</p> : null}
-
-      <div className="rounded-lg border border-hairline bg-surface p-0">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Email</TableHead>
-              <TableHead>Authority</TableHead>
-              <TableHead>Position</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Clearing founder</TableHead>
-              <TableHead>Last login</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows?.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell>{r.email}</TableCell>
-                <TableCell className="text-eyebrow">{r.authority}</TableCell>
-                <TableCell className="text-eyebrow">{r.opsMembership?.position ?? '—'}</TableCell>
-                <TableCell>{r.is_active ? 'Active' : 'Deactivated'}</TableCell>
-                <TableCell>
-                  {r.authority === 'founder' ? (
-                    <button
-                      className={`text-label ${r.is_clearing_founder ? 'text-cleared' : 'text-ink-3 hover:text-ink'}`}
-                      onClick={async () => {
-                        await api.patch(`/api/admin/users/${r.id}`, { isClearingFounder: !r.is_clearing_founder });
-                        load();
-                      }}
-                    >
-                      {r.is_clearing_founder ? 'Yes — the seat' : 'Make the clearing founder'}
-                    </button>
-                  ) : (
-                    <span className="text-ink-3">—</span>
-                  )}
-                </TableCell>
-                <TableCell className="num text-num-sm">
-                  {r.last_login ? new Date(r.last_login).toLocaleString() : 'Never logged in'}
-                </TableCell>
-                <TableCell>
-                  <button
-                    className="text-label text-ink-3 hover:text-ink"
-                    onClick={async () => {
-                      await api.patch(`/api/admin/users/${r.id}`, { isActive: !r.is_active });
-                      load();
-                    }}
-                  >
-                    {r.is_active ? 'Deactivate' : 'Activate'}
-                  </button>
-                </TableCell>
-              </TableRow>
-            ))}
-            {rows?.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-ink-3">
-                  Nobody invited yet.
-                </TableCell>
-              </TableRow>
-            ) : null}
-          </TableBody>
-        </Table>
-      </div>
+      <ResourceView
+        resource={resource}
+        skeleton={<SkeletonRows rows={4} height={44} />}
+        empty={
+          <div className="rounded-lg border border-hairline bg-surface p-4 text-center text-body-sm text-ink-3">
+            Nobody invited yet.
+          </div>
+        }
+        isEmpty={(rows) => rows.length === 0}
+      >
+        {(rows) => (
+          <div className="rounded-lg border border-hairline bg-surface p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Authority</TableHead>
+                  <TableHead>Position</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Clearing founder</TableHead>
+                  <TableHead>Last login</TableHead>
+                  <TableHead />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((r) => (
+                  <TableRow key={r.id}>
+                    <TableCell>{r.email}</TableCell>
+                    <TableCell className="text-eyebrow">{r.authority}</TableCell>
+                    <TableCell className="text-eyebrow">{r.opsMembership?.position ?? '—'}</TableCell>
+                    <TableCell>{r.is_active ? 'Active' : 'Deactivated'}</TableCell>
+                    <TableCell>
+                      {r.authority === 'founder' ? (
+                        <button
+                          className={`text-label ${r.is_clearing_founder ? 'text-cleared' : 'text-ink-3 hover:text-ink'}`}
+                          onClick={async () => {
+                            await api.patch(`/api/admin/users/${r.id}`, { isClearingFounder: !r.is_clearing_founder });
+                            resource.reload();
+                          }}
+                        >
+                          {r.is_clearing_founder ? 'Yes — the seat' : 'Make the clearing founder'}
+                        </button>
+                      ) : (
+                        <span className="text-ink-3">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="num text-num-sm">
+                      {r.last_login ? new Date(r.last_login).toLocaleString() : 'Never logged in'}
+                    </TableCell>
+                    <TableCell>
+                      <button
+                        className="text-label text-ink-3 hover:text-ink"
+                        onClick={async () => {
+                          await api.patch(`/api/admin/users/${r.id}`, { isActive: !r.is_active });
+                          resource.reload();
+                        }}
+                      >
+                        {r.is_active ? 'Deactivate' : 'Activate'}
+                      </button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </ResourceView>
     </div>
   );
 }

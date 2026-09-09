@@ -35,7 +35,7 @@ import {
   type Announcements,
   type KeyboardCoordinateGetter,
 } from '@dnd-kit/core';
-import { Ban, CheckCircle2, Pencil, RotateCcw } from 'lucide-react';
+import { Ban, CheckCircle2, MessageSquare, Pencil, RotateCcw, XOctagon } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/app-shell';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
@@ -48,6 +48,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ResourceView, SkeletonCards } from '@/components/ui/resource-state';
+import { useResource } from '@/lib/use-resource';
+import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -62,12 +65,13 @@ interface Task {
   carry_over_count: number;
   last_activity_at: string;
   openBlockCount: number;
+  noteCount: number;
   ownerName: string | null;
   ownerPosition: string | null;
 }
 
 type Board = Record<
-  'backlog' | 'this_week' | 'in_progress' | 'blocked' | 'submitted' | 'verified' | 'cleared',
+  'backlog' | 'this_week' | 'in_progress' | 'blocked' | 'submitted' | 'verified' | 'cleared' | 'pending_cancellation',
   Task[]
 >;
 
@@ -126,7 +130,17 @@ function pointsChip(t: Task) {
   );
 }
 
-function TaskCard({ task, dragging }: { task: Task; dragging?: boolean }) {
+function TaskCard({
+  task,
+  dragging,
+  onFlagCancellation,
+  onOpenNotes,
+}: {
+  task: Task;
+  dragging?: boolean;
+  onFlagCancellation?: (task: Task) => void;
+  onOpenNotes?: (task: Task) => void;
+}) {
   const { attributes, listeners, setNodeRef, transform } = useDraggable({ id: task.id, data: task });
   const style = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${dragging ? 1.02 : 1})` }
@@ -143,12 +157,30 @@ function TaskCard({ task, dragging }: { task: Task; dragging?: boolean }) {
       aria-roledescription="draggable task card"
       aria-label={`${task.title}, ${task.points_override ?? task.catalog_points ?? 'unpriced'} points, owned by ${task.ownerName ?? 'unknown'}`}
       className={cn(
-        'relative flex flex-col gap-2 rounded-lg border border-hairline bg-surface p-3 text-left',
+        'group relative flex flex-col gap-2 rounded-lg border border-hairline bg-surface p-3 text-left',
         'hover:border-[#CBD2E0] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
         dragging && 'shadow-drag opacity-90',
         task.openBlockCount > 0 && 'bg-[repeating-linear-gradient(45deg,#EEF1F5,#EEF1F5_4px,#E4E9F0_4px,#E4E9F0_8px)]'
       )}
     >
+      {onFlagCancellation ? (
+        <button
+          type="button"
+          title="Flag for cancellation"
+          aria-label={`Flag "${task.title}" for cancellation`}
+          // A pointerdown inside a dnd-kit draggable starts a drag after
+          // the 6px activation distance -- stopping propagation here
+          // keeps this button clickable without ever arming a drag.
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onFlagCancellation(task);
+          }}
+          className="absolute right-2 top-2 flex size-6 items-center justify-center rounded-sm text-ink-3 opacity-0 transition-opacity hover:bg-surface-2 hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <XOctagon className="size-3.5" aria-hidden />
+        </button>
+      ) : null}
       <span className="text-eyebrow text-ink-3">{task.ownerPosition ?? '—'}</span>
       <p className="line-clamp-2 text-strong text-ink">{task.title}</p>
       <div className="flex items-center justify-between">
@@ -166,6 +198,24 @@ function TaskCard({ task, dragging }: { task: Task; dragging?: boolean }) {
               <Ban className="size-3" aria-hidden /> {task.openBlockCount}
             </span>
           ) : null}
+          {onOpenNotes ? (
+            <button
+              type="button"
+              title={`${task.noteCount} worklog note(s) — click to view or add`}
+              aria-label={`Worklog for "${task.title}", ${task.noteCount} notes`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenNotes(task);
+              }}
+              className={cn(
+                'num text-num-xs flex items-center gap-1 rounded-sm px-0.5 hover:bg-surface-2',
+                task.noteCount > 0 ? 'text-ink-3' : 'text-hairline-strong opacity-0 group-hover:opacity-100'
+              )}
+            >
+              <MessageSquare className="size-3" aria-hidden /> {task.noteCount > 0 ? task.noteCount : ''}
+            </button>
+          ) : null}
           {pointsChip(task)}
         </div>
       </div>
@@ -173,7 +223,21 @@ function TaskCard({ task, dragging }: { task: Task; dragging?: boolean }) {
   );
 }
 
-function Column({ id, label, droppable, tasks }: { id: keyof Board; label: string; droppable: boolean; tasks: Task[] }) {
+function Column({
+  id,
+  label,
+  droppable,
+  tasks,
+  onFlagCancellation,
+  onOpenNotes,
+}: {
+  id: keyof Board;
+  label: string;
+  droppable: boolean;
+  tasks: Task[];
+  onFlagCancellation?: (task: Task) => void;
+  onOpenNotes: (task: Task) => void;
+}) {
   const { setNodeRef, isOver } = useDroppable({ id, disabled: !droppable });
   const total = tasks.reduce((sum, t) => sum + (t.points_override ?? t.catalog_points ?? 0), 0);
 
@@ -197,7 +261,12 @@ function Column({ id, label, droppable, tasks }: { id: keyof Board; label: strin
         )}
       >
         {tasks.map((t) => (
-          <TaskCard key={t.id} task={t} />
+          <TaskCard
+            key={t.id}
+            task={t}
+            onFlagCancellation={onFlagCancellation && !['cleared', 'cancelled'].includes(t.status) ? onFlagCancellation : undefined}
+            onOpenNotes={onOpenNotes}
+          />
         ))}
         {!tasks.length ? <p className="p-2 text-body-sm text-ink-3">Nothing here.</p> : null}
       </div>
@@ -232,20 +301,38 @@ const columnKeyboardCoordinateGetter: KeyboardCoordinateGetter = (event, { curre
 };
 
 export function BoardPage() {
+  // The initial load goes through `useResource` so a dead API renders
+  // the shared unreachable/error states instead of an infinite
+  // "Loading…" (the exact defect Chan reproduced). Once the first load
+  // succeeds, `board` becomes the local, optimistically-mutated copy
+  // that drag-and-drop already depended on -- re-running the resource
+  // loader on every move would flash the whole board back to skeletons
+  // mid-drag, so post-move refreshes go through `silentRefresh` instead
+  // and only fall back to a toast if they fail.
+  const { me } = useAuth();
+  const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
+  const boardResource = useResource(() => api.get<Board>('/api/tasks/board'), []);
   const [board, setBoard] = React.useState<Board | null>(null);
   const [activeTask, setActiveTask] = React.useState<Task | null>(null);
   const [blockTarget, setBlockTarget] = React.useState<Task | null>(null);
+  const [cancelTarget, setCancelTarget] = React.useState<Task | null>(null);
+  const [notesTarget, setNotesTarget] = React.useState<Task | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: columnKeyboardCoordinateGetter })
   );
 
-  const load = React.useCallback(() => {
-    api.get<Board>('/api/tasks/board').then(setBoard).catch(() => toast.error('Could not load the board'));
-  }, []);
+  React.useEffect(() => {
+    if (boardResource.status === 'ready' && boardResource.data) setBoard(boardResource.data);
+  }, [boardResource.status, boardResource.data]);
 
-  React.useEffect(() => load(), [load]);
+  const load = React.useCallback(() => {
+    api
+      .get<Board>('/api/tasks/board')
+      .then(setBoard)
+      .catch(() => toast.error('Could not refresh the board'));
+  }, []);
 
   const findColumn = (taskId: string): keyof Board | null => {
     if (!board) return null;
@@ -322,14 +409,50 @@ export function BoardPage() {
     return (
       <div>
         <PageHeader title="Board" description="Drag to move. Every drop goes through the same check a button click would." />
-        <p className="text-body-sm text-ink-3">Loading…</p>
+        <ResourceView
+          resource={boardResource}
+          skeleton={
+            <div className="flex gap-3 overflow-x-auto pb-4">
+              {COLUMNS.map((c) => (
+                <div key={c.id} className="w-[288px] shrink-0 rounded-xl bg-surface-2 p-2">
+                  <SkeletonCards />
+                </div>
+              ))}
+            </div>
+          }
+        >
+          {() => null}
+        </ResourceView>
       </div>
     );
   }
 
+  const flaggedForCancellation = board.pending_cancellation ?? [];
+
   return (
     <div>
       <PageHeader title="Board" description="Drag to move. Every drop goes through the same check a button click would." />
+
+      {flaggedForCancellation.length ? (
+        <div className="mb-4 rounded-lg border border-danger-border bg-danger-wash px-4 py-3">
+          <p className="mb-2 text-body-sm font-semibold text-ink">
+            {flaggedForCancellation.length} flagged for cancellation — waiting on the clearing founder
+          </p>
+          <ul className="flex flex-col gap-1">
+            {flaggedForCancellation.map((t) => (
+              <li key={t.id} className="flex items-center justify-between gap-3 text-body-sm text-ink-2">
+                <span className="truncate">
+                  {t.title} <span className="text-ink-3">— {t.ownerName ?? 'unknown'}</span>
+                </span>
+                <a href="/queue" className="shrink-0 text-label text-brand-700 underline">
+                  Decide in Approvals
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -339,7 +462,15 @@ export function BoardPage() {
       >
         <div className="flex snap-x snap-proximity gap-3 overflow-x-auto pb-4">
           {COLUMNS.map((c) => (
-            <Column key={c.id} id={c.id} label={c.label} droppable={c.droppable} tasks={board[c.id]} />
+            <Column
+              key={c.id}
+              id={c.id}
+              label={c.label}
+              droppable={c.droppable}
+              tasks={board[c.id]}
+              onFlagCancellation={isOversight ? setCancelTarget : undefined}
+              onOpenNotes={setNotesTarget}
+            />
           ))}
         </div>
         <DragOverlay dropAnimation={{ duration: 200, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' }}>
@@ -357,7 +488,164 @@ export function BoardPage() {
           }}
         />
       ) : null}
+
+      {cancelTarget ? (
+        <FlagCancellationDialog
+          task={cancelTarget}
+          onClose={() => setCancelTarget(null)}
+          onDone={() => {
+            setCancelTarget(null);
+            load();
+          }}
+        />
+      ) : null}
+
+      {notesTarget ? (
+        <TaskNotesDialog
+          task={notesTarget}
+          onClose={() => setNotesTarget(null)}
+          onNoteAdded={load}
+        />
+      ) : null}
     </div>
+  );
+}
+
+// The running worklog Chan asked for -- a task's narration, distinct
+// from its `description`. Append-only server-side; this dialog only
+// ever lists and posts, never edits or deletes a note.
+function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; onClose: () => void; onNoteAdded: () => void }) {
+  interface Note {
+    id: string;
+    body: string;
+    created_at: string;
+    authorName: string | null;
+  }
+  const [notes, setNotes] = React.useState<Note[] | null>(null);
+  const [body, setBody] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const closed = task.status === 'cleared' || task.status === 'cancelled';
+
+  const load = React.useCallback(() => {
+    api
+      .get<Note[]>(`/api/tasks/${task.id}/notes`)
+      .then(setNotes)
+      .catch(() => toast.error('Could not load the worklog'));
+  }, [task.id]);
+  React.useEffect(() => load(), [load]);
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post(`/api/tasks/${task.id}/notes`, { body });
+      setBody('');
+      load();
+      onNoteAdded();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'Could not add the note');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Worklog — "{task.title}"</DialogTitle>
+        </DialogHeader>
+        <div className="flex max-h-[320px] flex-col gap-3 overflow-y-auto">
+          {!notes ? (
+            <p className="text-body-sm text-ink-3">Loading…</p>
+          ) : notes.length === 0 ? (
+            <p className="text-body-sm text-ink-3">No notes yet.</p>
+          ) : (
+            notes.map((n) => (
+              <div key={n.id} className="border-b border-hairline pb-2 last:border-0">
+                <p className="whitespace-pre-wrap break-words text-body-sm text-ink">{n.body}</p>
+                <p className="text-num-xs num text-ink-3">
+                  {n.authorName ?? 'unknown'} · {new Date(n.created_at).toLocaleString()}
+                </p>
+              </div>
+            ))
+          )}
+        </div>
+        {closed ? (
+          <p className="text-body-sm text-ink-3">This task is closed — no new notes can be added.</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value.slice(0, 4000))}
+              placeholder="What did you do? What's next?"
+              className="min-h-[70px] w-full rounded-md border border-hairline-strong bg-white px-[10px] py-2 text-body text-ink placeholder:text-ink-3 focus-visible:outline-none focus-visible:border-brand-600 focus-visible:ring-[3px] focus-visible:ring-brand-100"
+            />
+            {error ? <p className="text-label text-danger">{error}</p> : null}
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose}>
+            Close
+          </Button>
+          {!closed ? (
+            <Button loading={submitting} disabled={!body.trim()} onClick={submit}>
+              Add note
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// GM or founder flags a task for cancellation; the clearing founder
+// approves or refuses from /queue (PLAN.md's "one transition endpoint"
+// rule: this posts the same `POST /:id/status` every other move does,
+// just targeting `pending_cancellation`).
+function FlagCancellationDialog({ task, onClose, onDone }: { task: Task; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post(`/api/tasks/${task.id}/status`, { to: 'pending_cancellation', reason });
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'Could not flag this task');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Flag "{task.title}" for cancellation</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-4">
+          <p className="text-body-sm text-ink-3">
+            The clearing founder will approve or refuse this. Nothing is cancelled yet, and no points are ever awarded on a
+            cancelled task.
+          </p>
+          <ReasonTextarea value={reason} onChange={setReason} placeholder="Why should this be cancelled?" />
+          {error ? <p className="text-label text-danger">{error}</p> : null}
+        </div>
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="destructive" loading={submitting} disabled={reason.trim().length < 10} onClick={submit}>
+            Flag for cancellation
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
