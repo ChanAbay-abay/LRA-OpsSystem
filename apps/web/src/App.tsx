@@ -4,8 +4,8 @@
  * Every route here is a screen that actually exists — wiring a nav item
  * or a route for an unbuilt screen is the "looks further along than it
  * is" failure DESIGN.md warns against. PLAN.md §4 lists the full MVP
- * route set; `/scoreboard` and `/people/:id` (Phase 8) are the ones
- * still absent.
+ * route set; `/scoreboard` and `/people/:id` (Phase 8) shipped in this
+ * session.
  */
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
@@ -20,6 +20,8 @@ import { BriefingPage } from '@/routes/briefing';
 import { PointsPage } from '@/routes/points';
 import { QueuePage } from '@/routes/queue';
 import { FounderDigest } from '@/routes/founder-digest';
+import { ScoreboardPage } from '@/routes/scoreboard';
+import { PersonPage } from '@/routes/person';
 import { InboxPage } from '@/routes/inbox';
 import { CatalogPage } from '@/routes/catalog';
 import { AdminUsersPage } from '@/routes/admin-users';
@@ -150,6 +152,22 @@ function AppRoutes() {
         element={
           <ProtectedRoute requireOversight>
             <FounderDigest />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/scoreboard"
+        element={
+          <ProtectedRoute>
+            <ScoreboardPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/people/:id"
+        element={
+          <ProtectedRoute>
+            <PersonPage />
           </ProtectedRoute>
         }
       />

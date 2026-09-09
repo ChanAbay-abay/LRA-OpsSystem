@@ -29,6 +29,7 @@ import {
   Menu,
   ShieldCheck,
   SlidersHorizontal,
+  Trophy,
   UserCog,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
@@ -50,6 +51,17 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
     { to: '/board', label: 'Board', icon: KanbanSquare },
     { to: '/briefing', label: 'Briefing', icon: CalendarCheck },
     { to: '/points', label: 'My points', icon: Coins },
+    // `ops.settings.leaderboard_visibility` (OPEN-QUESTIONS.md #6) is
+    // NOT re-checked here to decide whether this link shows: even under
+    // `oversight_only`, a staff member still needs a route to their own
+    // reliability (PLAN.md's "reliability always shows its inputs"), and
+    // `/scoreboard`/`/people/:id` already enforce the restriction for
+    // real (routes/scoreboard.ts filters/403s server-side) — a staff
+    // account just sees a one-row table and a banner explaining why.
+    // Hiding the link entirely would remove the only path to their own
+    // number with no replacement, so the restriction is enforced on the
+    // screen, not by hiding the way in.
+    { to: '/scoreboard', label: 'Scoreboard', icon: Trophy },
     { to: '/inbox', label: 'Inbox', icon: Inbox },
     { to: '/catalog', label: 'Catalog', icon: BookOpen },
   ];
