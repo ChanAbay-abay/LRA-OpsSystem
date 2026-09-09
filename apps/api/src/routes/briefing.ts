@@ -26,7 +26,7 @@ import type { FastifyInstance } from 'fastify';
 import { authenticate, requireMembership } from '../middleware/auth.js';
 import { serviceClient, userClient } from '../lib/supabase.js';
 import { loadOpsRoster } from '../lib/roster.js';
-import { ApiError } from '../lib/domain.js';
+import { maySeeReliability, ApiError } from '../lib/domain.js';
 
 interface TaskRow {
   id: string;
@@ -194,12 +194,22 @@ export default async function briefingRoutes(app: FastifyInstance) {
       (bucket[t.owner_user_id] ??= []).push(t);
     }
 
+    // PLAN.md §10 #4: hit-rate is founder/admin only. The Monday standup
+    // scorecard computes its own, independently of /api/scoreboard, so
+    // gating only the scoreboard left it visible here — on the one screen
+    // the whole team looks at together. Stripped from the payload rather
+    // than hidden client-side, for the same reason as the scoreboard: a
+    // number sitting in the JSON is not private.
+    const scorecardForCaller = maySeeReliability(req.user.authority)
+      ? scorecard
+      : scorecard.map(({ hitRate: _hitRate, ...rest }) => rest);
+
     return {
       data: {
         week,
         previousWeek: previousWeek ?? null,
         roster,
-        scorecard,
+        scorecard: scorecardForCaller,
         carryOvers,
         blocks: {
           open: openBlocksWithAge,

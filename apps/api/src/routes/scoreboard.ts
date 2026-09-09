@@ -48,7 +48,7 @@ import {
 import { authenticate, requireMembership } from '../middleware/auth.js';
 import { serviceClient, userClient } from '../lib/supabase.js';
 import { loadOpsRoster } from '../lib/roster.js';
-import { ApiError } from '../lib/domain.js';
+import { maySeeReliability, ApiError } from '../lib/domain.js';
 
 interface WeekRow {
   id: string;
@@ -399,9 +399,8 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
 // is Chan's own reasoning restated in §10.2: the point system exists so
 // staff can track their own progress, and that isn't the judgement
 // `reliability`/`hitRate` carry about them.
-function maySeeReliability(authority: string): boolean {
-  return authority === 'founder' || authority === 'admin';
-}
+// `maySeeReliability` now lives in `lib/domain.ts` — /api/briefing needs
+// the identical rule for its standup scorecard.
 
 type PublicLastClosedWeek = Omit<NonNullable<ScoreboardRow['lastClosedWeek']>, 'hitRate'> & { hitRate?: number | null };
 

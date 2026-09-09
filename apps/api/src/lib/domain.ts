@@ -87,3 +87,25 @@ export class ApiError extends Error {
     this.name = 'ApiError';
   }
 }
+
+/**
+ * PLAN.md §10 #4, Chan 2026-09-10: "dont show the reliability metric for
+ * non-founder members and the hit rate."
+ *
+ * Founder + admin only. A `gm` caller is non-founder by Chan's own
+ * wording; §10.2 records that as a flagged judgement call rather than a
+ * typo, and including the GM is a one-line change here if he says so.
+ *
+ * This lives in `domain` rather than in a route because there are two
+ * real consumers — `/api/scoreboard` and `/api/briefing`, which computes
+ * its own hit-rate for the Monday standup scorecard. The briefing was
+ * missed on the first pass, which is exactly what a rule duplicated in
+ * two routes does.
+ *
+ * Both callers must STRIP the field from the response, never merely
+ * decline to render it: this is a judgement about a person, and a value
+ * sitting in the JSON is not private.
+ */
+export function maySeeReliability(authority: string): boolean {
+  return authority === 'founder' || authority === 'admin';
+}

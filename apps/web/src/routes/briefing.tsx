@@ -45,7 +45,8 @@ interface ScorecardRow {
   committedPoints: number;
   clearedCommittedPoints: number;
   clearedPoints: number;
-  hitRate: number | null;
+  /** Absent unless the caller is founder/admin — the API strips it. */
+  hitRate?: number | null;
 }
 
 interface CarryOver {
@@ -325,6 +326,11 @@ function weekNumber(weekStart: string): number {
 }
 
 function ScorecardSection({ scorecard, previousWeek }: { scorecard: ScorecardRow[]; previousWeek: Week | null }) {
+  // PLAN.md §10 #4: hit-rate is founder/admin only. The API already
+  // strips it from the payload; this drops the column too, so the
+  // standup table has no empty gap where the numbers used to be.
+  const { me } = useAuth();
+  const showHitRate = me?.authority === 'founder' || me?.authority === 'admin';
   return (
     <section>
       <h2 className="mb-3 text-title-lg text-ink">Last week's scorecard</h2>
@@ -340,7 +346,7 @@ function ScorecardSection({ scorecard, previousWeek }: { scorecard: ScorecardRow
                 <th className="px-3 text-left">Person</th>
                 <th className="px-3 text-right">Committed</th>
                 <th className="px-3 text-right">Cleared (committed)</th>
-                <th className="px-3 text-right">Hit-rate</th>
+                {showHitRate ? <th className="px-3 text-right">Hit-rate</th> : null}
                 <th className="px-3 text-right">Cleared this week</th>
               </tr>
             </thead>
@@ -352,7 +358,9 @@ function ScorecardSection({ scorecard, previousWeek }: { scorecard: ScorecardRow
                   </td>
                   <td className="num num-sm px-3 text-right">{row.committedPoints}</td>
                   <td className="num num-sm px-3 text-right">{row.clearedCommittedPoints}</td>
-                  <td className="num num-sm px-3 text-right">{row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`}</td>
+                  {showHitRate ? (
+                    <td className="num num-sm px-3 text-right">{row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`}</td>
+                  ) : null}
                   <td className="num num-sm px-3 text-right text-ink">{row.clearedPoints}</td>
                 </tr>
               ))}
