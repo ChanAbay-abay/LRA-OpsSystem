@@ -929,7 +929,7 @@ tokens and CI before anything depends on them.
 
 ### Phase 2 — Provisioning
 
-**Status: mostly done.** `routes/admin.ts`, `/admin/users`, `scripts/provision.md` present. **`/set-password` first-login flow is not built** — no route and no reference anywhere in `apps/web/src`.
+**Status: mostly done.** `routes/admin.ts`, `/admin/users`, `scripts/provision.md` present, and **`/set-password` is now built** (live requirements, verbatim Supabase errors, an explicit expired/invalid-link state). Two gaps remain, both in flight 2026-09-09 night: `inviteUserByEmail` is called with **no `redirectTo`**, so an invited user does not actually land on `/set-password`; and nothing can set `core.users.read_only`, without which the ERC and DCA observer accounts cannot be provisioned at all. **`/set-password`'s happy path is unverified** — only the failure states have been exercised, because no live invite token was available.
 
 Chan's account is the only login in the system. Until three more people can sign in, every
 later phase can only be demonstrated by one person pretending to be four — which is exactly
@@ -969,7 +969,7 @@ The rebuild makes this simpler than revision 1 planned: no `EMP-001` collision, 
 
 ### Phase 3 — Catalog, tasks, board
 
-**Status: mostly done.** Catalog + task migrations, state machine, `/board` on `@dnd-kit`, `/catalog` all present. **Outstanding: a manual "new task" dialog.** Until one exists there is no way to create a task anywhere in the app — tasks arrive only from the seed or recurring generation, which anyone trialling the app hits within a minute. (In progress on the web lane as of 2026-09-09 night; do not mark this done without opening the app and creating a task.) Attacks 5, 7, 10 and 11 were never actually missing: they exist in `rls_test.sql` under descriptive names rather than numbers (`'staff cannot write points_awarded directly'`, `'GM cannot move verified -> cleared'`, `'staff cannot set a points override'`, `'oversight cannot set a points override with no reason'`). Verified by grep, 2026-09-09.
+**Status: done.** Catalog + task migrations, state machine, `/board` on `@dnd-kit`, `/catalog` all present, and `/board` now has a **New task** dialog with a permission-gated assignee — verified end to end in a real browser on 2026-09-09, not just typechecked. Before that there was no way to create a task anywhere in the app. Attacks 5, 7, 10 and 11 were never actually missing: they exist in `rls_test.sql` under descriptive names rather than numbers (`'staff cannot write points_awarded directly'`, `'GM cannot move verified -> cleared'`, `'staff cannot set a points override'`, `'oversight cannot set a points override with no reason'`). Verified by grep, 2026-09-09. Attacks 5, 7, 10 and 11 were never actually missing: they exist in `rls_test.sql` under descriptive names rather than numbers (`'staff cannot write points_awarded directly'`, `'GM cannot move verified -> cleared'`, `'staff cannot set a points override'`, `'oversight cannot set a points override with no reason'`). Verified by grep, 2026-09-09.
 
 1. [x] Migrations: `ops_catalog_tasks`, `ops_task_state_machine` (**INSERT and UPDATE guards in
    the same migration**), `ops_catalog_rls`.
