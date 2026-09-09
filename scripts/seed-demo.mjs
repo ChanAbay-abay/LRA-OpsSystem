@@ -344,6 +344,15 @@ async function seed() {
   console.log('\n=== Credentials (printed once, never written to disk) ===');
   console.table(credentials);
 
+  // Three closed weeks of real history BEFORE the current (still-planning)
+  // week is touched -- Chan reviews this in the morning and Phase 8's
+  // reliability/scoreboard has nothing to show without it (every week so
+  // far has been the one and only, still-open week). Order matters: this
+  // must run first so `seedWeek` below finds its week row already
+  // created (by the last historical week's own roll-over) instead of
+  // racing to create it itself.
+  await seedHistory(clients);
+
   await seedWeek(clients);
 
   console.log(
@@ -543,6 +552,337 @@ async function ensureTaskBlock(client, taskId, row) {
   const { data, error } = await client.schema('ops').from('task_blocks').insert(row).select().single();
   if (error) throw new Error(`ensureTaskBlock(${taskId}) failed: ${error.message}`);
   return data;
+}
+
+// Same Manila-Monday arithmetic as `currentWeekId()`, pulled out standalone
+// because `seedHistory` needs three PRIOR Mondays, not just this one, and
+// duplicating the four-line calculation was worse than sharing it.
+function computeThisWeekStart() {
+  const manilaNow = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  const dow = manilaNow.getUTCDay() || 7; // 1=Mon..7=Sun
+  const monday = new Date(manilaNow);
+  monday.setUTCDate(manilaNow.getUTCDate() - (dow - 1));
+  return monday.toISOString().slice(0, 10);
+}
+
+function addDays(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Find-or-create by the table's own unique key (`week_start`), exactly
+// like `currentWeekId()` -- but returning the whole row, since callers
+// here also want `state` to decide what is safe to do to it on a re-run.
+async function ensureWeekRow(weekStart) {
+  const { data: existing, error: readError } = await svc
+    .schema('ops')
+    .from('weeks')
+    .select('id, week_start, week_end, state')
+    .eq('week_start', weekStart)
+    .maybeSingle();
+  if (readError) throw new Error(`ensureWeekRow(${weekStart}) failed: ${readError.message}`);
+  if (existing) return existing;
+
+  const { data, error } = await svc
+    .schema('ops')
+    .from('weeks')
+    .insert({ week_start: weekStart })
+    .select('id, week_start, week_end, state')
+    .single();
+  if (error) throw new Error(`ensureWeekRow(${weekStart}) insert failed: ${error.message}`);
+  return data;
+}
+
+// Idempotent commit. Deliberately checks only `is_committed`, not
+// whether `committed_week_id` still equals the task's CURRENT `week_id`
+// -- a task that carried over (roll_over_week rewrites `week_id`, never
+// `committed_week_id`, exactly per PRD.md §3.7 "the original week's
+// commitment record stays exactly as it was") has already drifted apart
+// by design, and re-deriving a "target" from a moved `week_id` on a
+// re-run would try to re-commit it to the WRONG week and be correctly
+// refused once the original week has left `planning`. `weekId` is
+// therefore the caller's, passed in explicitly rather than read off the
+// (possibly stale) task row.
+async function ensureCommitted(client, task, weekId) {
+  if (task.is_committed) {
+    console.log(`  [skip] task ${task.id} already committed (to week ${task.committed_week_id})`);
+    return task;
+  }
+  const targetPoints = task.points_override ?? task.catalog_points ?? null;
+  const { data, error } = await client
+    .schema('ops')
+    .from('tasks')
+    .update({ is_committed: true, committed_week_id: weekId, committed_points: targetPoints })
+    .eq('id', task.id)
+    .select()
+    .single();
+  if (error) throw new Error(`ensureCommitted(${task.id}) failed: ${error.message}`);
+  return data;
+}
+
+// A history task's `week_id` drifts once it carries over (see
+// `ensureCommitted` above), so looking it up by `(week_id, title)` on a
+// later run -- the way `findExistingTask` does for the current week's
+// tasks, which never carry mid-script -- would miss it and `createTask`
+// would insert a live duplicate. Every title `seedHistory` uses is
+// unique across the whole script, so a title-only lookup is exact.
+async function findHistTaskByTitle(client, title) {
+  const { data, error } = await client
+    .schema('ops')
+    .from('tasks')
+    .select('*')
+    .eq('title', `[DEMO] ${title}`)
+    .maybeSingle();
+  if (error) throw new Error(`findHistTaskByTitle("${title}") failed: ${error.message}`);
+  return data;
+}
+
+// The recurring generator names its tasks after the template verbatim
+// (no `[DEMO]` / `[HIST]` prefix, unlike everything `createTask` makes),
+// so it needs its own lookup rather than reusing `findExistingTask`.
+// Position -> template is 1:1 in today's catalog for sales/broker/gm, so
+// "the one recurring task this owner has this week" is unambiguous.
+async function findRecurringTaskForOwner(client, weekId, ownerUserId) {
+  const { data, error } = await client
+    .schema('ops')
+    .from('tasks')
+    .select('*')
+    .eq('week_id', weekId)
+    .eq('owner_user_id', ownerUserId)
+    .eq('is_recurring', true)
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`findRecurringTaskForOwner(${ownerUserId}, ${weekId}) failed: ${error.message}`);
+  return data;
+}
+
+// ---------------------------------------------------------------------
+// Three closed weeks of real history, so Phase 8's reliability score and
+// the Monday briefing's scorecard have something to show instead of
+// "Unrated" and an empty screen -- there had only ever been one
+// (still-open) week before this. Every number below is produced by
+// driving the real state machine and the real `ops.close_briefing` /
+// `ops.close_week` RPCs through each persona's own signed-in client --
+// nothing is written to `ops.point_ledger`, `committed_points` or a
+// reliability figure directly. The only deliberate liberty taken is
+// backdating `task_blocks.created_at` on the one exonerating block below
+// to a date inside the week it is meant to belong to (see the comment at
+// that call site) -- there is no column-level guard against it, and
+// without it the "declared before the week ended" test in
+// `/api/scoreboard` would compare a block created *today* against a
+// week that ended weeks ago and never exonerate anything.
+//
+// The shape, three people telling three different stories:
+//   - Sales: consistent. Clears everything committed, every week.
+//   - Broker: chronically unreliable, PLUS the one exonerated miss
+//     (wk-2, an external BOC block declared mid-week) so the mechanic
+//     that "cuts both ways" (PRD.md §3.8) is visible: a genuine miss
+//     counts against them, a declared block does not. One task
+//     (wk-3's BOC hold) is left open for all three weeks on purpose --
+//     it is broker's chronic-carry-over and staleness modifier both, a
+//     real consequence of never touching it again, not two fabricated
+//     numbers.
+//   - GM: improving. Weak wk-3 (one missed follow-up, left open the
+//     same way), then two clean weeks -- the recency-weighted half-life
+//     PRD.md §5.2 describes should visibly outweigh the old miss.
+// ERC and DCA never appear as an owner anywhere below, on purpose --
+// they are excluded from `generate_recurring_tasks` already (see that
+// function's own comment) and nothing here ever assigns them a task
+// directly.
+// ---------------------------------------------------------------------
+async function seedHistory(clients) {
+  console.log('\n=== Seeding 3 closed weeks of history (reliability + carry-over inputs) ===');
+
+  const uid = (key) => clients[key].auth.getUser().then((r) => r.data.user.id);
+  const [founderId, gmId, salesId, brokerId] = await Promise.all([uid('founder'), uid('gm'), uid('sales'), uid('broker')]);
+  const ownerIdByKey = { sales: salesId, broker: brokerId, gm: gmId };
+
+  const [quoteType, followUpType, fileEntryType, holdType, truckingType, briefingType, bocFollowUpType] = await Promise.all([
+    taskTypeId('Quotation turnaround within SLA'),
+    taskTypeId('Client follow-up'),
+    taskTypeId('Prepare and file import entry'),
+    taskTypeId('Resolve a hold or discrepancy'),
+    taskTypeId('Arrange trucking for a released shipment'),
+    taskTypeId('Run the Monday briefing'),
+    taskTypeId('BOC clearance follow-up'),
+  ]);
+
+  const thisWeekStart = computeThisWeekStart();
+  // Oldest first: 3 weeks ago, 2 weeks ago, 1 week ago (the most recent
+  // closed week, immediately before the current in-planning week).
+  const weekStarts = [3, 2, 1].map((n) => addDays(thisWeekStart, -7 * n));
+
+  const clearFully = async (ownerKey, verifierKey, taskId) => {
+    await transition(clients[ownerKey], taskId, 'submitted');
+    await transition(clients[verifierKey], taskId, 'verified');
+    await transition(clients.founder, taskId, 'cleared');
+  };
+
+  const weekPlans = [
+    {
+      label: 'wk-3 (oldest)',
+      tasks: [
+        { key: 'sales', title: 'Quotation for Meridian Cargo Corp (hist wk-3)', type: quoteType, action: 'clear' },
+        { key: 'sales', title: 'Follow up with Golden Harvest Trading (hist wk-3)', type: followUpType, action: 'clear' },
+        { key: 'broker', title: 'File import entry for shipment #HIST-101', type: fileEntryType, action: 'clear' },
+        // Left at `todo` forever, deliberately: broker's genuine, unblocked
+        // miss. It carries every week after this and is what eventually
+        // trips the chronic-carry-over and staleness modifiers for real.
+        { key: 'broker', title: 'Resolve BOC alert on shipment #HIST-102', type: holdType, action: 'miss' },
+        { key: 'gm', title: 'Run the Monday briefing prep (hist wk-3)', type: briefingType, action: 'clear' },
+        // GM's one loose end -- mirrors broker's, smaller scale, so the
+        // "improving" story starts from a real (if minor) miss.
+        { key: 'gm', title: 'Client follow-up round with key accounts (hist wk-3)', type: followUpType, action: 'miss' },
+      ],
+    },
+    {
+      label: 'wk-2',
+      tasks: [
+        { key: 'sales', title: 'Quotation for Suncrest Import Co', type: quoteType, action: 'clear' },
+        { key: 'sales', title: 'Follow up with Bayview Shipping renewal', type: followUpType, action: 'clear' },
+        // The exoneration case, PRD.md §5.2: a block declared mid-week,
+        // never resolved, task never clears -- excluded from the
+        // denominator entirely rather than counted as a miss.
+        { key: 'broker', title: 'Arrange trucking for shipment #HIST-201', type: truckingType, action: 'exonerated-block' },
+        { key: 'broker', title: 'File import entry for shipment #HIST-202', type: fileEntryType, action: 'clear' },
+        { key: 'gm', title: 'Run the Monday briefing prep (hist wk-2)', type: briefingType, action: 'clear' },
+        { key: 'gm', title: 'Client follow-up round with major accounts (hist wk-2)', type: followUpType, action: 'clear' },
+      ],
+    },
+    {
+      label: 'wk-1 (most recent closed)',
+      tasks: [
+        { key: 'sales', title: 'Quotation for Pacific Rim Traders', type: quoteType, action: 'clear' },
+        { key: 'sales', title: 'Follow up with Coastal Freight Ltd', type: followUpType, action: 'clear' },
+        // Broker's worst week: both commitments missed, no block on
+        // either -- recency-weighting (a 3-week half-life) should make
+        // this the heaviest single week in the reliability score.
+        { key: 'broker', title: 'Arrange trucking for shipment #HIST-301', type: truckingType, action: 'miss' },
+        { key: 'broker', title: 'BOC clearance follow-up on shipment #HIST-302', type: bocFollowUpType, action: 'miss' },
+        { key: 'gm', title: 'Run the Monday briefing prep (hist wk-1)', type: briefingType, action: 'clear' },
+        { key: 'gm', title: 'Client follow-up round for the quarter', type: followUpType, action: 'clear' },
+      ],
+    },
+  ];
+
+  for (let i = 0; i < weekPlans.length; i++) {
+    const weekStart = weekStarts[i];
+    const plan = weekPlans[i];
+    const week = await ensureWeekRow(weekStart);
+    const weekId = week.id;
+    console.log(`\n-- ${plan.label}: week ${weekStart} (id ${weekId}, currently ${week.state}) --`);
+
+    // 1. Create + commit every hand-seeded task while the week can still
+    //    take commitments -- committing is refused once it leaves `planning`
+    //    (`ops.enforce_task_transition` 2a), so this has to happen before
+    //    step 3 below on a first run. Looked up by title first (not
+    //    `createTask`'s own week-scoped check) because a "miss" task from
+    //    an earlier run has by now carried into a LATER week's `week_id`
+    //    -- see `findHistTaskByTitle`.
+    for (const spec of plan.tasks) {
+      let task = await findHistTaskByTitle(clients[spec.key], spec.title);
+      if (!task) {
+        task = await createTask(clients[spec.key], {
+          weekId, ownerUserId: ownerIdByKey[spec.key], taskTypeId: spec.type, title: spec.title,
+        });
+      } else {
+        console.log(`  [skip] task "${spec.title}" already exists (now in week ${task.week_id}), reusing it`);
+      }
+      await ensureCommitted(clients[spec.key], task, weekId);
+    }
+
+    // 2. Recurring generation for the week, exactly like the current
+    //    week's below -- broker/sales/gm each get one; founder's and any
+    //    accounting template's go unclaimed (no accounting member exists
+    //    yet); ERC/DCA are excluded inside the RPC itself.
+    const { data: gen, error: genError } = await clients.gm.schema('ops').rpc('generate_recurring_tasks', { p_week_id: weekId });
+    if (genError) console.error(`  [warn] generate_recurring_tasks failed for ${plan.label}: ${genError.message}`);
+    else console.log(`  generated ${gen?.[0]?.created_count ?? 0} recurring task(s) for ${plan.label}`);
+
+    // 2b. The founder's own recurring task ("Clear the approval queue")
+    //     has no route to `cleared` in a single-clearing-founder roster --
+    //     "a task owner may not verify their own task" has no founder
+    //     exception, so it would sit at `todo` forever. Left alone, it
+    //     rolls into the next `close_week` and, once it finally lands on
+    //     the CURRENT (already-seeded) week, collides with that week's
+    //     own already-generated founder task on
+    //     `uq_ops_tasks_recurring (owner_user_id, week_id,
+    //     recurring_template_id)` -- reproduced by the first real run of
+    //     this history seed. Retiring it via the real cancellation ladder
+    //     (founder flags their own, founder decides -- nothing in
+    //     `ops.enforce_task_transition` forbids a clearing founder from
+    //     deciding their own cancellation, unlike verification) is the
+    //     honest fix: a real, reasoned write, not a value skipped past.
+    //     Idempotent: `flagCancellation`/`decideCancellation` are already
+    //     no-ops once the task is `cancelled`.
+    const founderRecurring = await findRecurringTaskForOwner(clients.founder, weekId, founderId);
+    if (founderRecurring) {
+      await flagCancellation(
+        clients.founder,
+        founderRecurring.id,
+        'The clearing founder cannot verify their own submitted work, so this auto-generated ' +
+          'approval-queue task has no route to cleared; retiring it rather than let it carry forever.'
+      );
+      await decideCancellation(clients.founder, founderRecurring.id, 'approve');
+    }
+
+    // 3. Close the briefing -- commitments lock, the week moves to `open`.
+    //    A no-op if it already has (state check inside the RPC itself).
+    const { error: briefingError } = await clients.gm.schema('ops').rpc('close_briefing', { p_week_id: weekId });
+    if (briefingError) throw new Error(`close_briefing(${plan.label}) failed: ${briefingError.message}`);
+
+    // 4. Work the week: status transitions are NOT gated by week state
+    //    (PRD.md §3.6 -- "tasks can still be worked all week"), so these
+    //    run after the lock exactly like real mid-week work would.
+    for (const spec of plan.tasks) {
+      const task = await findHistTaskByTitle(clients[spec.key], spec.title);
+      if (!task) throw new Error(`expected task "${spec.title}" to exist in ${plan.label} by now`);
+      const verifierKey = spec.key === 'gm' ? 'founder' : 'gm';
+
+      if (spec.action === 'clear') {
+        await clearFully(spec.key, verifierKey, task.id);
+      } else if (spec.action === 'miss') {
+        // Left exactly where `createTask` put it -- `todo`, untouched.
+      } else if (spec.action === 'exonerated-block') {
+        await transition(clients[spec.key], task.id, 'in_progress');
+        // Backdated on purpose (see the block comment above this
+        // function): a real "week 2 weeks ago" needs a block genuinely
+        // dated inside that week for the exoneration rule to see it as
+        // "declared before the week ended" rather than as declared
+        // today, long after every one of these weeks closed.
+        await ensureTaskBlock(clients[spec.key], task.id, {
+          task_id: task.id, target: 'external', blocking_external: 'Bureau of Customs',
+          reason:
+            'Waiting on BOC to lift an alert before this shipment can move; declared mid-week, so this ' +
+            'commitment is exonerated rather than counted as a miss.',
+          created_by: ownerIdByKey[spec.key],
+          created_at: `${addDays(weekStart, 2)}T04:00:00Z`,
+        });
+      }
+    }
+
+    // 5. Clear each owner's recurring task too -- mid-week, non-committed
+    //    work (PRD.md §3.6), so it earns points and shows up on the board
+    //    without touching the hand-computed hit-rate above.
+    for (const key of ['sales', 'broker', 'gm']) {
+      const rec = await findRecurringTaskForOwner(clients[key], weekId, ownerIdByKey[key]);
+      if (rec) {
+        const verifierKey = key === 'gm' ? 'founder' : 'gm';
+        await clearFully(key, verifierKey, rec.id);
+      }
+    }
+
+    // 6. Close the week -- rolls every unfinished task into the next one
+    //    (incrementing `carry_over_count`) and creates that next week's
+    //    row if it does not exist yet. Idempotent by the RPC's own
+    //    `rolled_over_at` check.
+    const { data: closed, error: closeError } = await clients.founder.schema('ops').rpc('close_week', { p_week_id: weekId });
+    if (closeError) throw new Error(`close_week(${plan.label}) failed: ${closeError.message}`);
+    console.log(`  closed ${plan.label}: carried ${closed?.[0]?.carried_count ?? '?'} task(s) into the next week`);
+  }
+
+  console.log('\n  3 closed weeks of history seeded.');
 }
 
 async function seedWeek(clients) {
