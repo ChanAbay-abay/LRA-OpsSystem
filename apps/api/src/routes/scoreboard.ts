@@ -389,6 +389,41 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
   return { visibility, weekId: currentWeek.id, weekStart: currentWeek.week_start, rows };
 }
 
+// PLAN.md §10 #4, Chan 2026-09-10: "dont show the reliability metric for
+// non-founder members and the hit rate." Founder + admin only — a `gm`
+// caller is explicitly non-founder per Chan's own wording (§10.2 flags
+// this as a judgement call, not a typo). Enforced HERE, the same way
+// `leaderboard_visibility` already is: the field is genuinely absent
+// from the JSON for a caller who may not see it, not hidden by the
+// client. What stays for everyone — points, cleared totals, velocity —
+// is Chan's own reasoning restated in §10.2: the point system exists so
+// staff can track their own progress, and that isn't the judgement
+// `reliability`/`hitRate` carry about them.
+function maySeeReliability(authority: string): boolean {
+  return authority === 'founder' || authority === 'admin';
+}
+
+type PublicLastClosedWeek = Omit<NonNullable<ScoreboardRow['lastClosedWeek']>, 'hitRate'> & { hitRate?: number | null };
+
+type PublicRow = Omit<ScoreboardRow, 'reliability' | 'reliabilitySettings' | 'lastClosedWeek'> & {
+  reliability?: ReliabilityResult;
+  reliabilitySettings?: ScoreboardRow['reliabilitySettings'];
+  lastClosedWeek: PublicLastClosedWeek | null;
+};
+
+function stripReliability(row: ScoreboardRow): PublicRow {
+  const { reliability: _reliability, reliabilitySettings: _reliabilitySettings, ...rest } = row;
+  return {
+    ...rest,
+    lastClosedWeek: row.lastClosedWeek
+      ? (() => {
+          const { hitRate: _hitRate, ...lastClosedRest } = row.lastClosedWeek;
+          return lastClosedRest;
+        })()
+      : null,
+  };
+}
+
 export default async function scoreboardRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
   app.addHook('onRequest', requireMembership('ops'));
@@ -396,14 +431,20 @@ export default async function scoreboardRoutes(app: FastifyInstance) {
   app.get('/', async (req) => {
     const q = req.query as { weekId?: string };
     const summary = await buildScoreboard(req.accessToken, q.weekId);
+    const canSeeReliability = maySeeReliability(req.user.authority);
 
     // OPEN-QUESTIONS.md #6 / PRD.md §6.5: `oversight_only` means a
     // staff caller sees only their own row on the team screen — this
     // is a real access rule, enforced here, not a client-side hide.
-    if (summary.visibility === 'oversight_only' && req.user.authority === 'staff') {
-      return { data: { ...summary, rows: summary.rows.filter((r) => r.userId === req.user.id) } };
-    }
-    return { data: summary };
+    // Independent of that rule: reliability/hit-rate are stripped per
+    // row for anyone who isn't founder/admin, even oversight (`gm`).
+    const rows = (
+      summary.visibility === 'oversight_only' && req.user.authority === 'staff'
+        ? summary.rows.filter((r) => r.userId === req.user.id)
+        : summary.rows
+    ).map((r) => (canSeeReliability ? r : stripReliability(r)));
+
+    return { data: { ...summary, rows } };
   });
 
   app.get('/:userId', async (req) => {
@@ -421,6 +462,6 @@ export default async function scoreboardRoutes(app: FastifyInstance) {
 
     const row = summary.rows.find((r) => r.userId === userId);
     if (!row) throw new ApiError(404, 'unknown person, or not an active ops member', 'NOT_FOUND');
-    return { data: row };
+    return { data: maySeeReliability(req.user.authority) ? row : stripReliability(row) };
   });
 }

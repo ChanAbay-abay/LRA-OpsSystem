@@ -56,10 +56,12 @@ interface PersonScoreboard {
     weekStart: string;
     committedPoints: number;
     clearedCommittedPoints: number;
-    hitRate: number | null;
+    // PLAN.md §10 #4: absent, not null, for anyone who isn't
+    // founder/admin — the server strips the key entirely.
+    hitRate?: number | null;
     carryOverRate: number | null;
   } | null;
-  reliability: {
+  reliability?: {
     score: number | null;
     band: ReliabilityBand;
     base: number;
@@ -67,7 +69,7 @@ interface PersonScoreboard {
     ratedWeeks: number;
     weeklyBreakdown: WeeklyContribution[];
   };
-  reliabilitySettings: { windowWeeks: number; halfLifeWeeks: number; minWeeksForRating: number };
+  reliabilitySettings?: { windowWeeks: number; halfLifeWeeks: number; minWeeksForRating: number };
   hoursBlockedByThem: number;
   hoursTheyWereBlocked: number;
 }
@@ -87,12 +89,21 @@ export function PersonPage() {
     <div>
       <ResourceView resource={resource} skeleton={<SkeletonRows rows={6} height={40} />}>
         {(p) => {
-          const sparkline = [...p.reliability.weeklyBreakdown]
-            .reverse()
-            .map((w) => ({
-              weekStart: w.weekStart,
-              hitRate: w.effectiveDenominator > 0 ? Math.round((w.clearedCommittedPoints / w.effectiveDenominator) * 100) : null,
-            }));
+          // PLAN.md §10 #4: `reliability` (and with it `hitRate`) is
+          // simply absent from the JSON for anyone who isn't
+          // founder/admin — `apps/api/src/routes/scoreboard.ts` strips
+          // it server-side, this isn't a client-side hide. Every section
+          // below that depends on it is skipped outright rather than
+          // rendered empty or zeroed.
+          const canSeeReliability = p.reliability != null;
+          const sparkline = canSeeReliability
+            ? [...p.reliability!.weeklyBreakdown]
+                .reverse()
+                .map((w) => ({
+                  weekStart: w.weekStart,
+                  hitRate: w.effectiveDenominator > 0 ? Math.round((w.clearedCommittedPoints / w.effectiveDenominator) * 100) : null,
+                }))
+            : [];
 
           return (
             <>
@@ -101,30 +112,40 @@ export function PersonPage() {
                 description={`${p.position.replace('_', ' ')} · week of ${p.currentWeek.weekStart}`}
               />
 
-              {/* This week: raw cleared vs capped score, both labelled — PLAN.md's explicit instruction. */}
-              <div className="mb-6 grid grid-cols-1 gap-0 rounded-xl border border-hairline bg-surface p-5 sm:grid-cols-3">
+              {/*
+                This week: raw cleared vs capped score, both labelled —
+                PLAN.md's explicit instruction. Reliability is a third
+                panel only for founder/admin; everyone else gets these
+                two figures at full width rather than a panel with a
+                hole in it — Chan's own reasoning (PLAN.md §10.2) is that
+                points/velocity are what staff track themselves with, so
+                that's what gets the room.
+              */}
+              <div className={cn('mb-6 grid grid-cols-1 gap-0 rounded-xl border border-hairline bg-surface p-5', canSeeReliability ? 'sm:grid-cols-3' : 'sm:grid-cols-2')}>
                 <div className="flex flex-col gap-1 sm:border-r sm:border-hairline sm:pr-5">
                   <span className="text-eyebrow text-ink-3">Raw cleared, this week</span>
                   <span className="num text-[40px] font-medium leading-none text-ink">{p.currentWeek.rawClearedPoints}</span>
                   <span className="text-body-sm text-ink-3">{p.currentWeek.newPoints} new + {p.currentWeek.rawRecurringPoints} recurring</span>
                 </div>
-                <div className="flex flex-col gap-1 sm:px-5">
+                <div className={cn('flex flex-col gap-1 sm:px-5', !canSeeReliability && 'sm:border-0')}>
                   <span className="text-eyebrow text-ink-3">Capped score</span>
                   <span className="num text-[40px] font-medium leading-none text-ink">{p.currentWeek.cappedScore}</span>
                   <span className="text-body-sm text-ink-3">
                     recurring counted: {p.currentWeek.cappedRecurringPoints} of {p.currentWeek.rawRecurringPoints}
                   </span>
                 </div>
-                <div className="flex flex-col gap-1 sm:pl-5">
-                  <span className="text-eyebrow text-ink-3">Reliability</span>
-                  <span className="inline-flex items-center gap-2">
-                    <span className="num text-[40px] font-medium leading-none text-ink">{p.reliability.score ?? '—'}</span>
-                    <span className={bandChipClass(p.reliability.band)}>{BAND_LABEL[p.reliability.band]}</span>
-                  </span>
-                  <span className="text-body-sm text-ink-3">
-                    {p.reliability.ratedWeeks} of {p.reliabilitySettings.minWeeksForRating} weeks needed to rate
-                  </span>
-                </div>
+                {canSeeReliability ? (
+                  <div className="flex flex-col gap-1 sm:pl-5">
+                    <span className="text-eyebrow text-ink-3">Reliability</span>
+                    <span className="inline-flex items-center gap-2">
+                      <span className="num text-[40px] font-medium leading-none text-ink">{p.reliability!.score ?? '—'}</span>
+                      <span className={bandChipClass(p.reliability!.band)}>{BAND_LABEL[p.reliability!.band]}</span>
+                    </span>
+                    <span className="text-body-sm text-ink-3">
+                      {p.reliability!.ratedWeeks} of {p.reliabilitySettings!.minWeeksForRating} weeks needed to rate
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {/* Sparkline — DESIGN.md §2.4: chart-1 line, draws once on mount, no dots except the latest point. */}
@@ -161,8 +182,12 @@ export function PersonPage() {
                       <dd className="num-col num text-ink">{p.lastClosedWeek.committedPoints}</dd>
                       <dt className="text-ink-3">Cleared</dt>
                       <dd className="num-col num text-ink">{p.lastClosedWeek.clearedCommittedPoints}</dd>
-                      <dt className="text-ink-3">Hit-rate</dt>
-                      <dd className="num-col num text-ink">{pct(p.lastClosedWeek.hitRate)}</dd>
+                      {canSeeReliability ? (
+                        <>
+                          <dt className="text-ink-3">Hit-rate</dt>
+                          <dd className="num-col num text-ink">{pct(p.lastClosedWeek.hitRate ?? null)}</dd>
+                        </>
+                      ) : null}
                       <dt className="text-ink-3">Carry-over rate</dt>
                       <dd className="num-col num text-ink">{pct(p.lastClosedWeek.carryOverRate)}</dd>
                     </dl>
@@ -179,55 +204,62 @@ export function PersonPage() {
                     <dd className="num-col num text-ink">{p.hoursTheyWereBlocked}h</dd>
                   </dl>
                   <p className="mt-3 text-body-sm text-ink-3">
-                    A block declared before a week ends exonerates that commitment — it is excluded from the
-                    reliability ratio below, never counted as a miss.
+                    {canSeeReliability
+                      ? 'A block declared before a week ends exonerates that commitment — it is excluded from the reliability ratio below, never counted as a miss.'
+                      : 'A block declared before a week ends exonerates that commitment for the week it was raised in.'}
                   </p>
                 </div>
               </div>
 
-              {/* The audit trail — every number reliability() used, so the score is hand-recomputable. */}
-              <div className="rounded-xl border border-hairline bg-surface">
-                <div className="border-b border-hairline p-5 pb-4">
-                  <h2 className="text-subtitle text-ink">How this score was computed</h2>
-                  <p className="mt-1 text-body-sm text-ink-3">
-                    λ = 0.5^(1/{p.reliabilitySettings.halfLifeWeeks}) per week of recency, most recent first. Base
-                    ratio {(p.reliability.base * 100).toFixed(2)}% → round(100 × base) = {Math.round(p.reliability.base * 100)},
-                    plus modifiers {p.reliability.modifiers.total >= 0 ? '+' : ''}
-                    {p.reliability.modifiers.total} (carry-over {p.reliability.modifiers.chronicCarryOver}, staleness{' '}
-                    {p.reliability.modifiers.staleness}, blocking others {p.reliability.modifiers.blockingOthers}, clean
-                    sweep +{p.reliability.modifiers.cleanSweep}) = {p.reliability.score ?? 'UNRATED'}.
-                  </p>
+              {/* The audit trail — every number reliability() used, so the score is
+                  hand-recomputable. Founder/admin only; for everyone else this
+                  section, the sparkline above and the third summary panel above
+                  that are simply not rendered — the underlying numbers aren't
+                  in the payload to render from (PLAN.md §10 #4). */}
+              {canSeeReliability ? (
+                <div className="rounded-xl border border-hairline bg-surface">
+                  <div className="border-b border-hairline p-5 pb-4">
+                    <h2 className="text-subtitle text-ink">How this score was computed</h2>
+                    <p className="mt-1 text-body-sm text-ink-3">
+                      λ = 0.5^(1/{p.reliabilitySettings!.halfLifeWeeks}) per week of recency, most recent first. Base
+                      ratio {(p.reliability!.base * 100).toFixed(2)}% → round(100 × base) = {Math.round(p.reliability!.base * 100)},
+                      plus modifiers {p.reliability!.modifiers.total >= 0 ? '+' : ''}
+                      {p.reliability!.modifiers.total} (carry-over {p.reliability!.modifiers.chronicCarryOver}, staleness{' '}
+                      {p.reliability!.modifiers.staleness}, blocking others {p.reliability!.modifiers.blockingOthers}, clean
+                      sweep +{p.reliability!.modifiers.cleanSweep}) = {p.reliability!.score ?? 'UNRATED'}.
+                    </p>
+                  </div>
+                  {p.reliability!.weeklyBreakdown.length === 0 ? (
+                    <p className="p-5 text-body-sm text-ink-3">No committed weeks in the reliability window yet.</p>
+                  ) : (
+                    <div className="grid grid-cols-[auto_1fr_1fr_1fr_1fr_1fr_auto] items-center gap-4 border-b border-hairline bg-surface-2 px-5 py-2 text-eyebrow text-ink-2">
+                      <span>Week</span>
+                      <span className="num-col">Weight</span>
+                      <span className="num-col">Committed</span>
+                      <span className="num-col">Cleared</span>
+                      <span className="num-col">Exonerated</span>
+                      <span className="num-col">Denominator</span>
+                      <span className="num-col">In ratio</span>
+                    </div>
+                  )}
+                  {p.reliability!.weeklyBreakdown.map((w) => (
+                    <div
+                      key={w.weekId}
+                      className="grid grid-cols-[auto_1fr_1fr_1fr_1fr_1fr_auto] items-center gap-4 border-b border-hairline px-5 py-2 text-body-sm last:border-0"
+                    >
+                      <span className="num num-xs text-ink-3">{w.weekStart}</span>
+                      <span className="num-col num num-sm text-ink-2">{w.weight.toFixed(3)}</span>
+                      <span className="num-col num num-sm text-ink">{w.committedPoints}</span>
+                      <span className="num-col num num-sm text-ink">{w.clearedCommittedPoints}</span>
+                      <span className="num-col num num-sm text-ink-3">{w.exoneratedPoints || '—'}</span>
+                      <span className="num-col num num-sm text-ink">{w.effectiveDenominator}</span>
+                      <span className={cn('num-col text-label', w.includedInRating ? 'text-cleared' : 'text-ink-3')}>
+                        {w.includedInRating ? 'yes' : 'no'}
+                      </span>
+                    </div>
+                  ))}
                 </div>
-                {p.reliability.weeklyBreakdown.length === 0 ? (
-                  <p className="p-5 text-body-sm text-ink-3">No committed weeks in the reliability window yet.</p>
-                ) : (
-                  <div className="grid grid-cols-[auto_1fr_1fr_1fr_1fr_1fr_auto] items-center gap-4 border-b border-hairline bg-surface-2 px-5 py-2 text-eyebrow text-ink-2">
-                    <span>Week</span>
-                    <span className="num-col">Weight</span>
-                    <span className="num-col">Committed</span>
-                    <span className="num-col">Cleared</span>
-                    <span className="num-col">Exonerated</span>
-                    <span className="num-col">Denominator</span>
-                    <span className="num-col">In ratio</span>
-                  </div>
-                )}
-                {p.reliability.weeklyBreakdown.map((w) => (
-                  <div
-                    key={w.weekId}
-                    className="grid grid-cols-[auto_1fr_1fr_1fr_1fr_1fr_auto] items-center gap-4 border-b border-hairline px-5 py-2 text-body-sm last:border-0"
-                  >
-                    <span className="num num-xs text-ink-3">{w.weekStart}</span>
-                    <span className="num-col num num-sm text-ink-2">{w.weight.toFixed(3)}</span>
-                    <span className="num-col num num-sm text-ink">{w.committedPoints}</span>
-                    <span className="num-col num num-sm text-ink">{w.clearedCommittedPoints}</span>
-                    <span className="num-col num num-sm text-ink-3">{w.exoneratedPoints || '—'}</span>
-                    <span className="num-col num num-sm text-ink">{w.effectiveDenominator}</span>
-                    <span className={cn('num-col text-label', w.includedInRating ? 'text-cleared' : 'text-ink-3')}>
-                      {w.includedInRating ? 'yes' : 'no'}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              ) : null}
             </>
           );
         }}

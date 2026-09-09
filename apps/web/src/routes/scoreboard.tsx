@@ -33,8 +33,13 @@ interface ScoreboardRow {
     cappedRecurringPoints: number;
     rawRecurringPoints: number;
   };
-  lastClosedWeek: { hitRate: number | null } | null;
-  reliability: { score: number | null; band: ReliabilityBand; ratedWeeks: number };
+  // PLAN.md §10 #4: absent, not just falsy, for anyone who isn't
+  // founder/admin — `apps/api/src/routes/scoreboard.ts` strips both
+  // fields from the JSON before it leaves the server. Points, cleared
+  // totals and velocity (`currentWeek` above) are unaffected — Chan's
+  // explicit "staff keep those" instruction.
+  lastClosedWeek?: { hitRate: number | null } | null;
+  reliability?: { score: number | null; band: ReliabilityBand; ratedWeeks: number };
 }
 
 interface ScoreboardSummary {
@@ -48,10 +53,23 @@ export function ScoreboardPage() {
   const { me } = useAuth();
   const resource = useResource((signal) => api.get<ScoreboardSummary>('/api/scoreboard', { signal }), []);
   const restricted = resource.data?.visibility === 'oversight_only' && me?.authority === 'staff';
+  // PLAN.md §10 #4: founder + admin only, restated client-side purely to
+  // pick a layout — the server has already dropped the fields for
+  // everyone else, so this is never the thing standing between a GM/
+  // staff caller and the numbers.
+  const canSeeReliability = me?.authority === 'founder' || me?.authority === 'admin';
+  const gridCols = canSeeReliability ? 'grid-cols-[1fr_auto_auto_auto]' : 'grid-cols-[1fr_auto]';
 
   return (
     <div>
-      <PageHeader title="Scoreboard" description="This week's cleared points and each person's reliability." />
+      <PageHeader
+        title="Scoreboard"
+        description={
+          canSeeReliability
+            ? "This week's cleared points and each person's reliability."
+            : "This week's cleared points."
+        }
+      />
 
       {restricted ? (
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-hairline-strong bg-surface-2 px-3 py-2 text-body-sm text-ink-2">
@@ -68,42 +86,55 @@ export function ScoreboardPage() {
       >
         {(summary) => (
           <div className="overflow-hidden rounded-xl border border-hairline bg-surface">
-            <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-4 border-b border-hairline bg-surface-2 px-4 py-2 text-eyebrow text-ink-2">
+            <div className={cn('grid items-center gap-4 border-b border-hairline bg-surface-2 px-4 py-2 text-eyebrow text-ink-2', gridCols)}>
               <span>Person</span>
-              <span className="num-col w-32">This week</span>
-              <span className="num-col w-24">Hit-rate</span>
-              <span className="num-col w-28">Reliability</span>
+              <span className={cn('num-col', canSeeReliability ? 'w-32' : 'w-40')}>This week</span>
+              {canSeeReliability ? (
+                <>
+                  <span className="num-col w-24">Hit-rate</span>
+                  <span className="num-col w-28">Reliability</span>
+                </>
+              ) : null}
             </div>
             {summary.rows.map((row) => (
               <Link
                 key={row.userId}
                 to={`/people/${row.userId}`}
-                className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-4 border-b border-hairline px-4 py-3 last:border-0 hover:bg-[#FCFDFF] focus-visible:bg-[#FCFDFF]"
+                className={cn('grid items-center gap-4 border-b border-hairline px-4 py-3 last:border-0 hover:bg-[#FCFDFF] focus-visible:bg-[#FCFDFF]', gridCols)}
               >
                 <span className="flex flex-col">
                   <span className="text-strong text-ink">{row.name ?? 'Unnamed'}</span>
                   <span className="text-body-sm capitalize text-ink-3">{row.position}</span>
                 </span>
 
-                <span className="num-col w-32">
+                {/* Points and velocity stay for everyone — Chan's own
+                    reasoning (PLAN.md §10.2) is that the point system is
+                    a self-tracking instrument, not only a management
+                    readout. When reliability/hit-rate are hidden this
+                    column just gets the room they would have used. */}
+                <span className={cn('num-col', canSeeReliability ? 'w-32' : 'w-40')}>
                   <span className="num num-md text-ink">{row.currentWeek.cappedScore}</span>
                   <span className="num num-xs ml-1.5 text-ink-3">/ {row.currentWeek.rawClearedPoints} raw</span>
                 </span>
 
-                <span className="num-col w-24 num num-sm text-ink-2">
-                  {row.lastClosedWeek?.hitRate != null ? `${Math.round(row.lastClosedWeek.hitRate * 100)}%` : '—'}
-                </span>
-
-                <span className="num-col w-28">
-                  {row.reliability.score != null ? (
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="num num-sm text-ink">{row.reliability.score}</span>
-                      <span className={bandChipClass(row.reliability.band)}>{BAND_LABEL[row.reliability.band]}</span>
+                {canSeeReliability ? (
+                  <>
+                    <span className="num-col w-24 num num-sm text-ink-2">
+                      {row.lastClosedWeek?.hitRate != null ? `${Math.round(row.lastClosedWeek.hitRate * 100)}%` : '—'}
                     </span>
-                  ) : (
-                    <span className={cn(bandChipClass('unrated'))}>Unrated</span>
-                  )}
-                </span>
+
+                    <span className="num-col w-28">
+                      {row.reliability?.score != null ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="num num-sm text-ink">{row.reliability.score}</span>
+                          <span className={bandChipClass(row.reliability.band)}>{BAND_LABEL[row.reliability.band]}</span>
+                        </span>
+                      ) : (
+                        <span className={cn(bandChipClass('unrated'))}>Unrated</span>
+                      )}
+                    </span>
+                  </>
+                ) : null}
               </Link>
             ))}
           </div>

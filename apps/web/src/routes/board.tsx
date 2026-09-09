@@ -83,6 +83,12 @@ import {
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/app-shell';
 import { CreateTaskDialog } from '@/components/tasks/create-task-dialog';
+import {
+  TaskCardContextMenu,
+  TaskCardMenuButton,
+  buildTaskMenuItems,
+  type TaskMenuHandlers,
+} from '@/components/tasks/task-card-menu';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Button } from '@/components/ui/button';
 import {
@@ -205,6 +211,8 @@ function TaskCard({
   dragging,
   draggable = true,
   pinnedReason,
+  actor,
+  menuHandlers,
   onFlagCancellation,
   onOpenNotes,
   onOpenDetail,
@@ -215,6 +223,9 @@ function TaskCard({
   draggable?: boolean;
   /** Why not, for the tooltip and the screen-reader description. */
   pinnedReason?: string | null;
+  /** Present on every real render; omitted only for the DragOverlay copy, which has no menu of its own. */
+  actor?: Actor | null;
+  menuHandlers?: TaskMenuHandlers<Task>;
   onFlagCancellation?: (task: Task) => void;
   onOpenNotes?: (task: Task) => void;
   onOpenDetail?: (task: Task) => void;
@@ -244,7 +255,11 @@ function TaskCard({
     ? 'This task cannot be dragged while a cancellation decision is pending with the clearing founder.'
     : pinnedReason;
 
-  return (
+  // The one place this card's menu items are decided — right-click and
+  // the 3-dot button below both render this exact list, in this order.
+  const menuItems = menuHandlers ? buildTaskMenuItems(task, actor ?? null, menuHandlers) : [];
+
+  const card = (
     <div
       ref={setNodeRef}
       {...listeners}
@@ -379,10 +394,16 @@ function TaskCard({
             </button>
           ) : null}
           {pointsChip(task)}
+          {menuHandlers ? <TaskCardMenuButton items={menuItems} taskTitle={task.title} /> : null}
         </div>
       </div>
     </div>
   );
+
+  // Right-click is the second trigger for the exact same menu the 3-dot
+  // button opens (Chan's ask). Skipped for the DragOverlay copy, which
+  // has no `menuHandlers` and isn't a real, interactive card.
+  return menuHandlers ? <TaskCardContextMenu items={menuItems}>{card}</TaskCardContextMenu> : card;
 }
 
 function Column({
@@ -393,6 +414,7 @@ function Column({
   actor,
   isDragging,
   dropRefusal,
+  menuHandlers,
   onFlagCancellation,
   onOpenNotes,
   onOpenDetail,
@@ -406,6 +428,7 @@ function Column({
   isDragging: boolean;
   /** Null when the dragged card may land here; otherwise why it may not. */
   dropRefusal: string | null;
+  menuHandlers: TaskMenuHandlers<Task>;
   onFlagCancellation?: (task: Task) => void;
   onOpenNotes: (task: Task) => void;
   onOpenDetail: (task: Task) => void;
@@ -428,6 +451,8 @@ function Column({
       task={t}
       draggable={pinned === null}
       pinnedReason={pinned}
+      actor={actor}
+      menuHandlers={menuHandlers}
       onFlagCancellation={
         onFlagCancellation && !['cleared', 'cancelled', 'pending_cancellation'].includes(t.status)
           ? onFlagCancellation
@@ -670,6 +695,44 @@ export function BoardPage() {
     }
   }
 
+  // The card menu's "Resolve a block" quick action. Unlike the detail
+  // dialog, the card doesn't have the task's blocks loaded, so this
+  // fetches them first. One open block resolves immediately, the same
+  // `POST /api/blocks/:id/resolve` the dialog's Resolve button calls;
+  // more than one is ambiguous from a flat menu item, so it opens the
+  // detail dialog instead of guessing which block was meant.
+  async function quickResolveBlock(task: Task) {
+    try {
+      const blocks = await api.get<{ id: string; resolved_at: string | null }[]>(`/api/tasks/${task.id}/blocks`);
+      const open = blocks.filter((b) => !b.resolved_at);
+      if (open.length === 1) {
+        await api.post(`/api/blocks/${open[0].id}/resolve`);
+        toast.success('Block resolved.');
+        load();
+      } else if (open.length > 1) {
+        toast.warning('This task has more than one open block — resolve them from the task detail.');
+        openDetail(task);
+      } else {
+        load();
+      }
+    } catch (err) {
+      toast.error(err instanceof ApiClientError ? err.message : 'Could not resolve the block');
+    }
+  }
+
+  // The one place a task card's menu handlers are wired up. Every action
+  // goes through `moveTask` — the same optimistic move + refusal-toast
+  // path the board's drag-and-drop already uses — so the card menu is a
+  // second trigger for the same code, never a second ladder.
+  const menuHandlers: TaskMenuHandlers<Task> = {
+    onSubmit: (t) => void moveTask(t, 'submitted'),
+    onTakeBack: (t) => void moveTask(t, 'in_progress'),
+    onRework: (t) => void moveTask(t, 'backlog'),
+    onDeclareBlock: (t) => void moveTask(t, 'blocked'),
+    onResolveBlock: (t) => void quickResolveBlock(t),
+    onOpen: (t) => openDetail(t),
+  };
+
   function handleDragEnd(e: DragEndEvent) {
     setActiveTask(null);
     dragEndedAt.current = Date.now();
@@ -858,6 +921,7 @@ export function BoardPage() {
               actor={actor}
               isDragging={activeTask != null}
               dropRefusal={activeTask ? moveRefusal(activeTask, c.id, actor) : null}
+              menuHandlers={menuHandlers}
               onFlagCancellation={isOversight && canWrite ? setCancelTarget : undefined}
               onOpenNotes={setNotesTarget}
               onOpenDetail={openDetail}
@@ -1155,11 +1219,27 @@ function TaskDetailDialog({
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[85vh] w-[min(680px,92vw)] max-w-none overflow-y-auto">
-        <DialogHeader>
+      {/*
+        Chan, 2026-09-10 (PLAN.md §10 #3): "once the modal is tall
+        enough, it should just make the comment section scrollable
+        before it makes the modal scrollable." The dialog itself no
+        longer scrolls (`overflow-hidden`, capped at 85vh) — it grows
+        with content up to that cap, and everything above the worklog
+        (identity, status, action row, fields, blocks) stays in normal
+        flow and always visible. Only the worklog list gets its own
+        `overflow-y-auto` region, sized by `flex-1 min-h-0` to take
+        whatever room is left once the fixed pieces above and below it
+        (composer, footer) have claimed theirs. `min-h-0` is load-bearing
+        here — without it a flex child never shrinks below its content's
+        natural height, and the "own scroll region" never kicks in.
+      */}
+      <DialogContent className="flex max-h-[85vh] w-[min(680px,92vw)] max-w-none flex-col overflow-hidden">
+        <DialogHeader className="shrink-0">
           <DialogTitle className="pr-6">{task.title}</DialogTitle>
         </DialogHeader>
 
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
+        <div className="flex shrink-0 flex-col gap-4">
         <div className="flex flex-wrap items-center gap-2">
           <StatusChip status={task.status} />
           {task.is_committed ? <Chip tone="info">Committed this week</Chip> : null}
@@ -1278,10 +1358,22 @@ function TaskDetailDialog({
             </ul>
           )}
         </div>
+        </div>
 
-        <div>
-          <p className="mb-1 text-eyebrow text-ink-3">Worklog</p>
-          <div className="flex max-h-[240px] flex-col gap-3 overflow-y-auto rounded-lg border border-hairline bg-surface p-3">
+        {/*
+          The one scroll region past this point. `min-h-[96px]` keeps a
+          few rows visible even in a short dialog rather than collapsing
+          to nothing; `flex-1 min-h-0` lets it claim whatever height the
+          fixed pieces above and below (composer, footer) leave over, up
+          to the dialog's own 85vh cap. `overflow-x-auto` on the list
+          itself is the "wide content still gets its own overflow-x"
+          rule — a note's own text always wraps (`break-words`), but this
+          is the backstop for anything that doesn't (a long unbroken
+          token, a pasted table).
+        */}
+        <div className="flex min-h-[96px] flex-1 flex-col overflow-hidden">
+          <p className="mb-1 shrink-0 text-eyebrow text-ink-3">Worklog</p>
+          <div className="flex flex-1 flex-col gap-3 overflow-y-auto overflow-x-auto rounded-lg border border-hairline bg-surface p-3">
             {!notes ? (
               <p className="text-body-sm text-ink-3">Loading…</p>
             ) : notes.length === 0 ? (
@@ -1298,13 +1390,14 @@ function TaskDetailDialog({
             )}
           </div>
         </div>
+        </div>
 
         {closed ? (
-          <p className="text-body-sm text-ink-3">This task is closed — the record is frozen and takes no new notes.</p>
+          <p className="shrink-0 text-body-sm text-ink-3">This task is closed — the record is frozen and takes no new notes.</p>
         ) : readOnly ? (
-          <p className="text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
+          <p className="shrink-0 text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className="flex shrink-0 flex-col gap-2">
             <textarea
               value={body}
               onChange={(e) => setBody(e.target.value.slice(0, 4000))}
@@ -1316,7 +1409,7 @@ function TaskDetailDialog({
           </div>
         )}
 
-        <DialogFooter className="flex-wrap">
+        <DialogFooter className="shrink-0 flex-wrap">
           {!closed && task.status !== 'pending_cancellation' && openBlocks.length === 0 ? (
             <Button
               variant="secondary"
