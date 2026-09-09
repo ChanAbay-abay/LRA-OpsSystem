@@ -67,8 +67,32 @@ export default async function pointsRoutes(app: FastifyInstance) {
     const now = Date.now();
     const withAge = (data ?? []).map((t) => ({
       ...t,
+      queueKind: 'verify_or_clear',
       ageHours: Math.round((now - new Date(t.last_activity_at).getTime()) / 36e5),
     }));
-    return { data: withAge };
+
+    // Flagged cancellations sit in the SAME queue but are a distinctly
+    // different decision — approving one cancels the task and awards
+    // no points, which must never be confusable with the "Verify" /
+    // "Approve" buttons above (Chan's explicit ask). Visible to any
+    // oversight caller so the GM sees it is pending too; only the
+    // clearing founder's own decision will actually be accepted, which
+    // `ops.enforce_task_transition` enforces regardless of what this
+    // read returns.
+    const { data: flagged, error: flaggedError } = await db
+      .schema('ops')
+      .from('tasks')
+      .select('*')
+      .eq('status', 'pending_cancellation')
+      .order('cancellation_requested_at', { ascending: true });
+    if (flaggedError) throw flaggedError;
+
+    const withCancellationAge = (flagged ?? []).map((t) => ({
+      ...t,
+      queueKind: 'cancellation_decision',
+      ageHours: Math.round((now - new Date(t.cancellation_requested_at ?? t.last_activity_at).getTime()) / 36e5),
+    }));
+
+    return { data: [...withAge, ...withCancellationAge] };
   });
 }
