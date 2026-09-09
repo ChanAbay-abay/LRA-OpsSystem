@@ -77,6 +77,12 @@ export default async function catalogRoutes(app: FastifyInstance) {
       .insert({ ...toRow(body), created_by: req.user.id })
       .select()
       .single();
+    // `uq_ops_task_types_name` is real; the central handler already
+    // maps 23505 to a generic 409, but this route can name the actual
+    // clash, so it's worth the one extra branch.
+    if (error?.code === '23505') {
+      throw new ApiError(409, `a task type named "${body.name}" already exists`, 'DUPLICATE_NAME');
+    }
     if (error) throw error;
     return { data };
   });
@@ -101,6 +107,14 @@ export default async function catalogRoutes(app: FastifyInstance) {
       .eq('id', id)
       .select()
       .single();
+    if (error?.code === '23505') {
+      const name = typeof patch.name === 'string' ? patch.name : body.name;
+      throw new ApiError(
+        409,
+        name ? `a task type named "${name}" already exists` : 'that name is already in use',
+        'DUPLICATE_NAME'
+      );
+    }
     if (error) throw error;
     return { data };
   });

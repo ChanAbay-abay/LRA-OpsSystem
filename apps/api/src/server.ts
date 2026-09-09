@@ -9,10 +9,11 @@
 // before dotenv had populated process.env.
 import 'dotenv/config';
 
-import Fastify from 'fastify';
+import Fastify, { type FastifyError } from 'fastify';
 import cors from '@fastify/cors';
 import { ZodError } from 'zod';
 import { ApiError } from './lib/domain.js';
+import { mapPostgrestError } from './lib/pg-errors.js';
 import { assertEnv } from './lib/env.js';
 import meRoutes, { membersRoutes } from './routes/me.js';
 import adminRoutes from './routes/admin.js';
@@ -47,7 +48,7 @@ export function buildServer() {
   // message, so a Postgres error never leaks schema details to a
   // browser. Responses are always `{ data }` on success.
   // -------------------------------------------------------------------
-  app.setErrorHandler((error, req, reply) => {
+  app.setErrorHandler((error: FastifyError, req, reply) => {
     if (error instanceof ZodError) {
       return reply.code(400).send({
         error: {
@@ -67,6 +68,40 @@ export function buildServer() {
       }
       return reply.code(error.statusCode).send({
         error: { message: error.message, code: error.code ?? 'ERROR' },
+      });
+    }
+
+    // Fastify's own body-parser errors (malformed JSON, wrong
+    // content-type, oversized body, ...) already carry a correct
+    // 4xx `statusCode` and an `FST_ERR_CTP_*`/`FST_ERR_*` code --
+    // the bug this branch fixes is that the code below it used to
+    // ignore that and always answer 500, turning "you sent bad JSON"
+    // into "the server broke".
+    if (
+      typeof error.code === 'string' &&
+      error.code.startsWith('FST_ERR_') &&
+      typeof error.statusCode === 'number' &&
+      error.statusCode >= 400 &&
+      error.statusCode < 500
+    ) {
+      return reply.code(error.statusCode).send({
+        error: { message: error.message, code: error.code },
+      });
+    }
+
+    // A raw PostgREST/Postgres error thrown straight from a route's
+    // `if (error) throw error;` (28 sites across the route files) used
+    // to fall through to the generic 500 below no matter what actually
+    // went wrong in the database -- a duplicate name and a real crash
+    // were indistinguishable to the client. Map the SQLSTATE/PostgREST
+    // code centrally instead of hand-writing a try/catch at every site.
+    const mapped = mapPostgrestError(error);
+    if (mapped) {
+      if (mapped.statusCode >= 500) {
+        req.log.error({ err: error }, 'Server error');
+      }
+      return reply.code(mapped.statusCode).send({
+        error: { message: mapped.message, code: mapped.code },
       });
     }
 

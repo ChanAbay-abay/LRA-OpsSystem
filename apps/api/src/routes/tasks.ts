@@ -342,6 +342,15 @@ export default async function tasksRoutes(app: FastifyInstance) {
 
     const { data, error } = await db.schema('ops').from('tasks').update(patch).eq('id', id).select().single();
     if (error) {
+      // `.select().single()` on an UPDATE that RLS silently filtered to
+      // zero rows (e.g. Sales flagging a Broker's task) comes back as
+      // PGRST116 ("cannot coerce to a single JSON object") -- a correct
+      // refusal with a wrong, internals-leaking message. Every other
+      // transition refusal here is already a human sentence written by
+      // the DB trigger, so only this one code needs translating.
+      if (error.code === 'PGRST116') {
+        throw new ApiError(404, 'task not found, or you do not have permission to change its status', 'NOT_FOUND');
+      }
       throw new ApiError(422, error.message, error.code ?? 'TRANSITION_REFUSED');
     }
     return { data };
