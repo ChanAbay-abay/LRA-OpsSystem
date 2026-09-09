@@ -20,6 +20,7 @@ import {
   BookOpen,
   CalendarCheck,
   ClipboardCheck,
+  Gauge,
   Coins,
   FileClock,
   Home,
@@ -54,6 +55,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   ];
   if (me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin') {
     items.push({ to: '/queue', label: 'Approvals', icon: ClipboardCheck });
+    items.push({ to: '/digest', label: 'Weekly digest', icon: Gauge });
   }
 
   const adminItems: NavItem[] = [

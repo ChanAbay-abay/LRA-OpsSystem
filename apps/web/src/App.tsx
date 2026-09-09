@@ -1,11 +1,11 @@
 /**
  * LRA Global Ops :: App
  *
- * Route table is deliberately short in Phase 1/2 — PLAN.md §4 lists the
- * full MVP route set, but wiring a nav item or a route for a screen
- * that doesn't exist yet is exactly the "looks further along than it
- * is" failure DESIGN.md warns against. Only `/login`, `/` (placeholder)
- * and `/admin/users` are real.
+ * Every route here is a screen that actually exists — wiring a nav item
+ * or a route for an unbuilt screen is the "looks further along than it
+ * is" failure DESIGN.md warns against. PLAN.md §4 lists the full MVP
+ * route set; `/scoreboard` and `/people/:id` (Phase 8) are the ones
+ * still absent.
  */
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
@@ -18,6 +18,7 @@ import { BoardPage } from '@/routes/board';
 import { BriefingPage } from '@/routes/briefing';
 import { PointsPage } from '@/routes/points';
 import { QueuePage } from '@/routes/queue';
+import { FounderDigest } from '@/routes/founder-digest';
 import { InboxPage } from '@/routes/inbox';
 import { CatalogPage } from '@/routes/catalog';
 import { AdminUsersPage } from '@/routes/admin-users';
@@ -139,6 +140,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute requireOversight>
             <QueuePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/digest"
+        element={
+          <ProtectedRoute requireOversight>
+            <FounderDigest />
           </ProtectedRoute>
         }
       />
