@@ -589,6 +589,49 @@ select pg_temp.expect_blocked('commitments',
   $sql$update ops.tasks set committed_points = 999
        where id = (select v from t_meta where k='taskA')$sql$);
 
+-- === Attack 12b: the same forgery by INSERT rather than UPDATE.
+--
+-- Every attack above works the UPDATE path, and every one of them was
+-- passing while the hole was wide open, because `ops.enforce_task_transition`
+-- -- which carries the commitment lock -- is a BEFORE **UPDATE** trigger.
+-- `ops.enforce_initial_task_status` (BEFORE INSERT) never mentioned the
+-- commitment triple at all, so a staff member could not ALTER a locked
+-- commitment but could arrive already carrying one, for any number of
+-- points, and the row was indistinguishable from a real Monday promise.
+-- Reproduced against a local stack before it was fixed
+-- (20260911000000): INSERT ACCEPTED, committed_points = 21.
+--
+-- The briefing for the current week is CLOSED at this point in the file,
+-- which is exactly the state these assertions need.
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('commitments',
+  'attack 12b: staff cannot FORGE a commitment on a locked week by INSERTING a task that already carries one',
+  $sql$insert into ops.tasks (title, week_id, owner_user_id, created_by, status,
+                              is_committed, committed_week_id, committed_points)
+       select 'TEST forged commitment', w.id, core.auth_user_id(), core.auth_user_id(), 'todo',
+              true, w.id, 21
+       from ops.weeks w where w.week_start = ops.week_start_for(now())$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('commitments',
+  'attack 12c: a new task cannot carry a commitment recorded against a DIFFERENT week',
+  $sql$insert into ops.tasks (title, week_id, owner_user_id, created_by, status,
+                              is_committed, committed_week_id, committed_points)
+       select 'TEST cross-week commitment', w.id, core.auth_user_id(), core.auth_user_id(), 'todo',
+              true, (select id from ops.weeks where week_start <> w.week_start order by week_start desc limit 1), 3
+       from ops.weeks w where w.week_start = ops.week_start_for(now())$sql$);
+
+-- The control that keeps the fix honest: closing the INSERT hole must not
+-- stop ordinary mid-week work. An UNCOMMITTED task on a locked week is
+-- legitimate and always was -- "new tasks can still be created and worked
+-- mid-week" is what the briefing banner promises.
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('commitments',
+  'an UNCOMMITTED task can still be created mid-week on a locked week -- the lock is about promises, not work',
+  $sql$insert into ops.tasks (title, week_id, owner_user_id, created_by, status)
+       select 'TEST midweek uncommitted', w.id, core.auth_user_id(), core.auth_user_id(), 'todo'
+       from ops.weeks w where w.week_start = ops.week_start_for(now())$sql$);
+
 -- =======================================================================
 -- Cancellation as a two-rung approval (taskB: todo, owned by sales).
 -- =======================================================================
