@@ -2080,6 +2080,300 @@ select pg_temp.expect_rows('edit-batches',
   $sql$select count(*) from ops.tasks
        where id = (select v from t_meta where k='btask6') and title = 'TEST-btask6 (single path)'$sql$, 1);
 
+-- =======================================================================
+-- Admin corrections (20260910240000_ops_admin_corrections.sql)
+--
+-- THE FINDING: `tasks_update` admits core.is_oversight() (admin
+-- included), and statement 1 of ops.enforce_task_transition() used to
+-- return unconditionally for core.is_admin() -- so an admin holding the
+-- anon key and their own JWT could PATCH points_override, forge
+-- founder_id, or set status='cleared' straight through PostgREST, with
+-- no reason, no audit row and no ops.point_ledger row. The fix makes
+-- that bypass CONDITIONAL: it fires for admin only when a matching,
+-- reasoned correction is declared via ops.admin_correct_task /
+-- ops.admin_force_transition; otherwise admin falls through to the
+-- ordinary ladder, exactly like a founder.
+--
+-- Fixtures: `admin1` (already seeded above, active, non-read-only,
+-- ops-member) is the admin persona throughout. Five fresh, UNCOMMITTED
+-- tasks -- corrections do not require a committed task to be governed;
+-- the ordinary ladder guards (points-reason floor, stamp-forgery,
+-- terminal-state) apply to every ops.tasks row regardless of
+-- is_committed, and that is exactly what "an admin's raw PATCH is
+-- refused" is proving.
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-corr' || g, 'todo', (select uid from p where k='sales')
+  from ops.weeks w cross join generate_series(1, 3) g
+  where w.week_start = ops.week_start_for(now())
+  returning id, title
+)
+insert into t_meta (k, v) select replace(title, 'TEST-', ''), id from ins;
+
+-- corr4: submitted, owned by someone else -- the fall-through-allow fixture.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='broker'), (select v from t_meta where k='task_type'),
+         'TEST-corr4', 'submitted', (select uid from p where k='broker')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'corr4', id from ins;
+
+-- corr5: submitted, owned by admin1 -- the self-verify fixture.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='admin1'), (select v from t_meta where k='task_type'),
+         'TEST-corr5', 'submitted', (select uid from p where k='admin1')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'corr5', id from ins;
+
+set local role authenticated;
+
+-- === Refusals (proving the feature is not decoration) ================
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_blocked('admin-corrections',
+  'attack: an admin''s raw PATCH-shaped UPDATE of points_override with NO reason is refused -- '
+  'this is the header''s literal example, and today it succeeds unconditionally without this fix',
+  $sql$update ops.tasks set points_override = 21 where id = (select v from t_meta where k='corr1')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'attack: an admin cannot forge founder_id directly',
+  $sql$update ops.tasks set founder_id = (select uid from p where k='admin1')
+       where id = (select v from t_meta where k='corr1')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'attack: an admin cannot forge catalog_points directly',
+  $sql$update ops.tasks set catalog_points = 21 where id = (select v from t_meta where k='corr1')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'ops.admin_correct_task with NO reason at all is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (should not land)'), null)$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'boundary: a 9-character reason is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (should not land)'), '123456789')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'boundary: a whitespace-padded 9-character reason is refused -- trim, not length',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (should not land)'), '   123456789   ')$sql$);
+
+select pg_temp.become((select uid from p where k='readonly_admin'));
+select pg_temp.expect_blocked('admin-corrections',
+  'a READ-ONLY admin is refused, from rung 1, ahead of the admin check',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (should not land)'), 'read-only admin trying anyway')$sql$);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('admin-corrections',
+  'a FOUNDER (non-admin) is refused -- Chan''s word was "admin", not "founder"',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (should not land)'), 'a founder trying to use the admin path')$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('admin-corrections',
+  'STAFF is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (should not land)'), 'staff trying to use the admin path')$sql$);
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_blocked('admin-corrections',
+  'p_changes carrying gm_id is refused and the key is NAMED, not silently stripped',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('gm_id', (select uid from p where k='admin1')), 'trying to forge a signature')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'p_changes carrying cleared_at is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('cleared_at', now()), 'trying to forge a stamp')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'p_changes carrying is_committed is refused -- STRUCTURALLY inexpressible, not merely denied: '
+  'this is Chan''s "commitment fields out of scope" ruling, enforced by the whitelist having no '
+  'key for it at all, the same property the bulk edit suggestion relies on for its own five fields',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('is_committed', true), 'trying to smuggle a commitment change')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'p_changes carrying week_id is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('week_id', gen_random_uuid()), 'trying to smuggle week_id')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'points_override set with NO points_override_reason is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('points_override', 13), 'forgot the override reason on purpose')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'points_override outside the (1,2,3,5,8,13,21) domain is refused',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('points_override', 7, 'points_override_reason', 'not a real catalog value'),
+       'trying an out-of-domain override')$sql$);
+
+-- === Allows, and their side effects ===================================
+
+select pg_temp.expect_allowed('admin-corrections',
+  'a correction with a valid reason APPLIES',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('title', 'TEST-corr1 (corrected)', 'points_override', 13,
+                          'points_override_reason', 'client confirmed the real scope after the fact'),
+       'client re-scoped the shipment after it was filed')$sql$);
+
+select pg_temp.expect_rows('admin-corrections',
+  'the row shows the new value',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='corr1') and title = 'TEST-corr1 (corrected)'
+         and points_override = 13$sql$, 1);
+
+select pg_temp.expect_rows('admin-corrections',
+  'EXACTLY ONE audit row for the correction, carrying the reason and the pre-value',
+  $sql$select count(*) from core.audit_logs
+       where entity_id = (select v from t_meta where k='corr1')
+         and action = 'ops.task.admin_corrected'
+         and new_values ->> 'reason' = 'client re-scoped the shipment after it was filed'
+         and old_values ->> 'title' = 'TEST-corr1'$sql$, 1);
+
+-- AGENT-LESSONS.md §11, written as a test: both correction GUCs and the
+-- suppress-direct-edit flag must be clear after the call returns, and a
+-- DIRECT definition edit later in the SAME transaction must still write
+-- its own audit row -- proving the suppression used during the
+-- correction above did not leak into unrelated work that follows it.
+select pg_temp.expect_rows('admin-corrections',
+  'both correction GUCs and the suppress-direct-edit flag are clear after the call returns',
+  $sql$select count(*) from (
+         select current_setting('ops.admin_correction_task', true) as a
+       ) x where coalesce(x.a, '') = ''
+         and coalesce(current_setting('ops.admin_correction_reason', true), '') = ''
+         and coalesce(current_setting('ops.suppress_direct_edit_audit', true), '') = 'false'$sql$, 1);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('admin-corrections',
+  'a direct definition edit on a DIFFERENT committed task, later in the SAME transaction, still '
+  'writes its own definition_edited_directly row -- the suppression flag from the correction above '
+  'did not leak past the one UPDATE it was guarding',
+  $sql$update ops.tasks set description = 'founder note added right after an admin correction elsewhere'
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+select pg_temp.expect_rows('admin-corrections',
+  'that direct edit wrote its own audit row, proving suppression is back off',
+  $sql$select count(*) from core.audit_logs
+       where entity_id = (select v from t_meta where k='taskA')
+         and action = 'ops.task.definition_edited_directly'
+         and new_values ->> 'description' = 'founder note added right after an admin correction elsewhere'$sql$, 1);
+
+-- Task-id mismatch: a reason declared for corr1 must not license a raw
+-- write to corr2 in the same transaction.
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_allowed('admin-corrections',
+  '(fixture) a legitimate correction to corr1...',
+  $sql$select ops.admin_correct_task((select v from t_meta where k='corr1'),
+       jsonb_build_object('client_ref', 'TEST-CORR-REF'), 'one more legitimate correction, right before trying task corr2')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  '...does NOT license a raw points_override write to corr2 with no reason, in the same transaction',
+  $sql$update ops.tasks set points_override = 5 where id = (select v from t_meta where k='corr2')$sql$);
+
+-- The fall-through allow: gap (a) closes for free, and the ledger stops
+-- having admin-shaped holes.
+select pg_temp.expect_rows('admin-corrections',
+  'before: corr4 carries no gm_id and no ledger rows',
+  $sql$select count(*) from ops.tasks where id = (select v from t_meta where k='corr4') and gm_id is null$sql$, 1);
+
+select pg_temp.expect_allowed('admin-corrections',
+  'an admin verifies someone ELSE''s submitted task with NO reason and no correction call at '
+  'all -- the ordinary fall-through ladder, not a bypass',
+  $sql$update ops.tasks set status = 'verified' where id = (select v from t_meta where k='corr4')$sql$);
+
+select pg_temp.expect_rows('admin-corrections',
+  'gap (a) closed for free: gm_id/gm_acted_at are now stamped on an admin''s ordinary verification',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='corr4') and gm_id is not null and gm_acted_at is not null$sql$, 1);
+
+select pg_temp.expect_rows('admin-corrections',
+  'that ordinary transition wrote an ops.point_ledger row, which the unconditional bypass never did',
+  $sql$select count(*) from ops.point_ledger where task_id = (select v from t_meta where k='corr4')$sql$, 1);
+
+-- An admin owner may not verify their own task, same as everyone else --
+-- and admin_force_transition is the one legitimate way through it.
+select pg_temp.expect_blocked('admin-corrections',
+  'an admin who OWNS the task cannot verify it themselves, with no reason, through the ordinary path',
+  $sql$update ops.tasks set status = 'verified' where id = (select v from t_meta where k='corr5')$sql$);
+
+select pg_temp.expect_blocked('admin-corrections',
+  'forcing a transition with NO reason is refused',
+  $sql$select ops.admin_force_transition((select v from t_meta where k='corr5'), 'verified', null)$sql$);
+
+select pg_temp.expect_allowed('admin-corrections',
+  'the same self-verify DOES succeed through ops.admin_force_transition, with a reason -- '
+  'declared and logged, not silent',
+  $sql$select ops.admin_force_transition((select v from t_meta where k='corr5'), 'verified',
+       'admin is the only person available to sign off and is declaring it, not hiding it')$sql$);
+
+select pg_temp.expect_rows('admin-corrections',
+  'the forced self-verification wrote its own admin_forced_transition audit row',
+  $sql$select count(*) from core.audit_logs
+       where entity_id = (select v from t_meta where k='corr5')
+         and action = 'ops.task.admin_forced_transition'$sql$, 1);
+
+-- admin_force_transition covers the skip-a-rung case the ordinary ladder
+-- refuses (todo -> cleared, no submitted/verified rung passed). NOT
+-- tested: reviving a cleared/cancelled task -- discovered live,
+-- ops.tasks carries a SECOND, independent BEFORE UPDATE trigger
+-- (ops.freeze_cleared_task, named to fire alphabetically ahead of
+-- ops.enforce_task_transition) that refuses ANY update to a terminal row
+-- unconditionally, with no admin exception and no correction-GUC check.
+-- This migration's brief was statement 1 of ops.enforce_task_transition
+-- "and nothing else," so that second trigger is untouched and reviving a
+-- cleared/cancelled task through admin_force_transition is NOT possible
+-- as shipped -- flagged for Chan, not silently worked around.
+select pg_temp.expect_blocked('admin-corrections',
+  'a plain UPDATE cannot skip straight from todo to cleared, no rungs passed',
+  $sql$update ops.tasks set status = 'cleared' where id = (select v from t_meta where k='corr3')$sql$);
+
+select pg_temp.expect_allowed('admin-corrections',
+  'ops.admin_force_transition CAN force the skip, with a reason, and writes its own audit row',
+  $sql$select ops.admin_force_transition((select v from t_meta where k='corr3'), 'cleared',
+       'client confirmed the work was already done and wants it cleared without the usual rungs')$sql$);
+
+select pg_temp.expect_rows('admin-corrections',
+  'the forced clear applied and its audit row carries stamps_not_derived: true -- no founder_id, '
+  'no cleared_at, no points_awarded were manufactured',
+  $sql$select count(*) from ops.tasks t join core.audit_logs a
+         on a.entity_id = t.id and a.action = 'ops.task.admin_forced_transition'
+       where t.id = (select v from t_meta where k='corr3') and t.status = 'cleared'
+         and t.founder_id is null and t.cleared_at is null and t.points_awarded is null
+         and (a.new_values ->> 'stamps_not_derived')::boolean$sql$, 1);
+
+-- Scope: provisioning and ops.settings are untouched by this migration --
+-- an admin still writes both with no reason.
+select pg_temp.expect_allowed('admin-corrections',
+  'provisioning is untouched: admin still changes core.users.authority with no reason',
+  $sql$update core.users set authority = 'staff' where id = (select uid from p where k='founder_outsider')$sql$);
+
+select pg_temp.expect_allowed('admin-corrections',
+  'ops.settings is untouched: admin still writes it with no reason',
+  $sql$update ops.settings set recurring_cap_pct = recurring_cap_pct$sql$);
+
+-- System caller untouched: still bypasses with no reason.
+reset role;
+select set_config('request.jwt.claims', null, true);
+select pg_temp.expect_allowed('admin-corrections',
+  'the system caller still bypasses with no reason at all',
+  $sql$update ops.tasks set title = 'TEST-corr2 (system-touched)' where id = (select v from t_meta where k='corr2')$sql$);
+set local role authenticated;
+
 reset role;
 
 -- ---------------------------------------------------------------------

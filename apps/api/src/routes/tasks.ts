@@ -15,7 +15,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ApiError } from '../lib/domain.js';
-import { authenticate, requireMembership, requireOversight } from '../middleware/auth.js';
+import { authenticate, requireMembership, requireOversight, requireAuthority, refuseReadOnlyWrites } from '../middleware/auth.js';
 import { userClient, serviceClient } from '../lib/supabase.js';
 
 const TASK_STATUSES = [
@@ -147,6 +147,91 @@ const blockSchema = z.object({
   blockingExternal: z.string().optional(),
   reason: z.string().min(10, 'a block needs a written reason of at least 10 characters'),
 });
+
+const POINTS_UNION = z.union([
+  z.literal(1),
+  z.literal(2),
+  z.literal(3),
+  z.literal(5),
+  z.literal(8),
+  z.literal(13),
+  z.literal(21),
+]);
+
+/**
+ * PLAN-ADMIN-CORRECTIONS.md §1.2's whitelist, camelCase. `.strict()`
+ * makes these the ONLY proposable fields -- most notably, `status` and
+ * the commitment triple (`isCommitted`/`committedWeekId`/
+ * `committedPoints`) are absent on purpose, not merely unchecked:
+ * `ops.admin_correct_task`'s own jsonb whitelist has no column for any
+ * of them either, so "propose a commitment change" is as inexpressible
+ * here as "propose a points_override" is in a bulk edit suggestion
+ * (`task-edit-batches.ts`). A status change is `POST /:id/force-status`
+ * below, a different function entirely -- see the migration header for
+ * why a transition is never folded into a column-write function.
+ *
+ * `pointsOverrideReason` is required whenever `pointsOverride` is
+ * non-null, checked here as the friendlier 400 before
+ * `ops.admin_correct_task` refuses it again in the database.
+ */
+const correctChangesSchema = z
+  .object({
+    title: z.string().min(1).optional(),
+    description: z.string().nullable().optional(),
+    taskTypeId: z.string().uuid().nullable().optional(),
+    ownerUserId: z.string().uuid().optional(),
+    clientRef: z.string().nullable().optional(),
+    pointsOverride: POINTS_UNION.nullable().optional(),
+    pointsOverrideReason: z.string().nullable().optional(),
+  })
+  .strict()
+  .refine((val) => Object.keys(val).length > 0, {
+    message: 'an admin correction must change at least one field',
+  })
+  .refine(
+    (val) =>
+      !Object.prototype.hasOwnProperty.call(val, 'pointsOverride') ||
+      val.pointsOverride === null ||
+      val.pointsOverride === undefined ||
+      (typeof val.pointsOverrideReason === 'string' && val.pointsOverrideReason.trim().length >= 10),
+    {
+      message: 'a points override requires a written reason of at least 10 characters',
+      path: ['pointsOverrideReason'],
+    }
+  );
+
+export const correctTaskSchema = z.object({
+  reason: z.string().min(10, 'an admin correction needs a written reason of at least 10 characters'),
+  changes: correctChangesSchema,
+});
+
+export const forceStatusSchema = z.object({
+  to: z.enum(TASK_STATUSES),
+  reason: z.string().min(10, 'forcing a task transition needs a written reason of at least 10 characters'),
+});
+
+export type CorrectTaskBody = z.infer<typeof correctTaskSchema>;
+
+/** camelCase -> snake_case for `ops.admin_correct_task`'s `p_changes`, presence-not-truthiness, same convention as `toRpcItems` in `task-edit-batches.ts`. */
+const CORRECT_FIELD_MAP: [keyof CorrectTaskBody['changes'], string][] = [
+  ['title', 'title'],
+  ['description', 'description'],
+  ['taskTypeId', 'task_type_id'],
+  ['ownerUserId', 'owner_user_id'],
+  ['clientRef', 'client_ref'],
+  ['pointsOverride', 'points_override'],
+  ['pointsOverrideReason', 'points_override_reason'],
+];
+
+export function toRpcChanges(changes: CorrectTaskBody['changes']): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [camel, snake] of CORRECT_FIELD_MAP) {
+    if (Object.prototype.hasOwnProperty.call(changes, camel)) {
+      out[snake] = changes[camel] ?? null;
+    }
+  }
+  return out;
+}
 
 /**
  * What a block NAMES, as one display string — the person, the blocking
@@ -759,6 +844,70 @@ export default async function tasksRoutes(app: FastifyInstance) {
     if (error) throw new ApiError(422, error.message, error.code ?? 'OVERRIDE_REFUSED');
     return { data };
   });
+
+  /**
+   * The ONLY way an admin changes a task outside the ordinary ladder --
+   * PLAN-ADMIN-CORRECTIONS.md. `requireAuthority('admin')` is the
+   * friendlier pre-flight; `ops.admin_correct_task` is the real gate,
+   * checking read-only, membership and the reason floor again itself,
+   * because SECURITY DEFINER does not go through RLS. `refuseReadOnlyWrites`
+   * is not strictly required here (the database already refuses a
+   * read-only admin at its own rung 1) but it returns the friendly
+   * READ_ONLY_ACCOUNT sentence instead of a raw 422, matching
+   * `routes/admin.ts`.
+   *
+   * Runs on `userClient`, never `serviceClient` -- the RPC's own
+   * `core.is_admin()`/`core.is_read_only()` checks must see the real
+   * signed-in caller, exactly like every other RPC in this app that
+   * carries its own authority ladder.
+   */
+  app.post(
+    '/:id/correct',
+    { onRequest: [requireAuthority('admin'), refuseReadOnlyWrites] },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const body = correctTaskSchema.parse(req.body);
+      const db = userClient(req.accessToken);
+      const { data, error } = await db.schema('ops').rpc('admin_correct_task', {
+        p_task_id: id,
+        p_changes: toRpcChanges(body.changes),
+        p_reason: body.reason,
+      });
+      // The database's own sentence, forwarded verbatim -- it is written
+      // to be read by a person, and translating it here would only make
+      // it worse.
+      if (error) throw new ApiError(422, error.message, error.code ?? 'CORRECTION_REFUSED');
+      return { data };
+    }
+  );
+
+  /**
+   * The ONLY way an admin forces a status past a transition the ordinary
+   * ladder refuses (revive a terminal task, skip a rung). Deliberately a
+   * SEPARATE endpoint from `/:id/correct` -- a transition is not a
+   * column write, and `ops.admin_force_transition` derives no stamp and
+   * writes no ledger row; its audit row says `stamps_not_derived: true`
+   * rather than leaving that implied. `PATCH /:id`, `POST /:id/status`
+   * and `POST /:id/override-points` are untouched by this endpoint --
+   * after the migration's trigger fix they already route an admin
+   * through the ordinary ladder, which is the point.
+   */
+  app.post(
+    '/:id/force-status',
+    { onRequest: [requireAuthority('admin'), refuseReadOnlyWrites] },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const body = forceStatusSchema.parse(req.body);
+      const db = userClient(req.accessToken);
+      const { data, error } = await db.schema('ops').rpc('admin_force_transition', {
+        p_task_id: id,
+        p_to: body.to,
+        p_reason: body.reason,
+      });
+      if (error) throw new ApiError(422, error.message, error.code ?? 'FORCE_TRANSITION_REFUSED');
+      return { data };
+    }
+  );
 
   app.delete('/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
