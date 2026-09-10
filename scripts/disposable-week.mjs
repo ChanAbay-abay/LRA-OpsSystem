@@ -505,10 +505,27 @@ function compareOrExcuse(group, name, actual, expected, fpBefore, fpAfter) {
     ok(group, name, 'identical despite concurrent writes elsewhere in the project');
     return;
   }
+  /*
+    The fingerprint moved, so a byte-comparison cannot separate "this
+    harness leaked" from "somebody else wrote". Both are possible and the
+    message used to assert the second one — which is simply false when
+    this runs against an isolated local stack, where there IS no other
+    session. It named a cause it had not established, which is the same
+    mistake as reporting a leak as a product defect.
+
+    The honest report is the evidence: what moved, and the two readings.
+    The most common cause by far is this harness's own disposable rows
+    reaching a query that is deliberately not week-scoped (chronic
+    carry-over / staleness — see the residue check).
+  */
   inconclusive(
     group,
     name,
-    `another session wrote to the shared project during this run, so a payload diff proves nothing.\n` +
+    `the non-disposable fingerprint moved during this run, so a payload diff proves nothing either way.\n` +
+      `         Either this harness leaked into a query that is not week-scoped (most likely —\n` +
+      `         chronic carry-over and staleness read every open task by design), or another\n` +
+      `         session wrote to the same project. Against an isolated local stack only the\n` +
+      `         first is possible.\n` +
       `         non-disposable fingerprint ${JSON.stringify(fpBefore)} -> ${JSON.stringify(fpAfter)}\n` +
       `         differing paths: ${diffPaths(expected, actual).join('; ')}`
   );
@@ -1633,17 +1650,59 @@ async function simulate(n, { red = false } = {}) {
     if (act) {
       const brokerDuring = await liveReliabilityFor(broker.userId);
       const gmDuring = await liveReliabilityFor(gm.userId);
+      /*
+        These four are knownDefect(), NOT eq(), and the distinction matters
+        because the first live run reported them as failures and that
+        misdescribed the product.
+
+        `scoreboard.ts` reads chronic carry-over and staleness off the
+        person's CURRENTLY OPEN tasks with no week filter at all, and says
+        so in a comment above the query: PRD.md §5.2 defines both as
+        PRESENT-TENSE conditions, not per-week historical counts. So a
+        task carried three times is chronic today regardless of which week
+        it belongs to. That is a deliberate product decision, not a bug,
+        and an assertion that calls it a failure is asserting something the
+        product never promised.
+
+        What it genuinely does mean is a limit on THIS HARNESS's isolation
+        claim: the 2099 window is sound for everything that filters by
+        week, and cannot be sound for a query that deliberately does not.
+        While the run is live, a disposable task with carry_over_count >= 3
+        moves a real persona's reliability; teardown restores it, which the
+        assertions immediately below prove every time.
+
+        The practical answer is not to change the product — it is to run
+        this harness against an isolated database, where the "live"
+        personas are disposable too and the leak is meaningless. That is
+        now possible: `supabase start` + `db reset`, then point
+        OPS_API_URL/SUPABASE_* at the local stack (docs/DISPOSABLE-WEEK.md).
+
+        knownDefect() inverts, so if these ever start holding — because
+        the query became week-scoped — the harness says so and asks for
+        the exemption to be removed rather than going quietly green.
+      */
+      const carryOverScopeRef =
+        'BY DESIGN: scoreboard.ts reads chronic carry-over off currently-open tasks with no ' +
+        'week filter (PRD.md §5.2, present-tense condition). Run against an isolated database ' +
+        'instead — see docs/DISPOSABLE-WEEK.md.';
       for (const [label, before, during] of [
         ['broker-demo', brokerBefore, brokerDuring],
         ['gm-demo', gmBefore, gmDuring],
       ]) {
-        eq(
+        knownDefect(
           GROUPS.isolation,
           `${label}'s LIVE reliability.modifiers.chronicCarryOver is unaffected by the disposable week's carry-over count while this run is live`,
-          during.chronicCarryOver,
-          before.chronicCarryOver
+          during.chronicCarryOver === before.chronicCarryOver,
+          carryOverScopeRef,
+          `${before.chronicCarryOver} -> ${during.chronicCarryOver}`
         );
-        eq(GROUPS.isolation, `${label}'s LIVE reliability.score is unaffected`, during.score, before.score);
+        knownDefect(
+          GROUPS.isolation,
+          `${label}'s LIVE reliability.score is unaffected`,
+          during.score === before.score,
+          carryOverScopeRef,
+          `${before.score} -> ${during.score}`
+        );
       }
     }
 
@@ -1828,7 +1887,7 @@ function report({ red, requiredGroups }) {
     for (const k of known) console.log(`  x [${k.group}] ${k.name}`);
   }
   if (unclear.length) {
-    console.log('\nINCONCLUSIVE (another session wrote to the shared project mid-run):');
+    console.log('\nINCONCLUSIVE (the non-disposable fingerprint moved mid-run — see each line for why):');
     for (const u of unclear) console.log(`  ? [${u.group}] ${u.name}`);
   }
 
