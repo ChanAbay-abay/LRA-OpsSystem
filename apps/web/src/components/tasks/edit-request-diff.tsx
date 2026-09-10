@@ -21,6 +21,7 @@
  * this file rather than writing a second one is the whole point.
  */
 import * as React from 'react';
+import { fmtDateTime } from '@/lib/dates';
 import { AlertTriangle, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { editRequestStatusLabel } from '@/lib/labels';
@@ -99,7 +100,7 @@ export function EditRequestCard({
           <EditRequestStatusChip status={request.status} />
         </div>
         <span className="shrink-0 text-micro text-ink-3">
-          {request.requestedByName ?? 'unknown'} · {new Date(request.requested_at).toLocaleString()}
+          {request.requestedByName ?? 'unknown'} · {fmtDateTime(request.requested_at)}
         </span>
       </div>
 
@@ -183,7 +184,7 @@ export function EditBatchCard({
         </div>
         <span className="shrink-0 text-body-sm text-ink-3">
           {batch.requestedByName ?? 'unknown'} ·{' '}
-          {batch.requested_at ? new Date(batch.requested_at).toLocaleString() : 'unknown time'}
+          {batch.requested_at ? fmtDateTime(batch.requested_at) : 'unknown time'}
         </span>
       </div>
 

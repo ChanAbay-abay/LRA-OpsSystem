@@ -106,7 +106,10 @@ export function SubmitSuggestionsDialog({
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[85vh] w-[min(680px,94vw)] max-w-none overflow-y-auto">
+      {/* `md:`-gated so the mobile sheet in `ui/dialog.tsx` is not overridden.
+          Unconditional width/height/overflow here is what kept this one dialog
+          a centred box at 375px while every other became full-bleed. */}
+      <DialogContent className="md:max-h-[85vh] md:w-[min(680px,94vw)] md:max-w-none md:overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="pr-6">
             Submit {total} {total === 1 ? 'suggestion' : 'suggestions'} on {entries.length}{' '}

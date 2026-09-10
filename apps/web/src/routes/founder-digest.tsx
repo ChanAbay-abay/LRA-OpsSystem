@@ -874,7 +874,10 @@ function SendBackDialog({
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[85vh] w-[min(620px,92vw)] max-w-none overflow-y-auto">
+      {/* `md:` only (DESIGN.md §16.5): below `md` this is a full-screen sheet
+          sized by components/ui/dialog.tsx's own defaults, not this fixed
+          desktop width/height cap. */}
+      <DialogContent className="overflow-y-auto md:max-h-[85vh] md:w-[min(620px,92vw)] md:max-w-none">
         <DialogHeader>
           <DialogTitle>
             Send {count} task{count === 1 ? '' : 's'} back

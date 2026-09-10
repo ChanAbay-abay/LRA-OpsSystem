@@ -367,3 +367,116 @@ export const leaderboardVisibilityLabel = makeLookup<LeaderboardVisibility>(
   'leaderboard visibility',
   LEADERBOARD_VISIBILITY
 ).label;
+
+// ---------------------------------------------------------------------
+// Audit action — core.audit_logs.action, `/admin/audit` and the task
+// detail dialog's History timeline — grepped from every
+// `insert into core.audit_logs` in supabase/migrations/*.sql so none is
+// missed. Unlike the enums above this isn't a Postgres enum type (the
+// column is `text`, and a future migration can add an action this table
+// has never seen), which is exactly why it still belongs here and not
+// as a scattered per-screen switch: `makeLookup`'s unknown-key fallback
+// (render the raw key, warn in dev) is what keeps a new action from
+// shipping as a blank cell instead of a defect someone notices.
+// ---------------------------------------------------------------------
+
+export type AuditAction =
+  | 'ops.briefing.closed'
+  | 'ops.task.admin_corrected'
+  | 'ops.task.admin_forced_transition'
+  | 'ops.task.cancellation_approved'
+  | 'ops.task.cancellation_flagged'
+  | 'ops.task.cancellation_refused'
+  | 'ops.task.definition_edited_directly'
+  | 'ops.task_edit_batch.approved'
+  | 'ops.task_edit_batch.rejected'
+  | 'ops.task_edit_batch.withdrawn'
+  | 'ops.task_edit_request.approved'
+  | 'ops.task_edit_request.rejected'
+  | 'ops.task_edit_request.withdrawn';
+
+const AUDIT_ACTION = {
+  'ops.briefing.closed': { label: 'Briefing closed' },
+  'ops.task.admin_corrected': { label: 'Corrected by an admin' },
+  'ops.task.admin_forced_transition': { label: 'Status forced by an admin' },
+  'ops.task.cancellation_approved': { label: 'Cancellation approved' },
+  'ops.task.cancellation_flagged': { label: 'Cancellation requested' },
+  'ops.task.cancellation_refused': { label: 'Cancellation refused' },
+  'ops.task.definition_edited_directly': { label: 'Definition edited directly' },
+  'ops.task_edit_batch.approved': { label: 'Edit batch approved' },
+  'ops.task_edit_batch.rejected': { label: 'Edit batch rejected' },
+  'ops.task_edit_batch.withdrawn': { label: 'Edit batch withdrawn' },
+  'ops.task_edit_request.approved': { label: 'Edit request approved' },
+  'ops.task_edit_request.rejected': { label: 'Edit request rejected' },
+  'ops.task_edit_request.withdrawn': { label: 'Edit request withdrawn' },
+} satisfies Record<AuditAction, EnumEntry>;
+
+export const auditActionLabel = makeLookup<AuditAction>('audit action', AUDIT_ACTION).label;
+
+// ---------------------------------------------------------------------
+// Audit entity type — core.audit_logs.entity_type, every literal value
+// an `insert into core.audit_logs` in the migrations names.
+// ---------------------------------------------------------------------
+
+export type AuditEntityType = 'ops.task' | 'ops.task_edit_batch' | 'ops.task_edit_request' | 'ops.week';
+
+const AUDIT_ENTITY_TYPE = {
+  'ops.task': { label: 'Task' },
+  'ops.task_edit_batch': { label: 'Edit batch' },
+  'ops.task_edit_request': { label: 'Edit request' },
+  'ops.week': { label: 'Week' },
+} satisfies Record<AuditEntityType, EnumEntry>;
+
+export const auditEntityTypeLabel = makeLookup<AuditEntityType>('audit entity type', AUDIT_ENTITY_TYPE).label;
+
+// ---------------------------------------------------------------------
+// Audit field — the keys that show up inside `old_values`/`new_values`
+// on an audit row (`/admin/audit`'s before/after panel). Every key any
+// `insert into core.audit_logs` builds with `jsonb_build_object`, so a
+// reader sees "Owner" and "Points override", not `owner_user_id` and
+// `points_override`. `stamps_not_derived` (a bookkeeping flag on
+// `ops.task.admin_forced_transition`, meaningless to a reader) is
+// deliberately absent — the caller filters it out before this is ever
+// reached, same as an absent key renders nothing rather than a guess.
+// ---------------------------------------------------------------------
+
+export type AuditFieldKey =
+  | 'title'
+  | 'description'
+  | 'task_type_id'
+  | 'owner_user_id'
+  | 'client_ref'
+  | 'points_override'
+  | 'points_override_reason'
+  | 'status'
+  | 'reason'
+  | 'decision_reason'
+  | 'requested_by'
+  | 'item_count'
+  | 'week_start'
+  | 'week_id'
+  | 'task_id'
+  | 'before_values'
+  | 'after_values';
+
+const AUDIT_FIELD = {
+  title: { label: 'Title' },
+  description: { label: 'Description' },
+  task_type_id: { label: 'Catalog type' },
+  owner_user_id: { label: 'Owner' },
+  client_ref: { label: 'Client reference' },
+  points_override: { label: 'Points override' },
+  points_override_reason: { label: 'Override reason' },
+  status: { label: 'Status' },
+  reason: { label: 'Reason' },
+  decision_reason: { label: 'Decision reason' },
+  requested_by: { label: 'Requested by' },
+  item_count: { label: 'Item count' },
+  week_start: { label: 'Week start' },
+  week_id: { label: 'Week' },
+  task_id: { label: 'Task' },
+  before_values: { label: 'Before' },
+  after_values: { label: 'After' },
+} satisfies Record<AuditFieldKey, EnumEntry>;
+
+export const auditFieldLabel = makeLookup<AuditFieldKey>('audit field', AUDIT_FIELD).label;

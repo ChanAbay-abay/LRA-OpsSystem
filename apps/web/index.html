@@ -3,7 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `viewport-fit=cover` is what makes `env(safe-area-inset-bottom)` resolve to a
+         real value on iOS instead of 0 (DESIGN.md §16.2) — the mobile dialog sheet's
+         footer (components/ui/dialog.tsx) depends on it to clear the home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>LRA Ops</title>
   </head>
   <body>

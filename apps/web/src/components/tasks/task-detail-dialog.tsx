@@ -35,7 +35,7 @@ import { useResource, type ResourceStatus } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { taskStatusLabel, taskStatusTransition } from '@/lib/labels';
+import { auditActionLabel, taskStatusLabel, taskStatusTransition } from '@/lib/labels';
 import { fmtDateTime, fmtTime } from '@/lib/dates';
 import { Hint } from '@/components/ui/hint';
 import {
@@ -157,27 +157,6 @@ interface TimelineEntry {
   label: string;
   actorName?: string | null;
   reason?: string | null;
-}
-
-/**
- * The two admin-audit actions this task can carry
- * (`20260910240000_ops_admin_corrections.sql`,
- * `20260910170000_audit_direct_edits_and_closed_week_guard.sql`), spoken
- * in a sentence rather than the raw `module.entity.verb` action string
- * `/admin/audit` renders as-is. Not moved to `lib/labels.ts`: that file
- * models database ENUMs (§17), and an audit `action` is a free-text
- * column, not one — an unrecognised value still renders as itself,
- * never blank, same rule as `labels.ts`'s own fallback.
- */
-function auditActionLabel(action: string): string {
-  switch (action) {
-    case 'ops.task.admin_corrected':
-      return 'Corrected by an admin';
-    case 'ops.task.definition_edited_directly':
-      return 'Definition edited directly';
-    default:
-      return action;
-  }
 }
 
 /**
@@ -510,13 +489,23 @@ export function TaskDetailDialog({
         (composer, footer) have claimed theirs. `min-h-0` is load-bearing
         here — without it a flex child never shrinks below its content's
         natural height, and the "own scroll region" never kicks in.
+
+        `md:` only, DESIGN.md §16.5: below `md` this is a full-screen
+        sheet and `DialogContent` itself is the sheet's one scroller
+        (`components/ui/dialog.tsx`), so nothing here may cap height or
+        hide overflow at that width — that would clip the fields above
+        the worklog instead of letting the sheet reach them. History's
+        own `max-h-56 overflow-y-auto` a bit below is untouched: it's
+        meant to stay independently scrollable at every width, and
+        nesting inside a scrollable sheet is not the same trap as
+        nesting inside a `overflow-hidden` one (§16.5's coder brief).
       */}
-      <DialogContent className="flex max-h-[85vh] w-[min(680px,92vw)] max-w-none flex-col overflow-hidden">
+      <DialogContent className="flex flex-col md:max-h-[85vh] md:w-[min(680px,92vw)] md:max-w-none md:overflow-hidden">
         <DialogHeader className="shrink-0">
           <DialogTitle className="pr-6">{task.title}</DialogTitle>
         </DialogHeader>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
+        <div className="flex flex-col gap-4 md:min-h-0 md:flex-1 md:overflow-hidden">
         <div className="flex shrink-0 flex-col gap-4">
         <div className="flex flex-wrap items-center gap-2">
           <StatusChip status={task.status} />
