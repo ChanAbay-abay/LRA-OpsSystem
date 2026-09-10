@@ -90,6 +90,11 @@ export default async function adminRoutes(app: FastifyInstance) {
 
   app.post('/users', async (req) => {
     const body = inviteSchema.parse(req.body);
+    // Service client: this whole router is `requireAuthority('admin')`-
+    // gated above, and provisioning inherently needs it regardless — the
+    // auth-user invite/lookup calls are `db.auth.admin.*`, which has no
+    // RLS-scoped equivalent, and the very first `core.users` row for a
+    // brand-new person cannot exist yet for RLS to grant self-access to.
     const db = serviceClient();
 
     // 1. Find or invite the auth user. inviteUserByEmail is idempotent
@@ -220,6 +225,14 @@ export default async function adminRoutes(app: FastifyInstance) {
   });
 
   app.get('/users', async () => {
+    // `requireAuthority('admin')` above is the guard; `core.is_admin()`
+    // is true for this caller, so `users_select`/`memberships_select`
+    // RLS would in fact let a userClient read every row here too (2026-
+    // 09-10 audit: verified against 20260910090000's policies). Left on
+    // `serviceClient` to match every other handler in this admin-only
+    // file rather than mixing client types per route with no test yet
+    // covering the difference — a userClient conversion is safe to make
+    // later once an admin-route integration test exists to prove it.
     const db = serviceClient();
     const { data: users, error } = await db
       .schema('core')
@@ -248,6 +261,11 @@ export default async function adminRoutes(app: FastifyInstance) {
   app.patch('/users/:id', async (req) => {
     const { id } = req.params as { id: string };
     const body = patchSchema.parse(req.body);
+    // Same reasoning as GET /users above: `requireAuthority('admin')`
+    // plus `users_update`/`memberships_update`'s own `is_admin()` check
+    // mean RLS already permits this write for this caller; kept on
+    // serviceClient for consistency with the rest of this file, not
+    // because RLS would otherwise refuse it.
     const db = serviceClient();
 
     const patch: Record<string, unknown> = {};
@@ -313,6 +331,10 @@ export default async function adminRoutes(app: FastifyInstance) {
       throw new ApiError(400, 'You cannot delete your own account.', 'SELF_DELETE');
     }
 
+    // Same `is_admin()`-satisfies-RLS reasoning as PATCH above; the
+    // trigger described in the block comment above is the real guard
+    // either way, so serviceClient here is consistency with the rest of
+    // this file, not a bypass of anything this caller couldn't already do.
     const db = serviceClient();
     const { data: updated, error } = await db
       .schema('core')
@@ -340,6 +362,7 @@ export default async function adminRoutes(app: FastifyInstance) {
 
   app.post('/users/:id/restore', async (req) => {
     const { id } = req.params as { id: string };
+    // Same `is_admin()`-satisfies-RLS reasoning as the delete route above.
     const db = serviceClient();
 
     const { data: updated, error } = await db
@@ -368,6 +391,12 @@ export default async function adminRoutes(app: FastifyInstance) {
   // is still needed for this to run unattended (PLAN.md Phase 9 /
   // Chan's own note) — this endpoint is the manual/administrative path.
   app.post('/purge-due-accounts', async (req) => {
+    // Service client is REQUIRED here, not a style choice: `purge_due_-
+    // accounts()` is guarded by `core.is_system_caller()`, which only
+    // passes for a no-JWT connection or a request whose JWT role claim
+    // is literally `service_role` (20260908120100_core_identity.sql).
+    // An admin's own userClient call would carry role `authenticated`
+    // and the function would refuse to run.
     const db = serviceClient();
     const { data, error } = await db.schema('core').rpc('purge_due_accounts');
     if (error) throw error;

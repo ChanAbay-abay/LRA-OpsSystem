@@ -74,6 +74,10 @@ export default async function briefingRoutes(app: FastifyInstance) {
       .eq('week_start', new Date(new Date(week.week_start).getTime() - 7 * 86400000).toISOString().slice(0, 10))
       .maybeSingle();
 
+    // Service client: the roster name/authority join RLS on core.people
+    // would otherwise scope to "self, or oversight" (see file header
+    // above and lib/roster.ts) — every ops member sees the same roster,
+    // matching routes/me.ts and routes/scoreboard.ts exactly.
     const roster = await loadOpsRoster(serviceClient());
 
     // --- Last week's scorecard --------------------------------------

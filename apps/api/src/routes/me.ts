@@ -7,7 +7,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireMembership } from '../middleware/auth.js';
 import { serviceClient } from '../lib/supabase.js';
 import { loadOpsRoster } from '../lib/roster.js';
 
@@ -39,6 +39,12 @@ export default async function meRoutes(app: FastifyInstance) {
 
 export async function membersRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
+  // Fixed 2026-09-10 audit: this route previously only required
+  // `authenticate`, so an authenticated hr/crm-only caller with no ops
+  // membership at all could pull the entire ops roster (names, emails,
+  // authority). `requireMembership('ops')` is what actually makes the
+  // "every ops member is allowed to see it" claim below true.
+  app.addHook('onRequest', requireMembership('ops'));
 
   // Service client: the team roster is a join across core.users,
   // core.people and core.memberships that every ops member is allowed

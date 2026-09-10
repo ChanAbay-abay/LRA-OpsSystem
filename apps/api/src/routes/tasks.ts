@@ -246,6 +246,10 @@ export default async function tasksRoutes(app: FastifyInstance) {
     const { data, error } = await query;
     if (error) throw error;
 
+    // Reads above already ran through userClient/RLS (any ops member
+    // reads all of ops.tasks); enrichment below is the same cross-schema
+    // owner/block/note-count join every list endpoint in this app pays
+    // for, on rows the caller already has.
     const svc = serviceClient();
     const enriched = await enrichWithOwners(svc, data ?? []);
     const counts = await openBlockCounts(svc, enriched.map((t) => t.id));
@@ -552,6 +556,9 @@ export default async function tasksRoutes(app: FastifyInstance) {
       .order('created_at', { ascending: true });
     if (error) throw error;
 
+    // Note rows themselves already came through userClient/RLS above;
+    // this only resolves the authors' display names, the same
+    // enrichWithOwners join every other list endpoint pays for.
     const svc = serviceClient();
     const authorIds = [...new Set((data ?? []).map((n) => n.author_user_id as string))];
     const enriched = authorIds.length
@@ -593,6 +600,9 @@ export default async function tasksRoutes(app: FastifyInstance) {
       .order('created_at', { ascending: true });
     if (error) throw error;
 
+    // Block rows themselves already came through userClient/RLS above;
+    // this only resolves blocker/creator/resolver display names, the
+    // same enrichWithOwners join every other list endpoint pays for.
     const svc = serviceClient();
     const userIds = [
       ...new Set(

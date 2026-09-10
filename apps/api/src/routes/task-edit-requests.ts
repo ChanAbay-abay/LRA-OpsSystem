@@ -102,6 +102,10 @@ export default async function taskEditRequestsRoutes(app: FastifyInstance) {
     const { data, error } = await query;
     if (error) throw error;
 
+    // Request rows themselves already came through userClient/RLS above
+    // (any ops member reads all of ops.task_edit_requests); this only
+    // resolves the requester's display name, the same enrichWithOwners
+    // join every other list endpoint in this app pays for.
     const svc = serviceClient();
     const requesterIds = [...new Set((data ?? []).map((r) => r.requested_by as string))];
     const named = requesterIds.length

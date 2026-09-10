@@ -95,7 +95,14 @@ export function requireMembership(module: Module) {
   };
 }
 
-/** Record the last successful login, best effort. */
+/**
+ * Record the last successful login, best effort. Currently unwired —
+ * no call site invokes this yet (2026-09-10 audit: grepped, none found).
+ *
+ * Service client, deliberately, matching `loadAuthUser` above: writing
+ * a caller's own `last_login` during their own login should not depend
+ * on the very row/session RLS would need to already trust.
+ */
 export async function touchLastLogin(userId: string): Promise<void> {
   try {
     await serviceClient()

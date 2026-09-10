@@ -184,6 +184,12 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
     throw new ApiError(404, 'no week found for the scoreboard to render', 'NO_WEEK');
   }
 
+  // Service client: same roster join as routes/briefing.ts and
+  // routes/me.ts (see file header above) — used only to build every
+  // row internally; `leaderboard_visibility`/`maySeeReliability` still
+  // filter what actually leaves this function before either route
+  // handler below returns it (verified 2026-09-10: neither the full
+  // roster nor a filtered-out row is ever included in the response).
   const roster = await loadOpsRoster(serviceClient());
 
   // --- The reliability window: the most recent CLOSED weeks strictly
