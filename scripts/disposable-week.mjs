@@ -240,10 +240,25 @@ function diffPaths(expected, actual, prefix = '', out = []) {
   return out;
 }
 
+/**
+ * `JSON.stringify(undefined)` returns the JS value `undefined`, not the
+ * string `"undefined"` — so a bare `JSON.stringify()` call here can hand
+ * back something with no `.length`. That used to only matter for
+ * assertions gated behind `if (act)`, where `actual` was always a real
+ * value; now that RED-mode assertions run unconditionally and can
+ * legitimately look up a row that was never created (e.g. a week that
+ * never closed), `actual` can genuinely be `undefined`. Stringify it
+ * explicitly so the comparison still runs — and fails — instead of
+ * crashing the harness.
+ */
+function safeStringify(value) {
+  return value === undefined ? 'undefined' : JSON.stringify(value);
+}
+
 /** Deep-ish equality on JSON-comparable values. */
 function eq(group, name, actual, expected) {
-  const a = JSON.stringify(actual);
-  const e = JSON.stringify(expected);
+  const a = safeStringify(actual);
+  const e = safeStringify(expected);
   const detail =
     a.length + e.length > 300
       ? `differing paths (expected -> actual):\n         ${diffPaths(expected, actual).join('\n         ') || '(none — structural difference only)'}`
@@ -1350,22 +1365,31 @@ async function simulate(n, { red = false } = {}) {
 
       // --- carry-over check, BEFORE this week's own new work, so it
       // reflects only what rolled in from the PREVIOUS week's close.
+      //
+      // Both assertions run unconditionally, in both modes, against a
+      // FIXED, plan-intended expectation (age === i) — never against a
+      // value re-derived from the same carryMap they're checking. In RED
+      // mode nothing ever closed, so `carryMap` is empty and both
+      // assertions fail for real: `carryMap.has(task.id)` is false, and
+      // `carryMap.get(task.id)?.carryOverCount` is `null` against an
+      // expected `i`. Nothing is skipped when the task isn't found —
+      // that used to make nine assertions vanish; now a missing entry is
+      // a recorded failure.
       if (i >= 1) {
         const briefing = await call('founder', 'GET', `/api/briefing/${weekId}`);
         const carryMap = new Map((briefing.carryOvers ?? []).map((c) => [c.id, c]));
-        if (act) {
-          const b0 = brokerTasks.find((t) => t.weekIndex === 0);
-          for (const [label, task] of [
-            ["broker's blocked wk0 task", b0],
-            ["gm's never-touched wk0 task", gmTask],
-          ]) {
-            truthy(GROUPS.carryover, `week ${i}: ${label} is a carry-over`, task && carryMap.has(task.id));
-            if (task && carryMap.has(task.id)) {
-              eq(GROUPS.carryover, `week ${i}: ${label}'s carry-over age is exactly ${i} (grew by 1 from last week)`, carryMap.get(task.id).carryOverCount, i);
-            }
-          }
-        } else {
-          eq(GROUPS.carryover, `week ${i}: RED — nothing ever closed, so there are no carry-overs`, (briefing.carryOvers ?? []).length, 0);
+        const b0 = brokerTasks.find((t) => t.weekIndex === 0);
+        for (const [label, task] of [
+          ["broker's blocked wk0 task", b0],
+          ["gm's never-touched wk0 task", gmTask],
+        ]) {
+          truthy(GROUPS.carryover, `week ${i}: ${label} is a carry-over`, task && carryMap.has(task.id));
+          eq(
+            GROUPS.carryover,
+            `week ${i}: ${label}'s carry-over age is exactly ${i} (grew by 1 from last week)`,
+            task ? (carryMap.get(task.id)?.carryOverCount ?? null) : null,
+            i
+          );
         }
       }
 
@@ -1416,14 +1440,30 @@ async function simulate(n, { red = false } = {}) {
 
       // --- week 1: resolve the week-0 block (crossing the boundary),
       // but do NOT clear the task — see the file header for why.
-      if (act && i === 1) {
+      //
+      // Runs in both modes. In RED, the block was never created (its
+      // creation is itself a skipped transition in week 0), so `open` is
+      // undefined and the first assertion fails for real. Resolving it
+      // genuinely cannot run without something to resolve — so instead
+      // of skipping the second assertion, it records an explicit failure
+      // naming why, per the "never skip, fail explicitly" rule.
+      if (i === 1) {
         const b0 = brokerTasks.find((t) => t.weekIndex === 0);
         const blocks = await call('broker', 'GET', `/api/tasks/${b0.id}/blocks`);
         const open = (blocks ?? []).find((b) => !b.resolved_at);
         truthy(GROUPS.blocked, 'week 1: the week-0 block is still open going in, as expected', open);
-        if (open) await call('broker', 'POST', `/api/blocks/${open.id}/resolve`);
-        const { data: resolved } = await ops().from('task_blocks').select('resolved_at').eq('id', open?.id).maybeSingle();
-        truthy(GROUPS.blocked, "week 1: resolving it stamps resolved_at — a block genuinely closing across the week boundary", resolved?.resolved_at);
+        if (open) {
+          await call('broker', 'POST', `/api/blocks/${open.id}/resolve`);
+          const { data: resolved } = await ops().from('task_blocks').select('resolved_at').eq('id', open.id).maybeSingle();
+          truthy(GROUPS.blocked, "week 1: resolving it stamps resolved_at — a block genuinely closing across the week boundary", resolved?.resolved_at);
+        } else {
+          record(
+            GROUPS.blocked,
+            "week 1: resolving it stamps resolved_at — a block genuinely closing across the week boundary",
+            false,
+            'RED: no block exists to resolve — block creation in week 0 was itself a skipped transition, so this assertion cannot pass without driven data'
+          );
+        }
       }
 
       // --- sales clears every single week, including the open one.
@@ -1467,10 +1507,13 @@ async function simulate(n, { red = false } = {}) {
       .order('week_start');
     const closedWeekRows = (weekRows ?? []).filter((w) => w.state === 'closed');
     const openWeekRows = (weekRows ?? []).filter((w) => w.state !== 'closed');
-    eq(GROUPS.scoreboardAccum, `exactly ${act ? n - 1 : 0} of the ${n} simulated weeks are closed`, closedWeekRows.length, act ? n - 1 : 0);
-    if (act) {
-      eq(GROUPS.scoreboardAccum, 'the LAST simulated week is the one still open', openWeekRows.map((w) => w.id), [weeks[n - 1].weekId]);
-    }
+    // Fixed, plan-intended expectations (n-1 closed weeks, the last one
+    // open) — not conditioned on `act`. In RED, `close_week` is itself a
+    // skipped transition, so no week ever closes: `closedWeekRows.length`
+    // is actually 0 and `openWeekRows` is every week, not just the
+    // last — both assertions fail for real.
+    eq(GROUPS.scoreboardAccum, `exactly ${n - 1} of the ${n} simulated weeks are closed`, closedWeekRows.length, n - 1);
+    eq(GROUPS.scoreboardAccum, 'the LAST simulated week is the one still open', openWeekRows.map((w) => w.id), [weeks[n - 1].weekId]);
 
     // -------------------------------------------------------------
     // Reliability / hit-rate over the closed weeks, hand-computed
@@ -1548,33 +1591,51 @@ async function simulate(n, { red = false } = {}) {
       return den > 0 ? num / den : 0;
     }
 
+    // `expectBase` / `expectRatedWeeks` below are the PLAN's intended
+    // outcome — fixed, independent of red/green — never re-derived from
+    // `act`. Every assertion in this loop now runs unconditionally. In
+    // GREEN this is the same check as before. In RED, no task was ever
+    // committed (the commit calls are themselves skipped transitions),
+    // so every `weeksFor()` entry has committedPoints=0 and `ratedWeeks`
+    // / `base` collapse to 0 for everyone — which disagrees with the
+    // fixed intended values for sales and broker (both expect
+    // ratedWeeks=n-1, base=1) and for gm's ratedWeeks (expects 1, not
+    // 0), so those assertions go red for real. (gm's `base` and the
+    // RATED/UNRATED check happen to land on the same value whether or
+    // not anything was driven — a genuine coincidence of gm's specific
+    // numbers, not a skipped check; the ratedWeeks assertion right above
+    // it still catches the same discrepancy for gm.)
     for (const [label, userId, expectBase, expectRatedWeeks] of [
-      ['sales (never misses)', sales.userId, 1, act ? n - 1 : 0],
-      ['broker (exonerated wk0 + perfect hits after)', broker.userId, 1, act ? n - 1 : 0],
-      ['gm (one un-exonerated miss, never recommitted)', gm.userId, 0, act ? 1 : 0],
+      ['sales (never misses)', sales.userId, 1, n - 1],
+      ['broker (exonerated wk0 + perfect hits after)', broker.userId, 1, n - 1],
+      ['gm (one un-exonerated miss, never recommitted)', gm.userId, 0, 1],
     ]) {
       const weeksArr = weeksFor(userId);
       const rel = reliability(weeksArr, {}, { halfLifeWeeks, minWeeksForRating });
       const handBase = handComputeBase(weeksArr);
       eq(GROUPS.reliabilityX, `${label}: ratedWeeks`, rel.ratedWeeks, expectRatedWeeks);
-      if (act) {
-        record(
-          GROUPS.reliabilityX,
-          `${label}: reliability.ts's base (${rel.base.toFixed(4)}) matches an INDEPENDENT re-transcription of PRD.md §5.2 (${handBase.toFixed(4)})`,
-          Math.abs(rel.base - handBase) < 1e-9,
-          `library base=${rel.base} hand-computed base=${handBase}`
-        );
-        eq(GROUPS.reliabilityX, `${label}: base is exactly ${expectBase} (weight-invariant — every INCLUDED week is either 0/x or x/x)`, Number(rel.base.toFixed(6)), expectBase);
-        const shouldBeRated = expectRatedWeeks >= minWeeksForRating;
-        eq(GROUPS.reliabilityX, `${label}: ${shouldBeRated ? 'RATED' : 'UNRATED'} (ratedWeeks=${expectRatedWeeks}, threshold=${minWeeksForRating})`, rel.score === null, !shouldBeRated);
-      } else {
-        eq(GROUPS.reliabilityX, `${label}: RED — nothing was ever committed or cleared, so ratedWeeks is 0 and the score is UNRATED`, [rel.ratedWeeks, rel.score], [0, null]);
-      }
+      // Cross-check of two independent formulas over whatever actually
+      // happened — useful in GREEN, but not itself a red-control check
+      // (both sides read the same driven rows, so both collapse to the
+      // same value in RED too). The two fixed-expectation checks below
+      // are what prove the control.
+      record(
+        GROUPS.reliabilityX,
+        `${label}: reliability.ts's base (${rel.base.toFixed(4)}) matches an INDEPENDENT re-transcription of PRD.md §5.2 (${handBase.toFixed(4)})`,
+        Math.abs(rel.base - handBase) < 1e-9,
+        `library base=${rel.base} hand-computed base=${handBase}`
+      );
+      eq(GROUPS.reliabilityX, `${label}: base is exactly ${expectBase} (weight-invariant — every INCLUDED week is either 0/x or x/x)`, Number(rel.base.toFixed(6)), expectBase);
+      const shouldBeRated = expectRatedWeeks >= minWeeksForRating;
+      eq(GROUPS.reliabilityX, `${label}: ${shouldBeRated ? 'RATED' : 'UNRATED'} (ratedWeeks=${expectRatedWeeks}, threshold=${minWeeksForRating})`, rel.score === null, !shouldBeRated);
     }
 
     // The money assertion for "blocked time exonerates a miss, plain misses don't" —
-    // broker and gm's week-0 rows, side by side.
-    if (act) {
+    // broker and gm's week-0 rows, side by side. `P` is the fixed,
+    // plan-intended committed amount, not re-read from what happened —
+    // so in RED, where nothing was ever committed or blocked, these
+    // fail for real instead of trivially agreeing at 0.
+    {
       const brokerW0 = weeksFor(broker.userId).find((w) => w.weekId === weeks[0].weekId);
       const gmW0 = weeksFor(gm.userId).find((w) => w.weekId === weeks[0].weekId);
       eq(GROUPS.blocked, "broker's week-0 commitment is FULLY exonerated (blocked before week end, still never cleared)", brokerW0?.exoneratedPoints, P);
@@ -1600,14 +1661,17 @@ async function simulate(n, { red = false } = {}) {
     const openWeekPoints = (clearedLedgerRows ?? []).filter((r) => !closedWeekIdSet.has(r.week_id)).reduce((s, r) => s + r.points, 0);
     const totalPoints = closedOnlyPoints + openWeekPoints;
 
-    const expectedClosedOnly = P * (act ? (n - 1) + (n - 2) : 0); // sales(n-1 closed) + broker(n-2 closed)
-    const expectedOpenWeek = P * (act ? 1 : 0); // sales's clear in the still-open last week
+    // Fixed, plan-intended totals — not conditioned on `act`. In RED no
+    // task was ever cleared (clear is itself a chain of skipped
+    // transitions), so `clears` stays empty and every actual figure
+    // below is 0 against a nonzero intended expectation: real failures,
+    // not an echo of the same empty `clears` array on both sides.
+    const expectedClosedOnly = P * ((n - 1) + (n - 2)); // sales(n-1 closed) + broker(n-2 closed)
+    const expectedOpenWeek = P * 1; // sales's clear in the still-open last week
     eq(GROUPS.scoreboardAccum, "closed-weeks-only points (the shape reliability/month/quarter use) — hand formula P*((n-1)+(n-2))", closedOnlyPoints, expectedClosedOnly);
     eq(GROUPS.scoreboardAccum, "the still-open week's own cleared points (P*1, sales only) — real, but must sit OUTSIDE a closed-only aggregate", openWeekPoints, expectedOpenWeek);
     eq(GROUPS.scoreboardAccum, 'total = closed-only + the open week (identity, but confirms nothing else leaked in)', totalPoints, expectedClosedOnly + expectedOpenWeek);
-    if (act) {
-      truthy(GROUPS.scoreboardAccum, "the still-open week's points are real (not a rejected/zeroed write) — it just must not enter a closed-only window", openWeekPoints > 0);
-    }
+    truthy(GROUPS.scoreboardAccum, "the still-open week's points are real (not a rejected/zeroed write) — it just must not enter a closed-only window", openWeekPoints > 0);
 
     // -------------------------------------------------------------
     // Per-day activity: the data the contribution heatmap will read.
@@ -1623,18 +1687,40 @@ async function simulate(n, { red = false } = {}) {
       const day = String(t.cleared_at).slice(0, 10);
       actualByDay.set(day, (actualByDay.get(day) ?? 0) + 1);
     }
-    const expectedByDay = new Map();
-    for (const c of clears) {
-      const day = String(c.clearedAt).slice(0, 10);
-      expectedByDay.set(day, (expectedByDay.get(day) ?? 0) + 1);
+    // `expectedByDay` is built from the `clears` tracking array, which
+    // only ever gets entries pushed inside `if (act)` blocks upstream —
+    // so in RED it is empty for the same reason `actualByDay` is empty,
+    // and comparing them would be exactly the echo this control exists
+    // to rule out. There is no plan-independent way to predict a
+    // per-day distribution (the run's actual calendar day isn't known
+    // ahead of time), so per the "cannot run without driven data" rule
+    // this records an explicit failure in RED instead of a same-empty
+    // comparison; GREEN keeps the real comparison against what was
+    // actually driven.
+    if (act) {
+      const expectedByDay = new Map();
+      for (const c of clears) {
+        const day = String(c.clearedAt).slice(0, 10);
+        expectedByDay.set(day, (expectedByDay.get(day) ?? 0) + 1);
+      }
+      eq(
+        GROUPS.heatmap,
+        'per-day cleared-task counts match exactly what this run caused (grouped by UTC calendar day of cleared_at)',
+        Object.fromEntries([...actualByDay.entries()].sort()),
+        Object.fromEntries([...expectedByDay.entries()].sort())
+      );
+    } else {
+      record(
+        GROUPS.heatmap,
+        'per-day cleared-task counts match exactly what this run caused (grouped by UTC calendar day of cleared_at)',
+        false,
+        'RED: no task was ever cleared — clearing is itself a chain of skipped transitions, so there is no per-day distribution to validate'
+      );
     }
-    eq(
-      GROUPS.heatmap,
-      'per-day cleared-task counts match exactly what this run caused (grouped by UTC calendar day of cleared_at)',
-      Object.fromEntries([...actualByDay.entries()].sort()),
-      Object.fromEntries([...expectedByDay.entries()].sort())
-    );
-    eq(GROUPS.heatmap, `total cleared tasks across the run is ${act ? 2 * n - 2 : 0} (sales n + broker n-2)`, clearedTaskRows?.length ?? 0, act ? 2 * n - 2 : 0);
+    // Fixed intended total — not conditioned on `act`. In RED nothing
+    // was ever cleared, so this is 0 actual against a nonzero intended
+    // count: a real failure, same as the other totals above.
+    eq(GROUPS.heatmap, `total cleared tasks across the run is ${2 * n - 2} (sales n + broker n-2)`, clearedTaskRows?.length ?? 0, 2 * n - 2);
     if ([...actualByDay.keys()].length <= 1) {
       console.log('         NOTE: every clear landed on the same UTC calendar day — expected for a run that');
       console.log('         completes in minutes. The grouping query is proven correct; a real multi-day');

@@ -211,14 +211,102 @@ node scripts/disposable-week.mjs simulate-red <n>
 creates the `n` weeks and the ad-hoc tasks (creation is not a transition,
 exactly like `prove-red` above) and then skips every transition — no
 commits, no briefing open/close, no blocks, no status changes, no
-`close_week` — while running the identical cross-week assertion battery
-with identical expectations. With nothing ever committed, every person's
-`ratedWeeks` is 0 and their reliability reads UNRATED; with nothing ever
-closed, there are no carry-overs at all in any week's briefing; with nothing
-ever cleared, both the closed/open points split and the per-day heatmap data
-are empty. It exits 0 only if each of the five cross-week groups
+`close_week`.
+
+### What made the control lie, and the fix
+
+The first version of this control was worthless: `simulate-red 4` reported
+52 pass / 0 fail with **0 of the assertions in any cross-week group actually
+going red**, for two separable reasons.
+
+1. **Skipping the transition was silently skipping the assertion too.**
+   Every cross-week check was written as `if (act) { ...assert... }` — so in
+   RED mode, where `act` is `false`, the assertion body never ran at all.
+   Nothing failed because nothing was even asked. The carry-over group alone
+   lost 9 of its 12 assertions this way (12 ran green, only 3 ever ran red).
+2. **The checks that DID run in both modes computed their own expectation
+   by reading back the same rows they then compared against** — e.g. the
+   reliability block built `expectedByDay`/`expectedRatedWeeks` from the
+   harness's own `clears`/`act` bookkeeping, which is *also* empty in RED
+   for the same reason the actual rows are empty. Two empty things agreeing
+   with each other proves nothing; it's the "assert the query against
+   itself" failure mode this codebase has been bitten by before (PLAN.md
+   §12.7, `docs/AGENT-LESSONS.md`).
+
+The fix applied throughout `simulate`'s five cross-week groups (carry-over,
+reliability, blocked-time exoneration, scoreboard accumulation, per-day
+activity):
+
+- **Every assertion now runs unconditionally, in both modes.** The `if
+  (act)` guards around assertion bodies are gone; only the guards around the
+  actual API calls that *drive* the transitions remain (that part is
+  correct and unchanged — RED mode is defined by skipping transitions, not
+  by skipping checks).
+- **Expectations are fixed at what the scenario intends to drive** —
+  `n - 1` closed weeks, `P` committed points, carry-over age `i`, a reliable
+  base of `1` for sales/broker and `0` for gm, `2n - 2` cleared tasks — never
+  re-derived from the same rows/bookkeeping being asserted against. In GREEN
+  this is the same number it always was. In RED, nothing was driven, so the
+  real row (or its absence) disagrees with the fixed expectation and the
+  assertion fails for a genuine reason.
+- **Where an assertion structurally cannot evaluate without a driven
+  transition** — resolving a block that was never created, or comparing a
+  per-day cleared-task distribution when nothing was ever cleared (there is
+  no way to predict *which* calendar day a hypothetical clear would have
+  landed on) — it now records an explicit `record(group, name, false, ...)`
+  failure naming exactly why, instead of being skipped or silently agreeing
+  with itself.
+- A latent robustness bug in the assertion engine surfaced once real rows
+  started coming back `undefined` in RED (a week that never closed can't be
+  found by a query scoped to closed weeks): `eq()` called `JSON.stringify()`
+  and then `.length` on the result without handling `JSON.stringify(undefined)`
+  returning the *value* `undefined`, not the string `"undefined"`, which
+  crashed the harness the first time an assertion legitimately needed to
+  compare against a missing row. `eq()` now stringifies through a
+  `safeStringify()` helper that treats `undefined` explicitly, so the
+  comparison runs — and fails — instead of throwing.
+
+With nothing ever committed, every person's `ratedWeeks` is 0 against a
+fixed nonzero expectation; with nothing ever closed, `carryMap` is empty
+against a fixed nonzero carry-over age; with nothing ever cleared, both the
+closed/open points split and the per-day heatmap total are 0 against a fixed
+nonzero expectation. It exits 0 only if each of the five cross-week groups
 (carry-over, reliability, blocked-time exoneration, scoreboard accumulation,
 per-day activity) actually reported at least one failure.
+
+**Measured**, run against an isolated local stack (`supabase start` +
+`db reset`, `OPS_API_URL`/`SUPABASE_*` pointed at `:54321`/`:3199` — see
+"How to run it" below): `simulate-red 4` now reports **33 of 53 cross-week
+assertions going red**, with every one of the five required groups showing
+at least one failure —
+
+```
+=== RED CONTROL ===
+  Every transition was skipped, so every side-effect assertion MUST fail.
+  ok   cross-week: carry-over age        12 of 12 assertions went red
+  ok   cross-week: reliability / hit-rate 7 of 12 assertions went red
+  ok   cross-week: blocked-time exoneration 6 of 6 assertions went red
+  ok   cross-week: scoreboard accumulation  6 of 6 assertions went red
+  ok   cross-week: per-day activity (heatmap data) 2 of 2 assertions went red
+
+  All side-effect groups can go red. The green run above is therefore meaningful.
+```
+
+The reliability group's remaining 5 green checks in RED are not a gap: 3 are
+the base-vs-hand-computed *cross-check* (both sides read the same driven
+rows, so both are legitimately `0` when nothing is driven — it is a
+GREEN-mode formula check, not a red-control check, and the group's other
+assertions, `ratedWeeks` and `base is exactly N`, catch the same
+discrepancy for real), and 2 are `gm`'s `base`/`RATED-UNRATED` checks, which
+coincidentally land on the same value (`0`, `UNRATED`) whether gm's single
+miss was genuinely un-exonerated or nothing was driven at all — `gm`'s
+`ratedWeeks` assertion (expected `1`, actual `0`) still catches the
+discrepancy in the same group.
+
+Re-running `simulate 4` (GREEN) afterward confirms the fix did not change
+the product's behavior, only the control's honesty: still **52 pass, 0
+fail** — the same result as before, but now backed by assertions that were
+just proven capable of catching a real regression.
 
 ## Commands
 
