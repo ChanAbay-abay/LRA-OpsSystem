@@ -48,7 +48,22 @@ export function AppShell({ children }: { children: ReactNode }) {
         overflow-hidden` so there is no page scroll left to escape to.
       */}
       <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="mx-auto max-w-app px-6 py-6 lg:px-8">{children}</div>
+        {/*
+          `h-full` so a route that wants to own the viewport can. The shell
+          already claims to (`h-screen overflow-hidden` above), but this
+          wrapper was content-sized, so a route asking for `h-full` resolved
+          against its own content instead of the screen and got nothing.
+          `/board` needs it: its lane scroller must be the vertical scroll
+          container for `position: sticky` lane headers to have anything to
+          stick to (DESIGN.md §13).
+
+          Safe for every other route: with `border-box` sizing this is exactly
+          `<main>`'s height, and a page taller than that simply overflows the
+          wrapper and is scrolled by `<main>` as before -- verified on
+          /scoreboard, /briefing and /points, which are all taller than one
+          screen.
+        */}
+        <div className="mx-auto h-full max-w-app px-6 py-6 lg:px-8">{children}</div>
       </main>
     </div>
   );

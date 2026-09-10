@@ -54,6 +54,7 @@ function block(over: Partial<BlockRow> & { id: string; task_id: string }): Block
 
 function input(over: Partial<NowPayloadInput> = {}): NowPayloadInput {
   return {
+    canActOnApprovals: true,
     myTasks: [],
     openBlocks: [],
     blocksIAmHolding: [],
@@ -309,4 +310,24 @@ describe('blockingOthers[] — work I am holding up', () => {
       ]
     );
   });
+});
+
+/**
+ * The approvals section is gated by ONE decision, made in the route and passed
+ * through -- not re-derived on the client. A read-only founder (ERC, DCA) and a
+ * founder without the clearing seat were both shown "Awaiting my approval" for
+ * work they had no path to act on (reproduced 2026-09-10).
+ */
+test('canActOnApprovals is passed through to the payload verbatim', () => {
+  assert.equal(assembleNowPayload(input({ canActOnApprovals: true })).canActOnApprovals, true);
+  assert.equal(assembleNowPayload(input({ canActOnApprovals: false })).canActOnApprovals, false);
+});
+
+test('a caller who cannot act still gets every other section', () => {
+  // Read-only means "sees what oversight sees". Losing the approvals list must
+  // not cost them their own work, their blocks, or who they are holding up.
+  const p = assembleNowPayload(input({ canActOnApprovals: false }));
+  for (const key of ['myOpenTasks', 'blocked', 'blockingOthers', 'newlyAssigned'] as const) {
+    assert.ok(Array.isArray(p[key]), `${key} should still be present`);
+  }
 });

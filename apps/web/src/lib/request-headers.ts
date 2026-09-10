@@ -51,3 +51,20 @@ export function buildHeaders(
     ...(extra as Record<string, string> | undefined),
   };
 }
+
+/**
+ * The 204 defect (2026-09-10) lives in `api.ts`'s `request()`, which cannot be
+ * imported under `node --test` because it reads `import.meta.env` at module
+ * scope. So the response-shape decision is pinned here as the same pure rule
+ * `request()` applies, and the two must not drift: a no-content status yields
+ * `undefined`, and any other 2xx must carry `{ data }`.
+ *
+ * Why it mattered: deleting an unused catalog type answers `204 No Content`,
+ * `res.json()` rejects, and `body.data` threw a TypeError that the delete
+ * dialog's catch dressed up as "Could not delete this — it may already have
+ * been used by a task." The type was already permanently gone. A destructive
+ * action that succeeds while reporting failure is worse than one that fails.
+ */
+export function isNoContent(status: number): boolean {
+  return status === 204 || status === 205 || status === 304;
+}

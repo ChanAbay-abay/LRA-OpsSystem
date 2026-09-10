@@ -58,10 +58,12 @@ import {
   KeyboardSensor,
   PointerSensor,
   closestCenter,
+  pointerWithin,
   useDraggable,
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragStartEvent,
   type Announcements,
@@ -113,6 +115,29 @@ import {
   type BoardColumn,
 } from '@/lib/task-permissions';
 import { blockRelation, blockRelationLabel, initials, type BlockRelation, type Task } from '@/lib/task-types';
+import {
+  BOARD_COLUMN_IDS,
+  BOARD_LANES,
+  TAB_STORAGE_KEY,
+  activeTabOf,
+  columnFromDropId,
+  columnPoints,
+  countChipTitle,
+  isTabDropId,
+  laneDimRefusal,
+  laneLabel,
+  laneOf,
+  matchesElsewhere,
+  matchesElsewhereLabel,
+  nextTabIndex,
+  panelElementId,
+  readStoredTabs,
+  serializeTabs,
+  tabDropId,
+  tabElementId,
+  type ActiveTabs,
+  type BoardLane,
+} from '@/lib/board-groups';
 
 /**
  * One open `ops.task_blocks` row as `GET /api/blocks/open` returns it —
@@ -144,17 +169,14 @@ type Board = Record<BoardColumn, Task[]> & {
   flagged: Task[];
 };
 
-const COLUMNS: { id: BoardColumn; droppable: boolean }[] = [
-  { id: 'backlog', droppable: true },
-  { id: 'this_week', droppable: false },
-  { id: 'in_progress', droppable: true },
-  { id: 'blocked', droppable: true },
-  { id: 'submitted', droppable: true },
-  { id: 'verified', droppable: true },
-  { id: 'cleared', droppable: true },
-];
-
-const COLUMN_IDS = COLUMNS.map((c) => c.id);
+// The seven columns and the five lanes they render in both live in
+// `lib/board-groups.ts` now (Chan, 2026-09-10: "i want you to group the
+// columns. backlog and this week should be on the same column just on
+// switchable tabs. verified and cleared should also work the same").
+// Nothing about a column changed — `COLUMN_IDS` is still every column,
+// flat, in board order, and it is still what `dragRefusal` is asked
+// about.
+const COLUMN_IDS = BOARD_COLUMN_IDS;
 
 // Who the task is now waiting on once it lands in a given column, for
 // the keyboard drop announcement (DESIGN.md:663-664, defect #4). Only
@@ -463,32 +485,237 @@ function TaskCard({
   return menuHandlers ? <TaskCardContextMenu items={menuItems}>{card}</TaskCardContextMenu> : card;
 }
 
-function Column({
-  id,
+/** The 12px header icon a column carries, per DESIGN.md §5.5. Only these two. */
+function columnIcon(id: BoardColumn) {
+  if (id === 'blocked') return <Ban className="size-3 text-blocked" aria-hidden />;
+  if (id === 'cleared') return <CheckCircle2 className="size-3 text-cleared" aria-hidden />;
+  return null;
+}
+
+/**
+ * One tab in a grouped lane's header — and, per the grouping contract's
+ * item 1, its OWN drop target for its own column. The tab strip stays
+ * visible and live during a drag, so a card can be dropped straight onto
+ * "Cleared" without switching to it first.
+ *
+ * Dimming is decided here, per TAB, never by the lane (contract item 2):
+ * `this_week` is never droppable, so a lane that dimmed whenever one of
+ * its tabs refused would look dead on every drag Backlog would have
+ * accepted. The refusal sentence is `moveRefusal`'s own — this component
+ * receives it and never derives one, because a tab is a presentation of
+ * an existing column and the permission mirror knows nothing about
+ * groups.
+ */
+function LaneTab({
+  column,
   droppable,
-  tasks,
+  selected,
+  count,
+  total,
+  refusal,
+  isDragging,
+  index,
+  onSelect,
+  onKeyDown,
+  registerRef,
+}: {
+  column: BoardColumn;
+  droppable: boolean;
+  selected: boolean;
+  /** Cards visible in this tab under the current search + owner filter. */
+  count: number;
+  /** Cards in this tab ignoring the filter — the chip's tooltip discloses the difference. */
+  total: number;
+  /** Null when the dragged card may land in THIS column; otherwise why it may not. */
+  refusal: string | null;
+  isDragging: boolean;
+  index: number;
+  onSelect: (column: BoardColumn) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLButtonElement>, index: number) => void;
+  registerRef: (index: number, node: HTMLButtonElement | null) => void;
+}) {
+  const dimmed = isDragging && refusal !== null;
+  const { setNodeRef, isOver } = useDroppable({ id: tabDropId(column), disabled: dimmed || !droppable });
+  const chipTitle = countChipTitle(count, total);
+
+  return (
+    <button
+      ref={(node) => {
+        setNodeRef(node);
+        registerRef(index, node);
+      }}
+      type="button"
+      role="tab"
+      id={tabElementId(column)}
+      // Only the selected panel is in the DOM (the inactive tab's cards
+      // are not rendered), so the unselected tab's `aria-controls`
+      // deliberately points at an id that appears when it is selected —
+      // the ARIA APG's single-panel pattern.
+      aria-controls={panelElementId(column)}
+      aria-selected={selected}
+      // Roving tabindex: one stop for the whole strip, arrows move within
+      // it (contract item 7).
+      tabIndex={selected ? 0 : -1}
+      // During a drag this says only "you cannot drop here" — the tab is
+      // still a working control and still switches on click, exactly as
+      // the seven-column board's `aria-disabled` on a dimmed column meant
+      // "no drops", not "inert".
+      aria-disabled={dimmed || undefined}
+      title={dimmed ? (refusal ?? undefined) : undefined}
+      onClick={() => onSelect(column)}
+      onKeyDown={(e) => onKeyDown(e, index)}
+      className={cn(
+        'flex h-[24px] shrink-0 items-center gap-1.5 rounded-sm px-1.5 text-eyebrow',
+        'transition-[background-color,color,box-shadow,opacity] duration-press ease',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring',
+        selected ? 'bg-surface text-ink' : 'text-ink-3 hover:bg-surface-3 hover:text-ink-2',
+        // DESIGN.md §7.3's illegal-target cursor. The dimming itself is on
+        // the inner span, not here — see below.
+        dimmed && 'cursor-not-allowed',
+        // The same two drop treatments the lane body uses (DESIGN.md
+        // §7.3): a legal target fills and rings, an illegal one only rings.
+        isOver && droppable && !dimmed && 'bg-[#F2F7FF] shadow-[inset_0_0_0_1px_#9CC2F7]',
+        isOver && (!droppable || dimmed) && 'shadow-[inset_0_0_0_1px_#CBD2E0]'
+      )}
+    >
+      {/*
+        The dim lives on this inner span rather than on the button, and
+        that is not cosmetic. Fading the whole button also fades the
+        selected tab's white background, so mid-drag the tab that IS
+        showing looked unselected while its bright sibling looked
+        selected — reproduced in a screenshot on 2026-09-10, with the
+        Plan lane showing This week's cards under a Backlog tab that read
+        as active. Dimming only the content keeps "which tab am I looking
+        at" true while still saying "not here" about the drop.
+      */}
+      <span className={cn('flex items-center gap-1.5', dimmed && 'opacity-40 saturate-50')}>
+        {columnIcon(column)}
+        {COLUMN_LABEL[column]}
+        {/*
+          Contract item 4: both tabs always show their own count. A tab may
+          hide cards; it may never hide the existence of work. `--ink-2`, not
+          `--ink-3`: DESIGN.md §12 measures `--ink-3` on `--surface-3` at
+          4.47 and bans the pair outright.
+        */}
+        <span className="num text-num-xs rounded bg-surface-3 px-1.5 py-0.5 text-ink-2" title={chipTitle ?? undefined}>
+          {count}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * The grouped lane's header: a real `tablist`, hand-rolled.
+ *
+ * **Why not `@radix-ui/react-tabs`** (contract item 7 asks which and
+ * why): every tab header is a `useDroppable`, and Radix's `Trigger`
+ * would have to reach that node through `asChild` + ref composition —
+ * the same portal/`asChild` indirection that produced the reproduced
+ * click defect this file already documents on the task card. What Radix
+ * would buy is roving focus and arrow keys, which is `nextTabIndex` in
+ * `lib/board-groups.ts` plus eight lines here, and is unit-tested there
+ * rather than trusted. So: no new dependency, the droppable ref goes
+ * straight onto the button, and the keyboard contract is pinned by a
+ * test. `scoreboard/period-tabs.tsx` set the precedent for hand-rolling
+ * a small selector in this app; the difference is that one is four
+ * peers with `aria-pressed` and this one genuinely owns panels.
+ *
+ * Activation is automatic (arrow moves focus AND switches the panel),
+ * which the APG allows because switching costs nothing here — the cards
+ * are already in memory, no request, no skeleton.
+ */
+function LaneTabs({
+  lane,
+  activeTab,
+  visibleCounts,
+  totalCounts,
+  isDragging,
+  refusalFor,
+  onSelectTab,
+}: {
+  lane: BoardLane;
+  activeTab: BoardColumn;
+  visibleCounts: Record<BoardColumn, number>;
+  totalCounts: Record<BoardColumn, number>;
+  isDragging: boolean;
+  refusalFor: (column: BoardColumn) => string | null;
+  onSelectTab: (column: BoardColumn) => void;
+}) {
+  const refs = React.useRef<(HTMLButtonElement | null)[]>([]);
+  const registerRef = React.useCallback((index: number, node: HTMLButtonElement | null) => {
+    refs.current[index] = node;
+  }, []);
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const next = nextTabIndex(e.key, index, lane.tabs.length);
+    // `null` for every key this strip does not own — Space in particular,
+    // which is dnd-kit's pick-up key everywhere else on this board.
+    if (next === null) return;
+    e.preventDefault();
+    onSelectTab(lane.tabs[next].id);
+    refs.current[next]?.focus();
+  };
+
+  return (
+    <div role="tablist" aria-label={`${laneLabel(lane)} — pick a column`} className="flex items-center gap-0.5">
+      {lane.tabs.map((tab, index) => (
+        <LaneTab
+          key={tab.id}
+          column={tab.id}
+          droppable={tab.droppable}
+          selected={tab.id === activeTab}
+          count={visibleCounts[tab.id]}
+          total={totalCounts[tab.id]}
+          refusal={refusalFor(tab.id)}
+          isDragging={isDragging}
+          index={index}
+          onSelect={onSelectTab}
+          onKeyDown={onKeyDown}
+          registerRef={registerRef}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Lane({
+  lane,
+  activeTab,
+  visible,
+  visibleCounts,
+  totalCounts,
+  filtering,
   meId,
   actor,
   weekStateById,
   isDragging,
-  dropRefusal,
+  refusalFor,
+  onSelectTab,
   menuHandlers,
   onFlagCancellation,
   onOpenNotes,
   onOpenDetail,
   blockNoteFor,
 }: {
-  id: BoardColumn;
-  droppable: boolean;
-  tasks: Task[];
+  lane: BoardLane;
+  /** Which of this lane's columns is on show. Always the only one for a single-column lane. */
+  activeTab: BoardColumn;
+  /** The filtered cards, per column — the lane reads only its own tabs. */
+  visible: Record<BoardColumn, Task[]>;
+  visibleCounts: Record<BoardColumn, number>;
+  totalCounts: Record<BoardColumn, number>;
+  /** Whether a search or owner filter is on, which changes the sibling affordance's wording. */
+  filtering: boolean;
   meId: string | undefined;
   actor: Actor | null;
   /** This task's week's `state` — the definition lock's other half, see `definitionLockRefusal`. */
   weekStateById: Map<string, string>;
   /** A drag is in flight somewhere on the board. */
   isDragging: boolean;
-  /** Null when the dragged card may land here; otherwise why it may not. */
-  dropRefusal: string | null;
+  /** `moveRefusal` for the dragged card against one column, or null when nothing is being dragged. */
+  refusalFor: (column: BoardColumn) => string | null;
+  onSelectTab: (column: BoardColumn) => void;
   menuHandlers: TaskMenuHandlers<Task>;
   onFlagCancellation?: (task: Task) => void;
   onOpenNotes: (task: Task) => void;
@@ -496,9 +723,22 @@ function Column({
   /** The oldest open block's relationship for a task, in words. Null for a task with no open block. */
   blockNoteFor: (task: Task) => { label: string; relation: BlockRelation } | null;
 }) {
+  const tasks = visible[activeTab];
+  const droppable = lane.tabs.find((t) => t.id === activeTab)?.droppable ?? false;
+  const dropRefusal = refusalFor(activeTab);
   const blocked = isDragging && dropRefusal !== null;
-  const { setNodeRef, isOver } = useDroppable({ id, disabled: !droppable || blocked });
-  const total = tasks.reduce((sum, t) => sum + (t.points_override ?? t.catalog_points ?? 0), 0);
+  // Contract item 2: the LANE only dims when every one of its tabs
+  // refuses. `laneDimRefusal` is where that lives, and it is unit-tested,
+  // because getting it wrong greys out the Plan lane on every drag.
+  const laneDim = isDragging ? laneDimRefusal(lane, activeTab, refusalFor) : null;
+  const { setNodeRef, isOver } = useDroppable({ id: activeTab, disabled: !droppable || blocked });
+  const total = columnPoints(tasks);
+  // Contract item 5, the sharpest hazard in the change: a match sitting
+  // in the tab you cannot see is a task the reader concludes does not
+  // exist. When the active tab has nothing and its sibling has something,
+  // the empty body carries a control that switches — not a toast, not a
+  // badge alone.
+  const elsewhere = matchesElsewhere(lane, activeTab, visibleCounts);
 
   // Chan: "by default their tasks display first while everyone else'
   // shows below." Stable within each group — the API already returns
@@ -530,50 +770,150 @@ function Column({
     );
   };
 
+  const chipTitle = countChipTitle(visibleCounts[activeTab], totalCounts[activeTab]);
+
   return (
-    <div
+    <section
+      aria-label={laneLabel(lane)}
       className={cn(
         'flex w-column shrink-0 snap-start flex-col gap-2 rounded-xl bg-surface-2 p-2',
         'transition-opacity duration-fast',
         // Grayed out for the duration of a drag it cannot accept
-        // (Chan's ask). `aria-disabled` says the same thing to a screen
-        // reader that the dimming says to the eye.
-        blocked && 'opacity-40 saturate-50'
+        // (Chan's ask) — but for a grouped lane, only when BOTH tabs
+        // refuse. `aria-disabled` says the same thing to a screen reader
+        // that the dimming says to the eye.
+        laneDim !== null && 'opacity-40 saturate-50'
       )}
-      aria-disabled={blocked || undefined}
-      title={blocked ? (dropRefusal ?? undefined) : undefined}
+      aria-disabled={laneDim !== null || undefined}
+      title={laneDim ?? undefined}
     >
-      <div className="flex items-center justify-between px-2 pb-1 pt-1">
-        <div className="flex items-center gap-1.5 text-eyebrow text-ink-2">
-          {id === 'blocked' ? <Ban className="size-3 text-blocked" aria-hidden /> : null}
-          {id === 'cleared' ? <CheckCircle2 className="size-3 text-cleared" aria-hidden /> : null}
-          {COLUMN_LABEL[id]}
-          <span className="num text-num-xs rounded bg-surface-3 px-1.5 py-0.5 text-ink-3">{tasks.length}</span>
-        </div>
+      {/*
+        Fixed 28px header for every lane, tabbed or not, so the five lanes
+        keep one card baseline. The tab strip REPLACES the label rather
+        than sitting above it: DESIGN.md §11 says the board is dense and
+        the contract says the strip is chrome that must not cost a card's
+        worth of vertical space.
+      */}
+      <div
+        className={cn(
+          'flex h-[28px] items-center justify-between gap-2 pl-1 pr-2',
+          // DESIGN.md §13's unimplemented requirement, now real: the header
+          // stays put while its cards scroll under it. `-mx-2 px-3` cancels the
+          // lane's own `p-2` so the sticky band spans the full lane width and
+          // the opaque background covers a card scrolling beneath it; without
+          // that the card's top edge shows through on either side. `z-10` sits
+          // above the cards but below the drag overlay.
+          'sticky top-0 z-10 -mx-2 -mt-2 bg-surface-2 px-3 pt-2'
+        )}
+      >
+        {lane.group ? (
+          <LaneTabs
+            lane={lane}
+            activeTab={activeTab}
+            visibleCounts={visibleCounts}
+            totalCounts={totalCounts}
+            isDragging={isDragging}
+            refusalFor={refusalFor}
+            onSelectTab={onSelectTab}
+          />
+        ) : (
+          <div className="flex items-center gap-1.5 pl-1 text-eyebrow text-ink-2">
+            {columnIcon(activeTab)}
+            {COLUMN_LABEL[activeTab]}
+            <span
+              className="num text-num-xs rounded bg-surface-3 px-1.5 py-0.5 text-ink-2"
+              title={chipTitle ?? undefined}
+            >
+              {tasks.length}
+            </span>
+          </div>
+        )}
+        {/* The lane's point total follows the active tab, matching the old per-column total exactly. */}
         <span className="num text-num-sm text-ink-3">{total}</span>
       </div>
       <div
         ref={setNodeRef}
+        id={panelElementId(activeTab)}
+        role={lane.group ? 'tabpanel' : undefined}
+        aria-labelledby={lane.group ? tabElementId(activeTab) : undefined}
         className={cn(
           'flex min-h-[80px] flex-1 flex-col gap-2 rounded-lg p-0.5 transition-[background-color,box-shadow]',
           isOver && droppable && !blocked && 'bg-[#F2F7FF] shadow-[inset_0_0_0_1px_#9CC2F7]',
           isOver && (!droppable || blocked) && 'shadow-[inset_0_0_0_1px_#CBD2E0]'
         )}
       >
-        {mine.map(renderCard)}
-        {mine.length > 0 && others.length > 0 ? (
-          <div className="flex items-center gap-2 px-1 pt-1 text-micro text-ink-3">
-            <span className="h-px flex-1 bg-hairline" aria-hidden />
-            Everyone else
-            <span className="h-px flex-1 bg-hairline" aria-hidden />
-          </div>
-        ) : null}
-        {others.map(renderCard)}
-        {!tasks.length ? <p className="p-2 text-body-sm text-ink-3">Nothing here.</p> : null}
+        {/*
+          Keyed on the active tab so switching crossfades the body — the
+          most DESIGN.md §7.2 allows on a filter-like state change
+          ("changed values crossfade opacity over 160ms, nothing moves").
+          Nothing slides. Under `prefers-reduced-motion` index.css already
+          collapses the duration to nothing.
+        */}
+        <div key={activeTab} className="flex flex-1 flex-col gap-2 animate-in fade-in-0 duration-fast">
+          {mine.map(renderCard)}
+          {mine.length > 0 && others.length > 0 ? (
+            <div className="flex items-center gap-2 px-1 pt-1 text-micro text-ink-3">
+              <span className="h-px flex-1 bg-hairline" aria-hidden />
+              Everyone else
+              <span className="h-px flex-1 bg-hairline" aria-hidden />
+            </div>
+          ) : null}
+          {others.map(renderCard)}
+          {!tasks.length ? (
+            // DESIGN.md §8's empty column: dashed inset box, centred,
+            // still a valid drop target (the highlight above is on the
+            // droppable that wraps this, so it still lights up).
+            <div className="m-1 flex flex-col items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-2 py-6 text-center">
+              <p className="text-body-sm text-ink-3">{filtering ? 'No matches here.' : 'No tasks.'}</p>
+              {elsewhere ? (
+                <button
+                  type="button"
+                  onClick={() => onSelectTab(elsewhere.column)}
+                  aria-label={`Show ${COLUMN_LABEL[elsewhere.column]} — ${matchesElsewhereLabel(elsewhere, filtering)}`}
+                  className="rounded-sm text-label text-brand-700 underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                >
+                  {matchesElsewhereLabel(elsewhere, filtering)}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
+
+/**
+ * Two kinds of drop target now exist, and they need different rules.
+ *
+ * A lane BODY is tall, so `closestCenter` — which measures the dragged
+ * card's centre against each droppable's centre — is right for it: the
+ * nearest lane wins even when the pointer is in the gutter between two.
+ * A tab HEADER is 24px tall and sits directly above that body, so under
+ * plain `closestCenter` a card dragged over the top of a lane could be
+ * nearer the INACTIVE tab's centre than the tall body's, and land in a
+ * column nobody was aiming at. So a tab header only wins when the
+ * pointer is physically inside it (`pointerWithin`), and otherwise it is
+ * excluded from the contest entirely.
+ *
+ * This is also what keeps contract item 8 true without extra code:
+ * during a KEYBOARD drag there is no pointer, `pointerWithin` returns
+ * nothing, and the virtual pointer can only ever reach the active tab's
+ * body — which is the documented gap, not an accident. Reaching the
+ * inactive tab mid-keyboard-drag is out of scope; the tab strip itself is
+ * reachable by ordinary Tab + Arrow keys outside a drag.
+ */
+const boardCollisionDetection: CollisionDetection = (args) => {
+  const onATab = pointerWithin({
+    ...args,
+    droppableContainers: args.droppableContainers.filter((c) => isTabDropId(String(c.id))),
+  });
+  if (onATab.length > 0) return onATab;
+  return closestCenter({
+    ...args,
+    droppableContainers: args.droppableContainers.filter((c) => !isTabDropId(String(c.id))),
+  });
+};
 
 // One column (288px) + its gap (12px), per DESIGN.md's column geometry
 // in §7.3. dnd-kit's default keyboard coordinate getter moves the
@@ -583,6 +923,11 @@ function Column({
 // keyboard on the shared display. One press now covers exactly one
 // column, landing the pointer over the next column's droppable rect so
 // `closestCenter` picks it up immediately.
+//
+// Unchanged by the five-lane grouping (contract item 8): a lane is still
+// `w-column` (288px) with the same 12px gap, so one press still crosses
+// exactly one lane. There are simply two fewer presses to cross the
+// board.
 const COLUMN_STEP = 300;
 const ROW_STEP = 50;
 
@@ -666,6 +1011,33 @@ export function BoardPage() {
     localStorage.setItem(OWNER_FILTER_KEY, ownerFilter);
   }, [ownerFilter]);
 
+  // Which tab each grouped lane is showing, remembered across reloads —
+  // one key, one effect, exactly the idiom `OWNER_FILTER_KEY` above
+  // established. `readStoredTabs` validates what comes back, because
+  // storage can hold anything and an unrecognised column would leave a
+  // lane rendering `undefined` tasks (contract item 6).
+  const [activeTabs, setActiveTabs] = React.useState<ActiveTabs>(() =>
+    readStoredTabs(localStorage.getItem(TAB_STORAGE_KEY))
+  );
+
+  React.useEffect(() => {
+    localStorage.setItem(TAB_STORAGE_KEY, serializeTabs(activeTabs));
+  }, [activeTabs]);
+
+  /**
+   * Show the tab that owns this column. Called by the tab strip, by the
+   * "3 matches in Cleared" affordance, and — contract item 3 — by every
+   * successful move, so a card can never land in a tab the person cannot
+   * see. A card vanishing into a hidden tab is the same defect as a card
+   * vanishing from the board.
+   */
+  const revealColumn = React.useCallback((column: BoardColumn) => {
+    const lane = laneOf(column);
+    if (!lane.group) return;
+    const group = lane.group;
+    setActiveTabs((prev) => (prev[group] === column ? prev : { ...prev, [group]: column }));
+  }, []);
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: columnKeyboardCoordinateGetter })
@@ -712,7 +1084,7 @@ export function BoardPage() {
   const titleByTask = React.useMemo(() => {
     const m = new Map<string, string>();
     if (!board) return m;
-    for (const column of COLUMNS) for (const t of board[column.id]) m.set(t.id, t.title);
+    for (const c of COLUMN_IDS) for (const t of board[c]) m.set(t.id, t.title);
     return m;
   }, [board]);
 
@@ -762,7 +1134,7 @@ export function BoardPage() {
 
   const findColumn = (taskId: string): BoardColumn | null => {
     if (!board) return null;
-    for (const c of COLUMNS) if (board[c.id].some((t) => t.id === taskId)) return c.id;
+    for (const c of COLUMN_IDS) if (board[c].some((t) => t.id === taskId)) return c;
     return null;
   };
 
@@ -774,15 +1146,18 @@ export function BoardPage() {
       return `Picked up "${t?.title ?? 'task'}", ${t?.points_override ?? t?.catalog_points ?? 'unpriced'} points, from ${fromLabel}.`;
     },
     onDragOver({ active, over }) {
-      if (!over) return 'No column under the cursor.';
-      const colId = over.id as BoardColumn;
+      // `over.id` is either a lane body (the bare column id) or a tab
+      // header (`tab:<column>`); both are the same move, so both resolve
+      // through `columnFromDropId`.
+      const colId = over ? columnFromDropId(String(over.id)) : null;
+      if (!colId) return 'No column under the cursor.';
       const t = active.data.current as Task | undefined;
       const refusal = t ? moveRefusal(t, colId, actor) : null;
       return refusal ? `${COLUMN_LABEL[colId]}, not available. ${refusal}` : `Moving over ${COLUMN_LABEL[colId]}.`;
     },
     onDragEnd({ over }) {
-      if (!over) return 'Move cancelled, returned to its column.';
-      const colId = over.id as BoardColumn;
+      const colId = over ? columnFromDropId(String(over.id)) : null;
+      if (!colId) return 'Move cancelled, returned to its column.';
       const waitingOn = NEXT_ACTOR[colId];
       return `Moved to ${COLUMN_LABEL[colId]}.${waitingOn ? ` Waiting on ${waitingOn}.` : ''}`;
     },
@@ -814,6 +1189,15 @@ export function BoardPage() {
       toast.error(refusal);
       return;
     }
+
+    // Contract item 3, and the reason this sits in `moveTask` rather than
+    // in `handleDragEnd`: the card menu moves cards too ("Send back for
+    // rework" lands in Backlog), so putting the reveal on the drag path
+    // alone would still let a menu action drop a card into a hidden tab.
+    // Placed after the refusal check so a refused move never switches
+    // tabs, and before the no-op check so a drop onto the tab a card is
+    // already in still shows it.
+    revealColumn(to);
 
     if (to === 'blocked') {
       setBlockTarget(task);
@@ -899,8 +1283,10 @@ export function BoardPage() {
     dragEndedAt.current = Date.now();
     const { active, over } = e;
     if (!over) return;
+    const to = columnFromDropId(String(over.id));
+    if (!to) return;
     const task = active.data.current as Task;
-    void moveTask(task, over.id as BoardColumn);
+    void moveTask(task, to);
   }
 
   if (!board) {
@@ -920,7 +1306,7 @@ export function BoardPage() {
             </Button>
           }
         />
-        <ResourceView resource={boardResource} skeleton={<SkeletonBoard columns={COLUMNS.length} />}>
+        <ResourceView resource={boardResource} skeleton={<SkeletonBoard columns={BOARD_LANES.length} />}>
           {() => null}
         </ResourceView>
         {createOpen ? (
@@ -958,8 +1344,20 @@ export function BoardPage() {
     BoardColumn,
     Task[]
   >;
-  const totalVisible = COLUMN_IDS.reduce((n, c) => n + visible[c].length, 0);
-  const totalAll = COLUMN_IDS.reduce((n, c) => n + board[c].length, 0);
+  // Per-column counts, filtered and unfiltered. Both are needed by every
+  // tab, and this is the heart of contract item 5: a tab's chip shows the
+  // FILTERED count (so it never promises cards the body won't render),
+  // while the unfiltered count goes in the chip's tooltip so a filtered
+  // zero can never be read as an empty column. The filtered counts are
+  // also what `matchesElsewhere` answers from — offering to switch to a
+  // tab that then renders empty would be the same lie in reverse.
+  const visibleCounts = Object.fromEntries(COLUMN_IDS.map((c) => [c, visible[c].length])) as Record<
+    BoardColumn,
+    number
+  >;
+  const totalCounts = Object.fromEntries(COLUMN_IDS.map((c) => [c, board[c].length])) as Record<BoardColumn, number>;
+  const totalVisible = COLUMN_IDS.reduce((n, c) => n + visibleCounts[c], 0);
+  const totalAll = COLUMN_IDS.reduce((n, c) => n + totalCounts[c], 0);
   const filtering = ownerFilter !== 'all' || needle.length > 0;
 
   // The banner is the decision-maker's action surface, so it is theirs
@@ -968,7 +1366,24 @@ export function BoardPage() {
   const flaggedForCancellation = isOversight ? (board.flagged ?? []) : [];
 
   return (
-    <div>
+    /*
+      DESIGN.md §13: "`overflow-x: auto` with the column headers sticky at
+      `top: 0` inside each column". That was never implemented, and grouping
+      made it bite harder -- a 29-card Cleared tab scrolls its own tab strip
+      off the top of the screen, so the control you need in order to switch
+      back is exactly the thing that disappears.
+      `position: sticky` resolves against the nearest scroll container, so this
+      only works if the lane scroller IS that container. `overflow-x: auto`
+      already makes it one on both axes (per the overflow spec a non-`visible`
+      overflow-x computes overflow-y to `auto`), but with an unbounded height it
+      never actually scrolls vertically -- the page does, and a sticky header
+      inside it slides away with its lane. So the board fills `<main>` and
+      scrolls internally instead: `h-full` + flex column here, `flex-1 min-h-0`
+      on the scroller below. `min-h-0` is load-bearing -- a flex child's default
+      `min-height: auto` refuses to shrink below its content, which is the same
+      trap app-shell.tsx already documents for `<main>` itself.
+    */
+    <div className="flex h-full flex-col">
       <PageHeader
         title="Board"
         description="Drag to move. Every drop goes through the same check a button click would."
@@ -1062,7 +1477,7 @@ export function BoardPage() {
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={boardCollisionDetection}
         accessibility={{ announcements }}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
@@ -1071,18 +1486,28 @@ export function BoardPage() {
           dragEndedAt.current = Date.now();
         }}
       >
-        <div className="flex snap-x snap-proximity gap-3 overflow-x-auto pb-4">
-          {COLUMNS.map((c) => (
-            <Column
-              key={c.id}
-              id={c.id}
-              droppable={c.droppable}
-              tasks={visible[c.id]}
+        <div
+          className="flex min-h-0 flex-1 snap-x snap-proximity gap-3 overflow-x-auto overflow-y-auto pb-4"
+          aria-label="Task board"
+        >
+          {BOARD_LANES.map((lane) => (
+            <Lane
+              key={lane.id}
+              lane={lane}
+              activeTab={activeTabOf(lane, activeTabs)}
+              visible={visible}
+              visibleCounts={visibleCounts}
+              totalCounts={totalCounts}
+              filtering={filtering}
               meId={me?.id}
               actor={actor}
               weekStateById={weekStateById}
               isDragging={activeTask != null}
-              dropRefusal={activeTask ? moveRefusal(activeTask, c.id, actor) : null}
+              // One `moveRefusal` per COLUMN, asked per tab. The mirror
+              // has not learned about groups and must not: a tab is a
+              // presentation of an existing column.
+              refusalFor={(column) => (activeTask ? moveRefusal(activeTask, column, actor) : null)}
+              onSelectTab={revealColumn}
               menuHandlers={menuHandlers}
               onFlagCancellation={isOversight && canWrite ? setCancelTarget : undefined}
               onOpenNotes={setNotesTarget}

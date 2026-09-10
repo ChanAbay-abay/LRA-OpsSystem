@@ -79,6 +79,12 @@ export interface BlockRow {
 }
 
 export interface NowPayloadInput {
+  /**
+   * Whether this caller can actually act on the approvals list. Computed by
+   * the route (read-only accounts and founders without the clearing seat
+   * cannot), passed through so the client never has to re-derive it.
+   */
+  canActOnApprovals: boolean;
   /** The caller's own open tasks, newest activity first. */
   myTasks: TaskRow[];
   /** Open blocks on those tasks (and only those). */
@@ -115,6 +121,7 @@ export interface NowPayloadInput {
  */
 export function assembleNowPayload(input: NowPayloadInput) {
   const {
+    canActOnApprovals,
     myTasks,
     openBlocks,
     blocksIAmHolding,
@@ -216,6 +223,7 @@ export function assembleNowPayload(input: NowPayloadInput) {
     .sort((a, b) => a.blockedSince.localeCompare(b.blockedSince));
 
   return {
+    canActOnApprovals,
     myOpenTasks: myTasks.filter((t) => !blockedTaskIds.has(t.id)).map(slim),
     blocked,
     awaitingMyApproval: awaitingMyApproval.map(slim),
@@ -286,6 +294,22 @@ export default async function nowRoutes(app: FastifyInstance) {
           .select(TASK_COLUMNS)
           .in('id', heldTaskIds)
           .neq('owner_user_id', req.user.id)
+          // OPEN_STATUSES, same filter `myTasks` above uses -- and it is not
+          // cosmetic. Nothing auto-resolves a block when its task clears, so
+          // without this the section accused someone of holding up work that
+          // was already DONE: a row reading "Cleared" and "Waiting on you"
+          // side by side (reproduced 2026-09-10). Worse than the wrong
+          // sentence, the reliability formula keeps charging the named person
+          // -1 point per 8 hours the stale block stays open, forever, for a
+          // task nobody is waiting on. "Clear the task, forget the block" is
+          // the normal way of working, not an edge case.
+          //
+          // The block row itself is deliberately left open rather than
+          // auto-resolved here: `ops.task_blocks` is append-only in every
+          // direction that matters and a resolve is an attributable act, so
+          // inventing one on a read would be the API forging a person's
+          // signature. This screen just stops reporting it.
+          .in('status', OPEN_STATUSES)
       : { data: [], error: null };
     if (heldTasksError) throw heldTasksError;
     const heldTasks = (heldTasksData ?? []) as unknown as TaskRow[];
@@ -295,8 +319,25 @@ export default async function nowRoutes(app: FastifyInstance) {
     // `verified`, and the caller's own tasks are excluded because the
     // trigger already refuses a self-verify/self-clear (a button that
     // can never succeed is worse than no button).
+    // A read-only account (ERC, DCA) and a founder who does not hold the
+    // clearing seat are both excluded, because neither can ever act on this
+    // list -- `not core.is_read_only()` refuses the first and
+    // `core.is_clearing_founder()` the second. Both used to be shown
+    // "Verified, waiting on you to clear" for work they had no path to clear
+    // (reproduced 2026-09-10). `/queue` already got this right for the same
+    // accounts, which is what proves the rule was understood and simply not
+    // carried here: it tells them "You can see everything here, but only the
+    // clearing founder can bank the points."
+    //
+    // Read-only means "sees what oversight sees", so they keep every other
+    // section on this screen; what they lose is a to-do list addressed to
+    // somebody else. A GM is unaffected -- verifying is theirs.
     let awaitingMyApproval: TaskRow[] = [];
-    if (req.user.authority === 'gm' || req.user.authority === 'founder' || req.user.authority === 'admin') {
+    const canActOnApprovals =
+      !req.user.readOnly &&
+      (req.user.authority === 'gm' ||
+        ((req.user.authority === 'founder' || req.user.authority === 'admin') && req.user.isClearingFounder));
+    if (canActOnApprovals) {
       const status = req.user.authority === 'gm' ? 'submitted' : 'verified';
       const { data: queue, error: queueError } = await db
         .schema('ops')
@@ -359,6 +400,16 @@ export default async function nowRoutes(app: FastifyInstance) {
 
     return {
       data: assembleNowPayload({
+        // Sent rather than re-derived, deliberately. The client used to decide
+        // whether to render the approvals section from `authority` alone, so a
+        // read-only founder (ERC, DCA) and a founder without the clearing seat
+        // still got an "Awaiting my approval" panel -- empty after the fix
+        // above, but still a panel addressed to someone with no path to act on
+        // it. A client-side copy of this rule would be a third place it has to
+        // agree, and PLAN.md §11.1 is the story of what happens to mirrors
+        // nobody diffs. One decision, made here; the client renders what it is
+        // told.
+        canActOnApprovals,
         myTasks,
         openBlocks,
         blocksIAmHolding,

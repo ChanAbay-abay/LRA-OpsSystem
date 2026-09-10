@@ -12,6 +12,7 @@ import { PageHeader } from '@/components/layout/app-shell';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
 import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 
 interface Balance {
@@ -37,11 +38,31 @@ interface LedgerRow {
 }
 
 export function PointsPage() {
+  const { me } = useAuth();
   const balanceResource = useResource(
     (signal) => api.get<Balance[]>('/api/points/me', { signal }).then((rows) => rows[0] ?? null),
     []
   );
-  const ledgerResource = useResource((signal) => api.get<LedgerRow[]>('/api/points/ledger', { signal }), []);
+  // `?userId=` is REQUIRED here, not an optimisation.
+  //
+  // `GET /api/points/ledger` returns the WHOLE company's ledger when no
+  // `userId` is given -- deliberately, because `/admin/everything` is its other
+  // consumer and that screen's entire purpose is every row. Omitting it on a
+  // screen titled "My points" rendered all 107 ledger rows for all four people,
+  // unattributed and with no task titles, as if they were the reader's own
+  // (reproduced 2026-09-10). Not an RLS hole -- any ops member may read the
+  // ledger by design (PRD.md §6.1) -- but a person cannot audit their own
+  // points against a list that is not theirs, which is the whole reason this
+  // screen exists.
+  //
+  // Its sibling `/api/points/me` defaults to the caller, and that difference
+  // between two endpoints in the same router is exactly what made this easy to
+  // get wrong.
+  const ledgerResource = useResource(
+    (signal) =>
+      me ? api.get<LedgerRow[]>(`/api/points/ledger?userId=${me.id}`, { signal }) : Promise.resolve([]),
+    [me?.id]
+  );
   const balance = balanceResource.data;
   const [oldestDays, setOldestDays] = React.useState<number | null>(null);
 

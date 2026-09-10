@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildHeaders } from './request-headers';
+import { buildHeaders, isNoContent } from './request-headers';
 
 test('a bodyless request does NOT declare a JSON content type', () => {
   // This is the whole bug. Fastify answers a declared-JSON request with
@@ -46,4 +46,18 @@ test('the token is always attached', () => {
 test('a per-call header wins over the defaults', () => {
   const h = buildHeaders('{}', 'tok', { 'Content-Type': 'text/plain' });
   assert.equal(h['Content-Type'], 'text/plain');
+});
+
+test('204, 205 and 304 are no-content statuses', () => {
+  for (const s of [204, 205, 304]) assert.equal(isNoContent(s), true, `${s} should be no-content`);
+});
+
+test('200 and 201 are NOT no-content — they must still be required to carry { data }', () => {
+  // If 200 were ever treated as no-content, every screen in the app would
+  // render an empty state instead of its data, and nothing would throw.
+  for (const s of [200, 201, 202]) assert.equal(isNoContent(s), false, `${s} must not be treated as no-content`);
+});
+
+test('error statuses are not no-content — they must reach the error branches', () => {
+  for (const s of [400, 403, 404, 409, 422, 500, 503]) assert.equal(isNoContent(s), false);
 });

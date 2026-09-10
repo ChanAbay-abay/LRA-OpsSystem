@@ -8,7 +8,7 @@
  * guess a shape.
  */
 import { getAccessTokenSync } from './session-store';
-import { buildHeaders } from './request-headers';
+import { buildHeaders, isNoContent } from './request-headers';
 
 const API_URL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:3001';
 
@@ -120,6 +120,25 @@ async function request<T>(path: string, init: RequestInit = {}, external?: Abort
 
   const body = await res.json().catch(() => null);
 
+  // A 204 carries no body, and `body.data` on `null` throws a TypeError that
+  // the caller's `catch` then dresses up as a DOMAIN failure.
+  //
+  // Reproduced (2026-09-10): deleting an unused catalog type answers
+  // `204 No Content`, `res.json()` rejects, `body` is null, `body.data` throws
+  // -- and `/catalog`'s delete dialog reported "Could not delete this — it may
+  // already have been used by a task." The type was already permanently gone.
+  // A destructive action that succeeds while telling the person it failed is
+  // worse than one that fails: they will try again, or believe the record is
+  // still there.
+  //
+  // Same shape as the `Content-Type` defect in `request-headers.ts` (PLAN.md
+  // §11.1) -- the client assuming every response looks like the common case.
+  // Checked BEFORE `res.ok`, since 204 is a success and must not fall through
+  // to the error branches below.
+  if (isNoContent(res.status)) {
+    return undefined as T;
+  }
+
   if (res.status >= 500) {
     throw new ApiUnreachableError(body?.error?.message ?? `The server returned an error (HTTP ${res.status}).`);
   }
@@ -129,6 +148,18 @@ async function request<T>(path: string, init: RequestInit = {}, external?: Abort
       body?.error?.message ?? `Request failed with status ${res.status}`,
       res.status,
       body?.error?.code
+    );
+  }
+
+  // A 2xx that is not one of the no-content statuses above is expected to
+  // carry `{ data }` -- that is this API's contract for every such route
+  // (see the file header). An empty body here is a genuine contract
+  // violation, so it must not be silently coerced to `undefined`: that
+  // would turn a broken endpoint into a screen showing nothing, which is
+  // the hardest kind of bug to find from the outside.
+  if (body == null || !('data' in body)) {
+    throw new ApiUnreachableError(
+      `The server answered ${res.status} without the expected body. This is a bug in the API, not in your request.`
     );
   }
 

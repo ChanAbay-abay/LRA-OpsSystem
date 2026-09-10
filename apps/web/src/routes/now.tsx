@@ -102,6 +102,16 @@ interface BlockingOther {
 }
 
 interface NowData {
+  /**
+   * Server-decided (build contract §B, extended 2026-09-10): whether this
+   * caller can actually act on the approvals list. NOT re-derived from
+   * `authority` here — a read-only founder (ERC, DCA) and a founder without
+   * the clearing seat both hold an oversight authority and neither can clear
+   * anything, so an authority-only test showed them a panel addressed to
+   * somebody else. One decision, made in `routes/now.ts`; this screen renders
+   * what it is told. See PLAN.md §11.1 on mirrors nobody diffs.
+   */
+  canActOnApprovals: boolean;
   myOpenTasks: NowTask[];
   blocked: BlockedTask[];
   awaitingMyApproval: NowTask[];
@@ -299,6 +309,8 @@ function Empty({ children }: { children: React.ReactNode }) {
 
 export function NowPage() {
   const { me } = useAuth();
+  // Only decides who may FLAG a cancellation now; the approvals section is
+  // gated by the server's `canActOnApprovals` instead (see `NowData`).
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
 
   const resource = useResource((signal) => api.get<NowData>('/api/now', { signal }), []);
@@ -431,7 +443,16 @@ export function NowPage() {
               </SectionPanel>
 
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {isOversight ? (
+                {/*
+                  `now.canActOnApprovals`, not `isOversight`. The section is
+                  hidden entirely rather than rendered empty — the same rule
+                  Chan gave for /queue and the board's cancellation banner:
+                  "it should just stay blank". A read-only founder or a founder
+                  without the clearing seat is oversight and still has no path
+                  to clear anything, so an authority-only test handed them a
+                  to-do list addressed to somebody else.
+                */}
+                {now.canActOnApprovals ? (
                   <SectionPanel
                     icon={<CheckCircle2 className="size-4 text-pending" aria-hidden />}
                     title="Awaiting my approval"

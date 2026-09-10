@@ -1518,3 +1518,99 @@ produces 1 failure naming the new file and printing the fix. `apps/api`: 70 → 
 artefact. If a *primary* service-role write is later added to `lib/supabase.ts`, the
 exact-set assertion stays green because that module is already declared. Closing it would
 need symbol-level dataflow; the risk is noted in the table entry itself.
+
+### 12.5 Board grouping shipped, and the sticky header DESIGN asked for
+
+Seven lanes are now five, per §12.1 and the contract's nine decisions. Both hard cases hold:
+per-tab dimming (verified mid-drag — the Plan lane stays live with only the This week tab
+greyed, carrying `moveRefusal`'s briefing sentence), and filtered counts on both tab chips
+with a clickable "3 matches in Cleared" in an empty body. `lib/task-permissions.ts` is
+untouched and `moveRefusal` never learned about groups. `lib/board-groups.ts` holds every
+decision as pure, tested functions — 16 of the web app's 104 tests.
+
+The tablist is hand-rolled rather than Radix. Each tab header is a `useDroppable`, which
+with Radix would need `asChild` plus ref composition — the exact indirection behind §11.6's
+portal defect — and all it buys is roving focus, which is a few lines and a unit-tested
+`nextTabIndex`.
+
+**Two things I fixed on top of the lane's work.**
+
+**The sticky lane header — DESIGN.md §13's requirement, never implemented, and grouping made
+it bite harder.** A 29-card Cleared tab scrolled its own tab strip off the top of the
+screen, so the control you need in order to switch back was exactly the thing that
+disappeared. The reason it had never worked is worth recording, because it will recur:
+`position: sticky` resolves against the nearest scroll container, and the lane scroller
+already was one on both axes (per the overflow spec a non-`visible` `overflow-x` computes
+`overflow-y` to `auto`) — but with an unbounded height it never actually scrolled
+vertically. The page did, and a sticky header inside it slid away with its lane. So the
+board now fills `<main>` and scrolls internally: `h-full` flex column, `flex-1 min-h-0` on
+the scroller. `min-h-0` is load-bearing, the same trap `app-shell.tsx` already documents for
+`<main>` itself.
+
+**What I deliberately did NOT do:** make the five lanes fit at 1440px. Five × 288px + gaps
+overflows a 1200px content area, so the board still scrolls horizontally, and the temptation
+is to shrink the lanes now that there are fewer of them. DESIGN.md §11 forbids it in as many
+words — *"7 columns means horizontal scroll below 2100px — that is correct, do not shrink
+the columns to fit"* — and the reason is density: 288px is what a card's title, owner, chips
+and point value need without truncating. Grouping bought a shorter scroll, not a scroll-free
+board, and that was the right thing to buy.
+
+### 12.6 The adversarial pass, and its four Majors
+
+An adversarial sweep of every screen except the board returned 0 Blocker / 4 Major / 7 Minor
+/ 5 Nit, plus 4 whose fix lands in another session's files. All four Majors are fixed and
+each was verified in the running app, not reasoned about.
+
+**1. A permanent delete succeeded while telling the person it had failed.** `api.ts`'s
+`request()` ended with `return body.data`, and `routes/catalog.ts` answers `204 No Content`
+— so `res.json()` rejected, `body` was `null`, `body.data` threw a `TypeError`, and the
+delete dialog's `catch` dressed that up as the domain lie *"Could not delete this — it may
+already have been used by a task."* The catalog type was already permanently gone.
+
+This is the **same class as §11.1's `Content-Type` defect**: the client assuming every
+response looks like the common case. A destructive action that succeeds while reporting
+failure is worse than one that fails — the person tries again, or believes the record
+survived. Fixed with a no-content check ahead of the error branches, plus its inverse: a
+2xx that is *not* no-content must carry `{ data }` or it throws, so a genuinely broken
+endpoint cannot silently render as an empty screen. Verified by creating a throwaway catalog
+type and deleting it through the UI: row gone, count 16 → 15, no error, nothing else touched.
+
+**2. "Work you are holding up" accused people of blocking already-cleared work.** The held
+tasks query had no status filter, unlike `myTasks` beside it, so a row could read `Cleared`
+and *"Waiting on you"* side by side — and because nothing auto-resolves a block when its
+task clears, the reliability formula kept charging the named person −1 point per 8 hours,
+forever, for work nobody was waiting on. "Clear the task, forget the block" is the normal way
+of working, not an edge case. The block row is deliberately left open rather than
+auto-resolved: `ops.task_blocks` is append-only and a resolve is an attributable act, so
+inventing one on a *read* would be the API forging someone's signature. The screen simply
+stops reporting it.
+
+**3. Read-only observers were handed an approval queue they can never act on.** ERC and DCA
+hold `founder` authority, so an authority-only test showed them *"Verified, waiting on you to
+clear"* — as it did any founder without the clearing seat. Fixed server-side, and then the
+client's own copy of the rule was **deleted rather than corrected**: `/api/now` now returns
+`canActOnApprovals` and the screen renders what it is told. A third place for this rule to
+have to agree is how §11.1 happened. Verified: ERC no longer gets the section at all (hidden,
+not rendered empty — Chan's "it should just stay blank"), and a GM still does.
+
+**4. "My points" showed the whole company's ledger.** `/api/points/ledger` returns every row
+when no `userId` is given — deliberately, because `/admin/everything` is its other consumer
+— and `/points` omitted the parameter, rendering all 107 rows for all four people,
+unattributed. Not an RLS hole (any ops member may read the ledger, PRD §6.1), but a person
+cannot audit their own points against a list that is not theirs, which is the only reason
+that screen exists. Its sibling `/api/points/me` defaults to the caller, and that
+inconsistency between two endpoints in one router is what made it easy to get wrong.
+Verified: founder now sees 7 own rows, and the `+3` cleared row reconciles with the
+"Cleared this week 3" figure above it.
+
+**Still open, deliberately:**
+- `/queue` and `/digest` hang on the app's loading state forever when the API is down, while
+  every other route shows a Retry panel. Root cause is exact (`App.tsx` has a loading branch
+  and no error branch) but that file belongs to another session; routed to them.
+- **`/admin/everything` and `/admin/audit` have had zero UI coverage**, because none of the
+  six demo logins holds `admin` authority. That is a hole, not a pass. Creating an admin demo
+  account is a permission change on the highest-privilege class in the platform, so it waits
+  for Chan rather than being done quietly.
+- The briefing open/close and any Clear/Verify were not exercised: irreversible. **The Monday
+  flow's two most important writes remain browser-unverified** — the thing to fix first with
+  a disposable week.
