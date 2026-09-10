@@ -1675,3 +1675,32 @@ a dead port, restart only the Vite on 5173, drive, then restore. `:3099` stays u
 other session the whole time, and there is no CORS trap because there is no server there to
 refuse the origin. Two people making the same wrong move an hour apart is a good sign it is
 the obvious one, which is exactly why it is written down here instead of remembered.
+
+### 12.9 Scoping the disposable week — the trap to avoid
+
+The Monday briefing's `open`/`close` and every Clear/Verify have **never been driven through
+a browser**, because they are irreversible. After §12.7 that matters more than it looks:
+three-for-three, this project's defects have had a correct response and a broken side
+effect, so "the endpoint tests pass" is demonstrably the wrong evidence for exactly these
+two transitions — and they are the ritual the whole system exists for.
+
+**The trap, and it is the tempting one:** clicking open and close once, seeing no error, and
+calling it verified. The seam these three defects lived in is invisible to a click too.
+Opening a week writes a ledger, generates recurring tasks and stamps a briefing; closing it
+scores everyone. **Any of those can half-happen behind a 200.** A click proves the request
+was accepted; it proves nothing about what the handler did on the way.
+
+So the requirement is that the week be **inspectable after the fact, not merely survivable**:
+
+- seeded and named as disposable, so nothing downstream — scoreboard windows, reliability
+  ratios, carry-over counts — silently counts it as a real week;
+- assertions on the *side effects*, row by row: the ledger rows written, the recurring tasks
+  generated (and the idempotency of a retried generation), the briefing stamp, the closing
+  scores;
+- reversible or throwaway, so the second run is as cheap as the first. A test you can only
+  run once is a test nobody runs.
+
+That is a piece of work to scope, not a brave click at the end of a session, which is why it
+is written down here rather than attempted. Credit where due: the framing that a click is as
+blind as an endpoint test came from the peer session, and it is the argument that turns
+"try it on a quiet Monday" into an obviously bad plan.
