@@ -1489,6 +1489,189 @@ select pg_temp.expect_allowed('week-guard',
 
 reset role;
 
+-- =======================================================================
+-- Who may resolve a block
+-- (20260910190000_ops_task_block_owner_resolves.sql).
+--
+-- The policy grants four identities, and this section proves each one
+-- separately plus the two refusals that matter. Every assertion needs
+-- its OWN block row: `ops.stamp_task_block_timestamps` makes
+-- `resolved_at` immutable once set, so a resolved block cannot be
+-- reused as the fixture for the next attempt.
+--
+-- The personas are chosen so each allow exercises exactly ONE branch:
+--   * `broker` resolving a block on their own task is the NEW branch
+--     alone -- they did not declare it (sales did) and they are not its
+--     named blocking user (gm is), and they are staff, so
+--     core.is_oversight() is false;
+--   * `broker` resolving a block on SALES's task is the named-blocking-
+--     user branch alone -- there they own nothing;
+--   * `sales` resolving their own declaration is the creator branch.
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+
+-- A staff ops member with no relationship at all to the blocks below --
+-- not an owner, not a creator, not a named blocking user. The existing
+-- `other` persona cannot serve here: it is deliberately NOT an ops
+-- member, so it would be refused by core.is_member('ops') and the test
+-- would pass for the wrong reason.
+insert into t_ids (k, v) select 'blk_bystander', gen_random_uuid();
+insert into auth.users (id, email, instance_id, aud, role)
+select v, 'test-' || k || '@lra.invalid', '00000000-0000-0000-0000-000000000000',
+       'authenticated', 'authenticated'
+from t_ids where k = 'blk_bystander';
+insert into core.people (person_code, first_name, last_name, email)
+select 'TEST-' || upper(k), 'Blk', 'Bystander', 'test-' || k || '@lra.invalid'
+from t_ids where k = 'blk_bystander';
+insert into core.users (id, email, authority, person_id)
+select t.v, 'test-' || t.k || '@lra.invalid', 'staff'::core.authority,
+       (select id from core.people where person_code = 'TEST-' || upper(t.k))
+from t_ids t where t.k = 'blk_bystander';
+insert into core.memberships (user_id, module, position)
+select v, 'ops', 'other' from t_ids where k = 'blk_bystander';
+
+-- Three tasks, one per owner the assertions below need. Created as the
+-- system role for the same reason the Phase 3 fixtures above are.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='broker'), (select v from t_meta where k='task_type'),
+         'TEST-blk-owned-by-broker', 'in_progress', (select uid from p where k='broker')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'blk_task_broker', id from ins;
+
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-blk-owned-by-sales', 'in_progress', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'blk_task_sales', id from ins;
+
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='readonly'), (select v from t_meta where k='task_type'),
+         'TEST-blk-owned-by-readonly', 'in_progress', (select uid from p where k='readonly')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'blk_task_readonly', id from ins;
+
+-- Five open blocks, all declared BY sales (so `created_by` is never the
+-- persona under test except in the creator case), all naming gm as the
+-- blocking user (so `blocking_user_id` is never the persona under test
+-- except in the named-user case).
+with ins as (
+  insert into ops.task_blocks (task_id, target, blocking_user_id, reason, created_by)
+  values ((select v from t_meta where k='blk_task_broker'), 'person',
+          (select uid from p where k='gm'), 'waiting on the GM to send the file',
+          (select uid from p where k='sales'))
+  returning id
+)
+insert into t_meta (k, v) select 'blk_for_owner', id from ins;
+
+with ins as (
+  insert into ops.task_blocks (task_id, target, blocking_user_id, reason, created_by)
+  values ((select v from t_meta where k='blk_task_broker'), 'person',
+          (select uid from p where k='gm'), 'waiting on the GM to send the second file',
+          (select uid from p where k='sales'))
+  returning id
+)
+insert into t_meta (k, v) select 'blk_for_creator', id from ins;
+
+with ins as (
+  insert into ops.task_blocks (task_id, target, blocking_user_id, reason, created_by)
+  values ((select v from t_meta where k='blk_task_sales'), 'person',
+          (select uid from p where k='broker'), 'waiting on the broker to confirm the listing',
+          (select uid from p where k='sales'))
+  returning id
+)
+insert into t_meta (k, v) select 'blk_for_named_user', id from ins;
+
+with ins as (
+  insert into ops.task_blocks (task_id, target, blocking_user_id, reason, created_by)
+  values ((select v from t_meta where k='blk_task_broker'), 'person',
+          (select uid from p where k='gm'), 'waiting on the GM to send the third file',
+          (select uid from p where k='sales'))
+  returning id
+)
+insert into t_meta (k, v) select 'blk_for_bystander', id from ins;
+
+with ins as (
+  insert into ops.task_blocks (task_id, target, blocking_user_id, reason, created_by)
+  values ((select v from t_meta where k='blk_task_readonly'), 'person',
+          (select uid from p where k='gm'), 'waiting on the GM before the read-only owner can move',
+          (select uid from p where k='sales'))
+  returning id
+)
+insert into t_meta (k, v) select 'blk_for_readonly_owner', id from ins;
+
+set local role authenticated;
+
+-- === THE DEFECT ITSELF: the owner of the blocked task ================
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_allowed('blocks',
+  'the OWNER of a blocked task CAN resolve a block they did not declare -- the defect '
+  'Chan reported ("users cant unblock a task"): the board showed them the Resolve '
+  'button and RLS refused the write',
+  $sql$update ops.task_blocks
+       set resolved_at = now(), resolved_by = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='blk_for_owner')$sql$);
+
+select pg_temp.expect_rows('blocks',
+  'that resolve really landed -- the block is closed, not merely un-refused',
+  $sql$select count(*) from ops.task_blocks
+       where id = (select v from t_meta where k='blk_for_owner') and resolved_at is not null$sql$, 1);
+
+-- === The three branches that already existed, still intact ===========
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('blocks',
+  'the block''s CREATOR can still resolve it (unchanged branch)',
+  $sql$update ops.task_blocks
+       set resolved_at = now(), resolved_by = (select uid from p where k='sales')
+       where id = (select v from t_meta where k='blk_for_creator')$sql$);
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_allowed('blocks',
+  'the NAMED blocking user can still resolve a block on someone else''s task, where they '
+  'are neither owner nor creator (unchanged branch)',
+  $sql$update ops.task_blocks
+       set resolved_at = now(), resolved_by = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='blk_for_named_user')$sql$);
+
+-- === The refusals ====================================================
+
+select pg_temp.become((select uid from p where k='blk_bystander'));
+select pg_temp.expect_blocked('blocks',
+  'an unrelated staff ops member CANNOT resolve a block -- the new owner branch widens '
+  'authority by exactly one identity, not to every member',
+  $sql$update ops.task_blocks
+       set resolved_at = now(), resolved_by = (select uid from p where k='blk_bystander')
+       where id = (select v from t_meta where k='blk_for_bystander')$sql$);
+
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_blocked('blocks',
+  'a read-only founder CANNOT resolve a block even on a task they own -- the new branch '
+  'sits inside the `not core.is_read_only()` wrapper, like every other branch',
+  $sql$update ops.task_blocks
+       set resolved_at = now(), resolved_by = (select uid from p where k='readonly')
+       where id = (select v from t_meta where k='blk_for_readonly_owner')$sql$);
+
+select pg_temp.expect_rows('blocks',
+  'both refused blocks are still open, so neither refusal was a silent partial write',
+  $sql$select count(*) from ops.task_blocks
+       where id in ((select v from t_meta where k='blk_for_bystander'),
+                    (select v from t_meta where k='blk_for_readonly_owner'))
+         and resolved_at is null$sql$, 2);
+
+reset role;
+
 -- ---------------------------------------------------------------------
 -- Report
 -- ---------------------------------------------------------------------

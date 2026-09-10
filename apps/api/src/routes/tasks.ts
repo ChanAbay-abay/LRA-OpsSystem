@@ -148,6 +148,47 @@ const blockSchema = z.object({
   reason: z.string().min(10, 'a block needs a written reason of at least 10 characters'),
 });
 
+/**
+ * What a block NAMES, as one display string — the person, the blocking
+ * task's title, or the free-text outside party.
+ *
+ * Extracted 2026-09-10 because `blockingName` was computed twice (here
+ * and in `routes/now.ts`) and both copies read `blocking_user_id ? name
+ * : blocking_external` — which silently returned `null` for a
+ * `task`-target block, so a block on another task rendered as "Waiting
+ * on someone else" with no title anywhere. That was invisible until the
+ * UI's block dialog gained a real target picker (same date) and made
+ * task/person targets reachable outside seeded data; the columns and
+ * the `chk_ops_task_blocks_one_target` constraint have supported all
+ * three since Phase 3.
+ *
+ * Switches on `target` rather than on which column happens to be
+ * non-null: `target` is the declared intent and the check constraint
+ * already guarantees the two agree, so reading intent cannot fall
+ * through to the wrong branch. A missing map entry returns `null` — the
+ * caller renders an em dash for an absence (DESIGN.md §8), it does not
+ * invent a name.
+ */
+export function blockDisplayName(
+  block: {
+    target: string;
+    blocking_user_id: string | null;
+    blocking_task_id?: string | null;
+    blocking_external: string | null;
+  },
+  nameByUserId: Map<string, string | null>,
+  titleByTaskId: Map<string, string>
+): string | null {
+  switch (block.target) {
+    case 'person':
+      return block.blocking_user_id ? (nameByUserId.get(block.blocking_user_id) ?? null) : null;
+    case 'task':
+      return block.blocking_task_id ? (titleByTaskId.get(block.blocking_task_id) ?? null) : null;
+    default:
+      return block.blocking_external;
+  }
+}
+
 /** Attach `ownerPosition` / `ownerName` to a batch of tasks, per Chan's ask that position mean something in the board's grouping. */
 export async function enrichWithOwners<T extends { owner_user_id: string }>(
   db: ReturnType<typeof serviceClient>,
@@ -343,6 +384,50 @@ export default async function tasksRoutes(app: FastifyInstance) {
     }
 
     return { data: { ...columns, flagged } };
+  });
+
+  /**
+   * ONE task, in exactly the shape a `/board` card carries.
+   *
+   * Exists so a slim list screen (Now) can open the board's full task
+   * detail modal without every list endpoint having to carry the whole
+   * row. The shape is not "similar to" a board card, it IS one: the same
+   * `enrichWithOwners` / `openBlockCounts` / `noteCounts` helpers, run on
+   * a single-element batch. Reimplementing the join here is how the two
+   * would silently drift apart the next time a card gains a field.
+   *
+   * ROUTE ORDER. Fastify's router (find-my-way) is a radix tree and
+   * always prefers a static segment over a parametric one, so this
+   * cannot shadow the literal `/board` above regardless of registration
+   * order -- but that is a property of a dependency, not of this file,
+   * so `test/tasks-route.test.ts` asserts it against the real router
+   * rather than trusting the reading.
+   */
+  app.get('/:id', async (req) => {
+    const { id } = req.params as { id: string };
+
+    // A non-uuid id is not a task, and letting it reach Postgres turns
+    // it into an unmapped 22P02 (invalid_text_representation) -- a 500
+    // for what is plainly a 404. This is also the honest answer if a
+    // future literal route ever did fall through to this handler.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new ApiError(404, 'task not found', 'NOT_FOUND');
+    }
+
+    const db = userClient(req.accessToken);
+    const { data, error } = await db.schema('ops').from('tasks').select('*').eq('id', id).maybeSingle();
+    if (error) throw error;
+    // RLS filtering a row out and the row not existing are the same
+    // answer to the caller on purpose: a 403 here would confirm the
+    // existence of a task they may not read.
+    if (!data) throw new ApiError(404, 'task not found', 'NOT_FOUND');
+
+    const svc = serviceClient();
+    const [enriched] = await enrichWithOwners(svc, [data]);
+    const counts = await openBlockCounts(svc, [id]);
+    const notes = await noteCounts(svc, [id]);
+
+    return { data: { ...enriched, openBlockCount: counts.get(id) ?? 0, noteCount: notes.get(id) ?? 0 } };
   });
 
   app.post('/', async (req) => {
@@ -638,10 +723,22 @@ export default async function tasksRoutes(app: FastifyInstance) {
       : [];
     const nameById = new Map(named.map((n) => [n.owner_user_id, n.ownerName]));
 
+    // Titles for `task`-target blocks. Read on `userClient`, not the
+    // service client: `ops.tasks` is readable to every ops member
+    // already, so this needs no RLS bypass and does not get one. Only
+    // paid for when a task-target block actually exists.
+    const blockingTaskIds = [
+      ...new Set((data ?? []).map((b) => b.blocking_task_id).filter((v): v is string => Boolean(v))),
+    ];
+    const { data: blockingTasks } = blockingTaskIds.length
+      ? await db.schema('ops').from('tasks').select('id, title').in('id', blockingTaskIds)
+      : { data: [] as { id: string; title: string }[] };
+    const titleById = new Map((blockingTasks ?? []).map((t) => [t.id, t.title]));
+
     return {
       data: (data ?? []).map((b) => ({
         ...b,
-        blockingName: b.blocking_user_id ? (nameById.get(b.blocking_user_id) ?? null) : b.blocking_external,
+        blockingName: blockDisplayName(b, nameById, titleById),
         createdByName: nameById.get(b.created_by) ?? null,
         resolvedByName: b.resolved_by ? (nameById.get(b.resolved_by) ?? null) : null,
       })),
@@ -719,14 +816,42 @@ export async function blocksRoutes(app: FastifyInstance) {
   app.post('/:id/resolve', async (req) => {
     const { id } = req.params as { id: string };
     const db = userClient(req.accessToken);
+
+    // `.is('resolved_at', null)` narrows this to blocks that are actually
+    // OPEN, and it is about the message the caller gets, not about
+    // authority.
+    //
+    // `resolved_at` still has to be sent: the 20260910160000 trigger
+    // stamps it with `now()` the moment it FIRST becomes non-null, so a
+    // value is what starts the transition -- the trigger's job is to make
+    // sure it is the server's clock and not the client's. But that same
+    // trigger raises `resolved_at is a server-derived stamp and cannot be
+    // changed once set` on a SECOND resolve, and that sentence is written
+    // for whoever tampers with the column, not for a person who
+    // double-clicked or whose colleague resolved the block a moment
+    // earlier. With this filter the second attempt simply matches no row
+    // and gets the sentence below.
     const { data, error } = await db
       .schema('ops')
       .from('task_blocks')
       .update({ resolved_at: new Date().toISOString(), resolved_by: req.user.id })
       .eq('id', id)
+      .is('resolved_at', null)
       .select()
-      .single();
+      .maybeSingle();
     if (error) throw new ApiError(422, error.message, error.code ?? 'RESOLVE_REFUSED');
+    if (!data) {
+      // Three causes, indistinguishable from here and all needing the
+      // same next step from the reader: no such block, the block is
+      // already resolved, or RLS refused this caller the update. Naming
+      // which one would leak whether a block the caller cannot touch
+      // exists.
+      throw new ApiError(
+        409,
+        'That block is already resolved, or it is not yours to resolve.',
+        'BLOCK_NOT_OPEN'
+      );
+    }
     return { data };
   });
 }

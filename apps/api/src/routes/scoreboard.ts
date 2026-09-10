@@ -110,11 +110,202 @@ interface ClearedTaskRow {
   cleared_at: string | null;
 }
 
+// ---------------------------------------------------------------------
+// Point windows (Chan, 2026-09-10: "i dont see a point in seeing the
+// raw points. can we have a display as well of points that are yet to
+// be done, points pending and waiting approval, and completed. then
+// another one to have the points with total points that they could
+// have. should have record of this week, month, 3 month, and overall").
+//
+// Four windows, one read. Everything below is pure and lives outside
+// `buildScoreboard` so the bucketing and the valuation fallbacks can be
+// tested without a database — the fallbacks are the part most likely to
+// be wrong, because a task's worth is recorded in three different
+// columns depending on how far it got.
+// ---------------------------------------------------------------------
+
+export interface PointBuckets {
+  label: string;
+  /** Weeks actually inside this window — fewer than the nominal 4/13 while the company is young. */
+  weekCount: number;
+  toDo: number;
+  pending: number;
+  completed: number;
+  /** `pending_cancellation`: flagged but undecided, so still on the plate and still counted in `possible`. */
+  atRisk: number;
+  possible: number;
+  taskCounts: { toDo: number; pending: number; completed: number; atRisk: number };
+}
+
+export interface ScoreboardPeriods {
+  week: PointBuckets;
+  month: PointBuckets;
+  quarter: PointBuckets;
+  all: PointBuckets;
+}
+
+/** The columns the windows need, and nothing else — one read serves all four. */
+export interface PeriodTaskRow {
+  owner_user_id: string;
+  status: string;
+  week_id: string;
+  points_awarded: number | null;
+  points_override: number | null;
+  catalog_points: number | null;
+}
+
+type Bucket = 'toDo' | 'pending' | 'completed' | 'atRisk';
+
+/**
+ * Which bucket a status falls in, or null for "not a point anyone is
+ * owed either way". `cancelled` is the only null: a cancelled task is
+ * not a point someone failed to earn, so it is excluded from every
+ * bucket AND from `possible` — counting it would invent a debt out of a
+ * decision to stop doing something.
+ */
+function bucketFor(status: string): Bucket | null {
+  switch (status) {
+    case 'todo':
+    case 'in_progress':
+    // A returned task is work still owed, not work banked — it belongs
+    // with `todo`, which is also the only status the trigger lets it
+    // move to.
+    case 'rejected':
+      return 'toDo';
+    case 'submitted':
+    case 'verified':
+      return 'pending';
+    case 'cleared':
+      return 'completed';
+    case 'pending_cancellation':
+      return 'atRisk';
+    case 'cancelled':
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * What a task is worth in these windows.
+ *
+ * A CLEARED task's worth is settled: `points_awarded` is what the
+ * trigger actually banked, and it is the only figure that matches the
+ * ledger. Anything not yet cleared has no awarded figure, so the best
+ * available claim is the override if oversight set one, else the
+ * catalog snapshot taken at creation. A task with neither (an ad-hoc
+ * task with no type, before anyone priced it) is worth 0 — an honest
+ * zero, not a guess.
+ */
+export function taskWorth(t: PeriodTaskRow): number {
+  if (t.status === 'cleared') return t.points_awarded ?? t.points_override ?? t.catalog_points ?? 0;
+  return t.points_override ?? t.catalog_points ?? 0;
+}
+
+function emptyBuckets(label: string, weekCount: number): PointBuckets {
+  return {
+    label,
+    weekCount,
+    toDo: 0,
+    pending: 0,
+    completed: 0,
+    atRisk: 0,
+    possible: 0,
+    taskCounts: { toDo: 0, pending: 0, completed: 0, atRisk: 0 },
+  };
+}
+
+function bucketize(tasks: PeriodTaskRow[], label: string, weekCount: number): PointBuckets {
+  const out = emptyBuckets(label, weekCount);
+  for (const t of tasks) {
+    const bucket = bucketFor(t.status);
+    if (!bucket) continue;
+    out[bucket] += taskWorth(t);
+    out.taskCounts[bucket] += 1;
+  }
+  // "Total points they could have" (Chan's second display) is the sum of
+  // the four, not a separate figure — so it can never disagree with the
+  // parts it is made of.
+  out.possible = out.toDo + out.pending + out.completed + out.atRisk;
+  return out;
+}
+
+/**
+ * The four windows, per person, from ONE task list.
+ *
+ * Windows are Manila weeks (`ops.weeks.week_start`) anchored on the
+ * reference week — the week the rest of this route is reporting on, so
+ * `?weekId=` moves all of them together rather than leaving "this week"
+ * and "last 4 weeks" describing different periods. `month`/`quarter` are
+ * the 4 / 13 most recent weeks that EXIST up to and including the
+ * reference week, not calendar arithmetic: a week with no row is a week
+ * the company did not run, and stretching the window over it would
+ * quietly change what "last 4 weeks" means.
+ *
+ * `all` is deliberately NOT re-anchored — it is every week that exists,
+ * including any after the reference week. "Overall" is a person's whole
+ * record; re-anchoring it would make a founder browsing back to March
+ * see a shrinking all-time total, which is not what the word means.
+ *
+ * Every user in `userIds` gets a row even with no tasks at all: four
+ * genuine zeros, with the real `weekCount` attached, rather than a
+ * missing key the client has to guess at.
+ */
+export function buildPeriodsByUser(
+  tasks: PeriodTaskRow[],
+  weeks: Array<{ id: string; week_start: string }>,
+  referenceWeekStart: string,
+  userIds: string[]
+): Map<string, ScoreboardPeriods> {
+  const descending = [...weeks].sort((a, b) => b.week_start.localeCompare(a.week_start));
+  const anchored = descending.filter((w) => w.week_start <= referenceWeekStart);
+
+  const windows: Array<{ key: keyof ScoreboardPeriods; label: string; weekIds: Set<string> }> = [
+    {
+      key: 'week',
+      label: 'This week',
+      weekIds: new Set(descending.filter((w) => w.week_start === referenceWeekStart).map((w) => w.id)),
+    },
+    { key: 'month', label: 'Last 4 weeks', weekIds: new Set(anchored.slice(0, 4).map((w) => w.id)) },
+    { key: 'quarter', label: 'Last 13 weeks', weekIds: new Set(anchored.slice(0, 13).map((w) => w.id)) },
+    { key: 'all', label: 'All time', weekIds: new Set(descending.map((w) => w.id)) },
+  ];
+
+  const tasksByUser = new Map<string, PeriodTaskRow[]>();
+  for (const t of tasks) {
+    const arr = tasksByUser.get(t.owner_user_id) ?? [];
+    arr.push(t);
+    tasksByUser.set(t.owner_user_id, arr);
+  }
+
+  const out = new Map<string, ScoreboardPeriods>();
+  for (const userId of userIds) {
+    const mine = tasksByUser.get(userId) ?? [];
+    const periods = {} as ScoreboardPeriods;
+    for (const w of windows) {
+      periods[w.key] = bucketize(
+        mine.filter((t) => w.weekIds.has(t.week_id)),
+        w.label,
+        w.weekIds.size
+      );
+    }
+    out.set(userId, periods);
+  }
+  return out;
+}
+
 export interface ScoreboardRow {
   userId: string;
   name: string | null;
   position: string;
   authority: string | null;
+  /**
+   * `core.users.read_only` (ERC, DCA). Carried on the row so the LIST
+   * handler can leave them off the team rail while `GET /:userId` still
+   * resolves their profile -- see the filter in the `/` handler below for
+   * why those two answers differ.
+   */
+  readOnly: boolean;
   currentWeek: {
     weekId: string;
     weekStart: string;
@@ -141,6 +332,8 @@ export interface ScoreboardRow {
   hoursTheyWereBlocked: number;
   /** PRD.md §4: `cleared_at - first_in_progress_at`, minus blocked hours, median across all-time cleared tasks. Founder/admin only, same gate as reliability. */
   cycleTime: MedianCycleTimeResult;
+  /** Points to do / pending / completed / at risk, over four windows. Visible to everyone — see `stripReliability` below. */
+  periods: ScoreboardPeriods;
 }
 
 interface ScoreboardSummary {
@@ -381,6 +574,33 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
     clearedTasksByUser.set(t.owner_user_id, arr);
   }
 
+  // --- The four point windows (see `buildPeriodsByUser` above). ONE
+  // task read covers all four: filtering four times in memory is free,
+  // and four round trips that each saw the database at a slightly
+  // different moment could disagree with each other about the same
+  // task — the identical reasoning `/api/now` and `/api/briefing` are
+  // built on. Every week row is fetched too (`ops.weeks` holds one row
+  // per week the company has run, so this stays small for years).
+  const { data: allWeeksData, error: allWeeksError } = await db
+    .schema('ops')
+    .from('weeks')
+    .select('id, week_start')
+    .order('week_start', { ascending: false });
+  if (allWeeksError) throw allWeeksError;
+
+  const { data: periodTasksData, error: periodTasksError } = await db
+    .schema('ops')
+    .from('tasks')
+    .select('owner_user_id, status, week_id, points_awarded, points_override, catalog_points');
+  if (periodTasksError) throw periodTasksError;
+
+  const periodsByUser = buildPeriodsByUser(
+    (periodTasksData ?? []) as PeriodTaskRow[],
+    allWeeksData ?? [],
+    currentWeek.week_start,
+    roster.map((m) => m.userId)
+  );
+
   // --- This week's raw/capped points, from the same view /points reads.
   const { data: balancesData, error: balancesError } = await db
     .schema('ops')
@@ -441,6 +661,7 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
         name: m.name,
         position: m.position,
         authority: m.authority,
+        readOnly: m.readOnly,
         currentWeek: {
           weekId: currentWeek!.id,
           weekStart: currentWeek!.week_start,
@@ -456,6 +677,10 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
         hoursBlockedByThem: Math.round((blockedHoursByBlocker.get(m.userId) ?? 0) * 10) / 10,
         hoursTheyWereBlocked: Math.round((blockedHoursByOwner.get(m.userId) ?? 0) * 10) / 10,
         cycleTime: medianCycleTimeHours(clearedTasksByUser.get(m.userId) ?? []),
+        // `buildPeriodsByUser` was handed the whole roster and the rows
+        // below are a subset of it, so this key always exists -- the
+        // assertion is Map.get's type, not a real possibility.
+        periods: periodsByUser.get(m.userId)!,
       };
     })
     .sort((a, b) => b.currentWeek.cappedScore - a.currentWeek.cappedScore);
@@ -490,6 +715,12 @@ function stripReliability(row: ScoreboardRow): PublicRow {
   // key is genuinely absent from the JSON for anyone who isn't
   // founder/admin, not hidden client-side (Chan's brief, PLAN.md §10 #4's
   // established pattern applied to the same gate).
+  //
+  // `periods` deliberately SURVIVES this function. It is points and
+  // velocity — the caller's own kind of number, which §10.2 keeps
+  // visible to staff on Chan's own reasoning ("the point system exists
+  // so staff can track their own progress"). Stripping it would leave a
+  // staff member's scoreboard card empty of the very thing it is for.
   const { reliability: _reliability, reliabilitySettings: _reliabilitySettings, cycleTime: _cycleTime, ...rest } = row;
   return {
     ...rest,
@@ -516,10 +747,30 @@ export default async function scoreboardRoutes(app: FastifyInstance) {
     // is a real access rule, enforced here, not a client-side hide.
     // Independent of that rule: reliability/hit-rate are stripped per
     // row for anyone who isn't founder/admin, even oversight (`gm`).
+    // A read-only account (ERC, DCA -- the two other brokerages'
+    // principals, who watch LRA but do not work in it) can never own,
+    // submit or clear a task, so its card was a permanently empty seat on
+    // the team's rail: not "scored zero this week" but "cannot ever
+    // score", which is a different claim and one the card had no way to
+    // make. They still SEE the whole scoreboard -- read-only is a flag on
+    // the write half, never the read half (PLAN.md §10) -- they are simply
+    // not among the people it measures.
+    //
+    // Filtered HERE and not in `buildScoreboard`, deliberately: `GET
+    // /api/scoreboard/:userId` reads the same summary, and dropping the
+    // row upstream would make a read-only person's own profile 404 with
+    // "not an active ops member", which is false. The team list and one
+    // named person are different questions and get different answers.
+    //
+    // Judgement call, flagged in PLAN.md §11.4, reversible by deleting
+    // this one predicate. `routes/briefing.ts`'s standup scorecard walks
+    // the same roster and still lists them; that screen is about who is in
+    // the room, which is arguably a different question, so it was left
+    // alone rather than changed by extension of this reasoning.
     const rows = (
       summary.visibility === 'oversight_only' && req.user.authority === 'staff'
         ? summary.rows.filter((r) => r.userId === req.user.id)
-        : summary.rows
+        : summary.rows.filter((r) => !r.readOnly)
     ).map((r) => (canSeeReliability ? r : stripReliability(r)));
 
     return { data: { ...summary, rows } };

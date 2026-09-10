@@ -20,13 +20,20 @@ export interface RosterMember {
   authority: string | null;
   position: string;
   name: string | null;
+  /**
+   * `core.users.read_only` — a strictly read-only account (ERC, DCA).
+   * Carried on the roster because a read-only member can never own,
+   * submit or clear a task, so any screen that MEASURES output has to be
+   * able to tell them apart from someone who simply scored zero.
+   */
+  readOnly: boolean;
 }
 
 export async function loadOpsRoster(db: SupabaseClient): Promise<RosterMember[]> {
   const { data: memberships, error } = await db
     .schema('core')
     .from('memberships')
-    .select('module, position, is_active, user_id, users:user_id(id, email, authority, person_id)')
+    .select('module, position, is_active, user_id, users:user_id(id, email, authority, person_id, read_only)')
     .eq('module', 'ops')
     .eq('is_active', true);
 
@@ -43,13 +50,14 @@ export async function loadOpsRoster(db: SupabaseClient): Promise<RosterMember[]>
   const peopleById = new Map((people ?? []).map((p) => [p.id as string, p]));
 
   return (memberships ?? []).map((m: Record<string, unknown>) => {
-    const u = m.users as { id: string; email: string; authority: string; person_id: string | null } | null;
+    const u = m.users as { id: string; email: string; authority: string; person_id: string | null; read_only: boolean | null } | null;
     const person = u?.person_id ? peopleById.get(u.person_id) : undefined;
     return {
       userId: u?.id ?? '',
       email: u?.email ?? null,
       authority: u?.authority ?? null,
       position: m.position as string,
+      readOnly: u?.read_only ?? false,
       name: person ? (person.display_name as string) ?? `${person.first_name} ${person.last_name}` : (u?.email ?? null),
     };
   });

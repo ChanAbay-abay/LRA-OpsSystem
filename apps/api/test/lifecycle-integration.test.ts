@@ -261,6 +261,35 @@ test('lifecycle across a real HTTP boundary: create -> commit -> submit -> verif
     assert.equal(task.status, 'todo');
     assert.equal(task.owner_user_id, salesUserId);
 
+    // --- GET /api/tasks/:id is the SAME object as a board card -------
+    //
+    // The Now screen opens the board's task detail modal, so the two
+    // endpoints have to agree field for field -- not "roughly", or the
+    // modal renders a card with holes in it depending on which screen
+    // it was opened from. `deepEqual` against the card the board itself
+    // returns is the only assertion that actually proves that; comparing
+    // against a hand-written list of expected keys would go stale the
+    // next time a card gains one.
+    const detailRes = await call(salesToken, 'GET', `/api/tasks/${task.id}`);
+    assert.equal(detailRes.status, 200, `GET /api/tasks/:id: ${JSON.stringify(detailRes.body)}`);
+
+    const boardRes = await call(salesToken, 'GET', `/api/tasks/board?weekId=${weekId}`);
+    assert.equal(boardRes.status, 200, `GET /api/tasks/board: ${JSON.stringify(boardRes.body)}`);
+    const boardCard = Object.values(boardRes.body!.data as Record<string, unknown[]>)
+      .flat()
+      .find((c) => (c as { id: string }).id === task.id);
+    assert.ok(boardCard, 'the freshly created task did not appear in any board column');
+    assert.deepEqual(detailRes.body!.data, boardCard, 'GET /api/tasks/:id drifted from the board card shape');
+
+    // A uuid that is not a task, and a string that is not a uuid, are
+    // both 404 -- never a 403 (which would confirm a task exists) and
+    // never a 500 from Postgres refusing to cast the id.
+    const missingRes = await call(salesToken, 'GET', '/api/tasks/00000000-0000-0000-0000-000000000000');
+    assert.equal(missingRes.status, 404, `absent task: ${JSON.stringify(missingRes.body)}`);
+    assert.equal(missingRes.body!.error!.code, 'NOT_FOUND');
+    const junkRes = await call(salesToken, 'GET', '/api/tasks/not-a-uuid');
+    assert.equal(junkRes.status, 404, `non-uuid id: ${JSON.stringify(junkRes.body)}`);
+
     // --- commit -------------------------------------------------------
     const commitRes = await call(salesToken, 'POST', `/api/tasks/${task.id}/commit`);
     assert.equal(commitRes.status, 200, `POST /api/tasks/:id/commit: ${JSON.stringify(commitRes.body)}`);
