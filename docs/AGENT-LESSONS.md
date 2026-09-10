@@ -232,3 +232,46 @@ written to close: the most privileged edit leaving the least trace.
 **Do:** clear a transaction-scoped flag as deliberately as you set it, immediately after the
 operation it was guarding. And when a flag suppresses an audit or safety behaviour, write the
 test that proves the behaviour comes **back** afterwards.
+
+## A state file is not a death certificate (2026-09-10)
+
+`~/Programming/CLAUDE.md` says sibling state files are injected at startup and *"anything
+older than the last commit is suspect — a session may have died mid-task."* On 2026-09-10 two
+sessions worked this repo simultaneously and that guidance misfired: the later session was
+handed a **live** session's mid-flight state file as recent-session context, read it as a
+dead session's final handoff, concluded from the dirty working tree that the work had been
+abandoned, and committed all of it in five units.
+
+Nothing was lost — committing is additive — but the same assumption in front of a
+`git checkout` or a rebase would have destroyed several hours of in-flight work.
+
+**The rule that discriminates: compare a state file's mtime against `now`, not against the
+last commit.** A handoff written minutes ago is a live session still typing; one written
+hours ago *and* older than HEAD is a candidate for having died. `ls -lTr .claude/state/`
+answers it in one command and `ListAgents` confirms it. A dirty working tree is not evidence
+of a dead session.
+
+Corollary, earned the hard way: **a commit made by another session is not evidence that what
+landed is what was meant to land.** Verify your own work is in `HEAD` by grepping for the
+specific changes you care about, then re-run the suite from that tree.
+
+## Check the peer's claim, not the peer (2026-09-10)
+
+Two sessions in one repo cost real coordination overhead that day — a near-clobber on a
+shared component, a shared API paused twice by each session independently for the same wrong
+reason, and the swallowed commit above. It still came out ahead, for one narrow reason:
+**every time either session took the other's report at face value, it was wrong.**
+
+- "The migration is still unapplied and blocked on Chan" — it was applied and verified.
+  *Check the database, not the report.*
+- A critique predicting a 12-router false-positive blowup in a new test — it did not occur;
+  the critique was aimed at the prose description, not the code. *Measure before conceding.*
+- "Your hang fix is verified" — verified on two gated routes, while a regression sat in the
+  two ungated routes that had not been driven. *An incomplete pass is not a pass.*
+- A live defect found in code the other session had committed **and self-reviewed**, in the
+  exact defect class both had spent the day sweeping for.
+
+Neither session caught its own defect, and each missed theirs while actively writing about
+the class it belonged to. That is the argument for a second reviewer being a genuinely
+separate context rather than a re-read: a re-read asks the same question again and fails the
+same way.
