@@ -148,7 +148,22 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
     }
   }
 
-  const canSubmit = title.trim().length > 0 && Boolean(weekId) && !loadingLists && !listError;
+  // `!me?.readOnly` belongs HERE, not only on the button that opens this
+  // dialog.
+  //
+  // Both of today's entry points (`/board`'s New task, twice) already disable
+  // themselves for a read-only account, so this is unreachable for ERC and DCA
+  // as things stand. It is not speculative all the same: `ops.tasks`'
+  // insert policy carries `not core.is_read_only()`, so a Create button that a
+  // read-only caller can press is a button the database refuses, and this
+  // project's standing rule is that the UI must not offer what the database
+  // will refuse. Twice today a screen opened to founders handed a read-only
+  // founder a live write precisely because the guard lived one level up --
+  // `/admin/settings`' Save and Now's approvals list. This dialog owns the
+  // write, so it owns the check; a third entry point that forgets to disable
+  // its trigger then costs nothing.
+  const readOnly = me?.readOnly ?? false;
+  const canSubmit = title.trim().length > 0 && Boolean(weekId) && !loadingLists && !listError && !readOnly;
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
@@ -301,7 +316,12 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
               <Button type="button" variant="secondary" onClick={onClose}>
                 Cancel
               </Button>
-              <Button type="submit" loading={submitting} disabled={!canSubmit}>
+              <Button
+                type="submit"
+                loading={submitting}
+                disabled={!canSubmit}
+                title={readOnly ? 'This account is read-only. It can see everything here and change nothing.' : undefined}
+              >
                 Create task
               </Button>
             </DialogFooter>
