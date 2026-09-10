@@ -15,6 +15,44 @@
  * to the task, the submit button reads "Send request", the intro line
  * says who decides, and every field shows what it would replace right
  * next to the input.
+ *
+ * `direct` mode (2026-09-10 regression fix, defect #3) — the same form,
+ * reused rather than duplicated, for the ONE persona the request flow
+ * itself locks out: `ops.enforce_task_transition`'s definition-lock
+ * guard (`task-permissions.ts`'s `definitionLockRefusal`) already exempts
+ * `core.is_founder()` (which the trigger's unconditional bypass makes
+ * true for admin too), so a founder/admin editing a locked task's own
+ * definition is legal on the database's own terms — but the only UI path
+ * to any edit was this dialog's "Request a change" flow, which never
+ * even renders for a founder (the lock banner's button is GM-only).
+ * `direct` posts straight to `PATCH /api/tasks/:id` (routes/tasks.ts's
+ * `patchSchema`) and applies immediately instead of creating a row for
+ * someone else to decide — the real server path, not a bypass of it.
+ *
+ * Two things `patchSchema` does NOT accept that this form otherwise
+ * offers: `ownerUserId`. Reassigning a task's owner directly has no
+ * server-side route yet (verified: `patchSchema` in routes/tasks.ts only
+ * takes title/description/taskTypeId/clientRef) — offering that toggle
+ * in direct mode would be exactly the "UI offers what the database
+ * refuses" defect this whole system is built to avoid, so it's disabled
+ * here with an explanation rather than silently dropped or silently
+ * failing. Flagged in the coder's report as a gap in routes/tasks.ts,
+ * out of this pass's lane.
+ *
+ * The `reason` field has nowhere to live on `ops.tasks` itself (no
+ * column for it), unlike the request flow's `ops.task_edit_requests`
+ * row. Rather than collecting a reason and throwing it away — dishonest
+ * by the same standard as everything else here — a non-empty reason is
+ * appended as a worklog note through the existing, real
+ * `POST /api/tasks/:id/notes` path once the patch succeeds, so the
+ * "why" is still visible to everyone reading the task, append-only, the
+ * same way every other worklog entry is. This is NOT a `core.audit_logs`
+ * row — no trigger on `ops.tasks` currently writes one for a bare
+ * definition PATCH (verified: `ops.enforce_task_transition` only inserts
+ * audit rows for cancellation and edit-request transitions) — so a true
+ * audit-log entry for a direct definition edit is a real gap, needs a
+ * migration, and is out of this pass's lane. Reported, not silently
+ * closed.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
@@ -54,10 +92,13 @@ export interface LockedTask {
 
 export function TaskEditRequestDialog({
   task,
+  direct = false,
   onClose,
   onCreated,
 }: {
   task: LockedTask;
+  /** True for a founder/admin editing directly (applies now); false (default) for a GM's proposal (applies only once decided). */
+  direct?: boolean;
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -102,7 +143,9 @@ export function TaskEditRequestDialog({
     };
   }, []);
 
-  const anyChange = changeTitle || changeDescription || changeType || changeOwner || changeClientRef;
+  // Owner reassignment has no direct-PATCH route yet (see header) —
+  // never offer it as a toggle in `direct` mode.
+  const anyChange = changeTitle || changeDescription || changeType || (!direct && changeOwner) || changeClientRef;
   const reasonReady = reason.trim().length >= 10;
   const titleReady = !changeTitle || title.trim().length > 0;
   const canSubmit = anyChange && reasonReady && titleReady && !loadingLists && !listError;
@@ -113,18 +156,36 @@ export function TaskEditRequestDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const body: Record<string, unknown> = { taskId: task.id, reason: reason.trim() };
-      if (changeTitle) body.title = title.trim();
-      if (changeDescription) body.description = description.trim() ? description.trim() : null;
-      if (changeType) body.taskTypeId = typeId || null;
-      if (changeOwner) body.ownerUserId = ownerId;
-      if (changeClientRef) body.clientRef = clientRef.trim() ? clientRef.trim() : null;
-      await api.post('/api/task-edit-requests', body);
-      toast.success('Change request sent — the clearing founder will decide it.');
+      if (direct) {
+        const patch: Record<string, unknown> = {};
+        if (changeTitle) patch.title = title.trim();
+        if (changeDescription) patch.description = description.trim() ? description.trim() : null;
+        if (changeType) patch.taskTypeId = typeId || null;
+        if (changeClientRef) patch.clientRef = clientRef.trim() ? clientRef.trim() : null;
+        await api.patch(`/api/tasks/${task.id}`, patch);
+        // The patch has no `reason` column of its own to carry this to —
+        // append it to the task's real worklog instead of collecting and
+        // discarding it (see header).
+        if (reason.trim()) {
+          await api.post(`/api/tasks/${task.id}/notes`, {
+            body: `Definition edited directly (founder/admin): ${reason.trim()}`,
+          });
+        }
+        toast.success('Task updated.');
+      } else {
+        const body: Record<string, unknown> = { taskId: task.id, reason: reason.trim() };
+        if (changeTitle) body.title = title.trim();
+        if (changeDescription) body.description = description.trim() ? description.trim() : null;
+        if (changeType) body.taskTypeId = typeId || null;
+        if (changeOwner) body.ownerUserId = ownerId;
+        if (changeClientRef) body.clientRef = clientRef.trim() ? clientRef.trim() : null;
+        await api.post('/api/task-edit-requests', body);
+        toast.success('Change request sent — the clearing founder will decide it.');
+      }
       onCreated();
       onClose();
     } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not send the request');
+      setError(err instanceof ApiClientError ? err.message : direct ? 'Could not save the change' : 'Could not send the request');
     } finally {
       setSubmitting(false);
     }
@@ -134,12 +195,24 @@ export function TaskEditRequestDialog({
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-h-[85vh] w-[min(560px,92vw)] max-w-none overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="pr-6">Request a change — "{task.title}"</DialogTitle>
+          <DialogTitle className="pr-6">
+            {direct ? `Edit locked task — "${task.title}"` : `Request a change — "${task.title}"`}
+          </DialogTitle>
         </DialogHeader>
         <p className="text-body-sm text-ink-2">
-          This task's definition is locked for the week. You're <strong className="text-ink">proposing</strong> a
-          change, not making it — the clearing founder or admin decides, and nothing here changes the task until
-          they approve it. Toggle only the fields you want to change.
+          {direct ? (
+            <>
+              This task's definition is locked for the week, but a founder or admin may still change it directly —
+              this <strong className="text-ink">applies immediately</strong>, with no approval step. Toggle only the
+              fields you want to change.
+            </>
+          ) : (
+            <>
+              This task's definition is locked for the week. You're <strong className="text-ink">proposing</strong>{' '}
+              a change, not making it — the clearing founder or admin decides, and nothing here changes the task
+              until they approve it. Toggle only the fields you want to change.
+            </>
+          )}
         </p>
 
         {listError ? (
@@ -185,32 +258,49 @@ export function TaskEditRequestDialog({
               </Select>
             </FieldRow>
 
-            <FieldRow
-              label="Owner"
-              checked={changeOwner}
-              onCheck={setChangeOwner}
-              current={
-                members.find((m) => m.userId === task.owner_user_id)?.name ??
-                (task.owner_user_id === me?.id ? 'You' : 'Unknown')
-              }
-            >
-              <Select value={ownerId} onValueChange={setOwnerId} disabled={loadingLists}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {me ? <SelectItem value={me.id}>{me.email} (you)</SelectItem> : null}
-                  {members
-                    .filter((m) => m.userId && m.userId !== me?.id)
-                    .map((m) => (
-                      <SelectItem key={m.userId} value={m.userId}>
-                        {m.name ?? m.email ?? m.userId}
-                        {m.position ? ` · ${m.position}` : ''}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </FieldRow>
+            {direct ? (
+              // `PATCH /api/tasks/:id` has no `ownerUserId` field yet
+              // (see the header note) — a checkbox here would be a
+              // control the server silently ignores, so it's a disabled
+              // read-out with the reason stated instead.
+              <div className="flex flex-col gap-1 rounded-lg border border-hairline bg-surface-2 p-3 opacity-70">
+                <p className="text-body-sm text-ink-2">
+                  Owner:{' '}
+                  {members.find((m) => m.userId === task.owner_user_id)?.name ??
+                    (task.owner_user_id === me?.id ? 'You' : 'Unknown')}
+                </p>
+                <p className="text-micro text-ink-3">
+                  Direct edit can't reassign the owner yet — use "Request a change" for that.
+                </p>
+              </div>
+            ) : (
+              <FieldRow
+                label="Owner"
+                checked={changeOwner}
+                onCheck={setChangeOwner}
+                current={
+                  members.find((m) => m.userId === task.owner_user_id)?.name ??
+                  (task.owner_user_id === me?.id ? 'You' : 'Unknown')
+                }
+              >
+                <Select value={ownerId} onValueChange={setOwnerId} disabled={loadingLists}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {me ? <SelectItem value={me.id}>{me.email} (you)</SelectItem> : null}
+                    {members
+                      .filter((m) => m.userId && m.userId !== me?.id)
+                      .map((m) => (
+                        <SelectItem key={m.userId} value={m.userId}>
+                          {m.name ?? m.email ?? m.userId}
+                          {m.position ? ` · ${m.position}` : ''}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </FieldRow>
+            )}
 
             <FieldRow
               label="Client reference"
@@ -229,6 +319,11 @@ export function TaskEditRequestDialog({
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="edit-request-reason">Reason</Label>
               <ReasonTextarea id="edit-request-reason" value={reason} onChange={setReason} placeholder="Why does this need to change?" />
+              {direct ? (
+                <p className="text-micro text-ink-3">
+                  Recorded as a worklog note on the task — there's no separate approval record for a direct edit.
+                </p>
+              ) : null}
             </div>
 
             {error ? (
@@ -242,7 +337,7 @@ export function TaskEditRequestDialog({
                 Cancel
               </Button>
               <Button type="submit" loading={submitting} disabled={!canSubmit}>
-                Send request
+                {direct ? 'Save changes' : 'Send request'}
               </Button>
             </DialogFooter>
           </form>

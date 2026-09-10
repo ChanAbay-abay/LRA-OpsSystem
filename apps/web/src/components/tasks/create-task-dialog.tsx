@@ -85,12 +85,26 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
         setTypes(allTypes.filter((t) => t.is_active));
         setMembers(roster);
         setWeeks(recent);
-        // Prefer the live current week; a fresh project may not have
-        // created it yet (Phase 5's `POST /api/weeks` is oversight-only),
-        // so fall back to the most recent non-closed week rather than
-        // leaving the picker empty with nothing to select.
-        const fallback = recent.find((w) => w.state !== 'closed') ?? recent[0];
-        setWeekId(current?.id ?? fallback?.id ?? '');
+        // A closed week is the finished artifact of that week
+        // (docs/AGENT-LESSONS.md §9) — it cannot take a new, uncommitted
+        // task, and the API's own RLS never checked week state on
+        // insert (verified: `ops.tasks` `tasks_insert` policy in
+        // 20260910120100_core_read_only_accounts.sql has no week-state
+        // clause at all), so a closed week silently accepted one and it
+        // rendered in today's Backlog regardless of the week it was
+        // tagged with (2026-09-10 regression, defect #2). Fixing the
+        // database guard is out of this pass's lane (routes/tasks.ts and
+        // the migration aren't in it — see the coder's report); this
+        // dialog does the honest thing it can do on its own side: never
+        // offer a week the task couldn't really belong to. Prefer the
+        // live current week; a fresh project may not have created it yet
+        // (Phase 5's `POST /api/weeks` is oversight-only), so fall back
+        // to the most recent NON-CLOSED week — never to `recent[0]`,
+        // which can itself be closed right after a rollover.
+        const selectable = recent.filter((w) => w.state !== 'closed');
+        const fallback = selectable[0];
+        const preferred = current && current.state !== 'closed' ? current : undefined;
+        setWeekId(preferred?.id ?? fallback?.id ?? '');
       })
       .catch((err) => {
         if (cancelled) return;
@@ -105,6 +119,10 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
   }, []);
 
   const selectedType = types.find((t) => t.id === typeId) ?? null;
+  // Only a week that can actually receive a new task is offered — never
+  // a dead option a person could pick and get a silent, wrong result
+  // from (see the fetch effect above for why).
+  const selectableWeeks = weeks.filter((w) => w.state !== 'closed');
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -242,12 +260,12 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
                 id="task-week"
                 value={weekId}
                 onChange={(e) => setWeekId(e.target.value)}
-                disabled={loadingLists || weeks.length === 0}
+                disabled={loadingLists || selectableWeeks.length === 0}
                 className="h-[34px] w-full rounded-md border border-[#CBD2E0] bg-white px-[10px] text-body text-ink hover:border-[#B7C0D2] focus-visible:border-[#1662E8] focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[#E8F0FE] disabled:bg-[#F1F3F7] disabled:border-[#E2E6EE] disabled:text-ink-disabled"
               >
-                {weeks.length === 0 ? <option value="">No weeks exist yet</option> : null}
+                {selectableWeeks.length === 0 ? <option value="">No open week to create a task in</option> : null}
                 {!weekId ? <option value="">Pick a week</option> : null}
-                {weeks.map((w) => (
+                {selectableWeeks.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.week_start} – {w.week_end} ({w.state})
                   </option>
@@ -256,6 +274,11 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
               {weeks.length === 0 && !loadingLists ? (
                 <p className="text-micro text-danger">
                   No week has been created yet. Ask a GM or founder to open one from the briefing.
+                </p>
+              ) : selectableWeeks.length === 0 && !loadingLists ? (
+                <p className="text-micro text-danger">
+                  Every recent week is closed — a closed week is the finished record of that week and can't take a new
+                  task. Ask a GM or founder to open this week from the briefing first.
                 </p>
               ) : null}
             </div>

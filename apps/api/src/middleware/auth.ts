@@ -18,7 +18,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { createClient } from '@supabase/supabase-js';
 import { ApiError, type AuthUser, type Authority, type Module } from '../lib/domain.js';
-import { loadAuthUser, serviceClient } from '../lib/supabase.js';
+import { loadAuthUser } from '../lib/supabase.js';
 import { env } from '../lib/env.js';
 
 declare module 'fastify' {
@@ -93,24 +93,4 @@ export function requireMembership(module: Module) {
       throw new ApiError(403, `This action requires ${module} module membership`, 'NOT_A_MEMBER');
     }
   };
-}
-
-/**
- * Record the last successful login, best effort. Currently unwired —
- * no call site invokes this yet (2026-09-10 audit: grepped, none found).
- *
- * Service client, deliberately, matching `loadAuthUser` above: writing
- * a caller's own `last_login` during their own login should not depend
- * on the very row/session RLS would need to already trust.
- */
-export async function touchLastLogin(userId: string): Promise<void> {
-  try {
-    await serviceClient()
-      .schema('core')
-      .from('users')
-      .update({ last_login: new Date().toISOString() })
-      .eq('id', userId);
-  } catch {
-    // Not worth failing a login over.
-  }
 }

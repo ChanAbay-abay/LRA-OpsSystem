@@ -238,7 +238,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       .schema('core')
       .from('users')
       .select(
-        'id, email, authority, is_active, is_clearing_founder, read_only, last_login, person_id, created_at, deleted_at, deleted_by, purge_due_at'
+        'id, email, authority, is_active, is_clearing_founder, read_only, person_id, created_at, deleted_at, deleted_by, purge_due_at'
       );
     if (error) throw error;
 
@@ -250,9 +250,26 @@ export default async function adminRoutes(app: FastifyInstance) {
 
     const membershipByUser = new Map((memberships ?? []).map((m) => [m.user_id, m]));
 
+    // "Last login" reads from Supabase Auth's own `last_sign_in_at`, not
+    // a hand-maintained column. `core.users.last_login` exists but is
+    // never written (`touchLastLogin` in middleware/auth.ts had zero
+    // call sites — removed rather than wired up, see that file's diff)
+    // so every account rendered "Never logged in" forever, including
+    // the six that plainly had (2026-09-10 regression, defect #4).
+    // `auth.users.last_sign_in_at` is maintained by Supabase itself on
+    // every real sign-in and needs no second copy kept in sync for no
+    // benefit. `listUsers()` is capped at 50/page by default, which
+    // covers every real account in this system today; paginating is a
+    // problem for the day this project has more than 50 people, not
+    // today.
+    const { data: authList, error: authError } = await db.auth.admin.listUsers();
+    if (authError) throw authError;
+    const lastSignInById = new Map(authList.users.map((u) => [u.id, u.last_sign_in_at ?? null]));
+
     return {
       data: (users ?? []).map((u) => ({
         ...u,
+        last_login: lastSignInById.get(u.id) ?? null,
         opsMembership: membershipByUser.get(u.id) ?? null,
       })),
     };

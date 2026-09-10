@@ -242,15 +242,28 @@ function TaskCard({
   const returned = task.status === 'rejected';
   const locked = pendingCancellation || !draggable;
   // `disabled` strips dnd-kit's pointer/keyboard activators for us
-  // (listeners come back `undefined`) and sets `aria-disabled` on its
-  // own `attributes` object — the same mechanism DESIGN.md §7.3 asks
-  // for, not a hand-rolled `onPointerDown` guard that could drift out of
-  // sync with the real reason.
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+  // (listeners come back `undefined`), which is exactly what DESIGN.md
+  // §7.3 asks for — a locked card simply cannot be picked up. But
+  // dnd-kit ALSO puts `aria-disabled="true"` on its own `attributes`
+  // object for a disabled draggable, and that claim is false here: the
+  // card stays fully readable and clickable (opening the task modal is
+  // its primary read path). Announcing "disabled" to a screen reader for
+  // something the same person can open and read is wrong on its own,
+  // and it's also what made Playwright's `.click()` refuse to click the
+  // card and time out (2026-09-10 regression pass's Major, disproved by
+  // the orchestrator's own re-test with a genuine dispatched click). The
+  // honest distinction already lives in `aria-roledescription` below
+  // ("task card" vs "draggable task card"), so dnd-kit's own
+  // `aria-disabled` is dropped rather than kept as a second, incorrect
+  // claim about the same element.
+  const { attributes: draggableAttributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: task.id,
     data: task,
     disabled: locked,
   });
+  // `undefined` (not omitting the key) so React drops the attribute from
+  // the DOM entirely rather than rendering `aria-disabled="false"`.
+  const attributes = { ...draggableAttributes, 'aria-disabled': undefined };
   // `transform` is deliberately NOT read. The card that follows the
   // pointer is the <DragOverlay> copy (`dragging`), and translating the
   // source card as well produced two moving cards plus a scroll jump:
@@ -1227,7 +1240,23 @@ function TaskDetailDialog({
   // refusal. `null` means the definition is still open to a direct edit.
   const lockRefusal = definitionLockRefusal(task, weekState, actor);
   const isGm = me?.authority === 'gm';
+  // Chan: "once the meeting is concluded, those todos should be set and
+  // not editable by the staff. Only admin and founder." The trigger's
+  // own exemption already lets a founder/admin through guard 2b, which
+  // is exactly why `lockRefusal` above is `null` for them even on a
+  // locked task -- but that also meant the "Definition locked" banner
+  // (and the only button that ever opened an edit surface) never
+  // rendered for the one persona who is actually allowed to use it
+  // (2026-09-10 regression, defect #3). This mirrors the same "would
+  // this be locked for someone without the exemption" condition
+  // `definitionLockRefusal` checks, without the actor branch, purely to
+  // decide whether to surface the direct-edit affordance -- it grants
+  // nothing; `PATCH /api/tasks/:id` is still enforced by the same
+  // trigger regardless of what this renders.
+  const lockedForOthers = task.is_committed && weekState != null && weekState !== 'planning';
+  const isFounderOrAdmin = me?.authority === 'founder' || me?.authority === 'admin';
   const [requestingChange, setRequestingChange] = React.useState(false);
+  const [editingDirect, setEditingDirect] = React.useState(false);
   const [editRequests, setEditRequests] = React.useState<TaskEditRequest[] | null>(null);
   const [lookupTypes, setLookupTypes] = React.useState<{ id: string; name: string }[]>([]);
   const [lookupMembers, setLookupMembers] = React.useState<{ userId: string; name: string | null; email: string | null }[]>([]);
@@ -1382,6 +1411,21 @@ function TaskDetailDialog({
                 Request a change
               </Button>
             ) : null}
+          </div>
+        ) : lockedForOthers && isFounderOrAdmin && !readOnly ? (
+          // The founder/admin bypass in words: this task's definition
+          // WOULD be locked for anyone else, but the database already
+          // lets this caller through -- so the direct edit path is
+          // offered instead of the GM's request banner, never both.
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface-2 px-3 py-2.5">
+            <p className="flex max-w-[400px] items-start gap-1.5 text-body-sm text-ink-2">
+              <Lock className="mt-0.5 size-3.5 shrink-0 text-ink-3" aria-hidden />
+              This task's definition is locked for the week for everyone but a founder or admin — that's you.
+            </p>
+            <Button variant="secondary" size="sm" onClick={() => setEditingDirect(true)}>
+              <Pencil className="size-3.5" aria-hidden />
+              Edit directly
+            </Button>
           </div>
         ) : null}
 
@@ -1606,6 +1650,19 @@ function TaskDetailDialog({
         task={task}
         onClose={() => setRequestingChange(false)}
         onCreated={loadEditRequests}
+      />
+    ) : null}
+
+    {editingDirect ? (
+      <TaskEditRequestDialog
+        task={task}
+        direct
+        onClose={() => setEditingDirect(false)}
+        onCreated={() => {
+          loadEditRequests();
+          loadNotes();
+          onChanged();
+        }}
       />
     ) : null}
     </>
