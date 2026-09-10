@@ -790,7 +790,14 @@ function Lane({
     <section
       aria-label={laneLabel(lane)}
       className={cn(
-        'flex w-column shrink-0 snap-start flex-col gap-2 rounded-xl bg-surface-2 p-2',
+        // `border-hairline` is doing the work here, not the radius. The
+        // columns were ALREADY `rounded-xl` when Chan said they did not
+        // look like containers — measured, 16px. The shape was there and
+        // the EDGE was not: `bg-surface-2` (#F1F3F7) sits on a #F7F8FA
+        // page, a six-value difference, so at low contrast a rounded
+        // corner has nothing to describe. A hairline makes the container
+        // read as one, and makes the rounding visible for the first time.
+        'flex w-column shrink-0 snap-start flex-col gap-2 rounded-xl border border-hairline bg-surface-2 p-2',
         'transition-opacity duration-fast',
         // Grayed out for the duration of a drag it cannot accept
         // (Chan's ask) — but for a grouped lane, only when BOTH tabs
