@@ -69,6 +69,7 @@ function ProtectedRoute({
   children,
   requireAdmin = false,
   requireOversight = false,
+  requireFounder = false,
 }: {
   children: React.ReactNode;
   requireAdmin?: boolean;
@@ -81,6 +82,18 @@ function ProtectedRoute({
    * approve, not merely fail for them.
    */
   requireOversight?: boolean;
+  /**
+   * founder/admin only. `/admin/settings` is `requireAuthority('founder',
+   * 'admin')` server-side (`settings.ts`) and `ops.settings`'s RLS
+   * update policy is `core.is_founder()`, which already includes admin
+   * — so a plain `requireAdmin` here was stricter than both server
+   * layers and left a founder with no path to a screen the server
+   * grants them. This is per-route, not a change to `requireAdmin`
+   * itself: `/admin/users`, `/admin/audit` and `/admin/everything` are
+   * genuinely admin-only (`admin.ts`'s whole router is
+   * `requireAuthority('admin')`) and stay on `requireAdmin`.
+   */
+  requireFounder?: boolean;
 }) {
   const { session, me, loading } = useAuth();
 
@@ -91,11 +104,14 @@ function ProtectedRoute({
   // `me` is still in flight for a beat after the session settles; the
   // shell skeleton is the honest answer, not a redirect on a role we
   // have not read yet.
-  if ((requireAdmin || requireOversight) && !me) return <ShellSkeleton />;
+  if ((requireAdmin || requireOversight || requireFounder) && !me) return <ShellSkeleton />;
   if (requireAdmin && me?.authority !== 'admin') {
     return <Navigate to="/" replace />;
   }
   if (requireOversight && !['gm', 'founder', 'admin'].includes(me?.authority ?? '')) {
+    return <Navigate to="/" replace />;
+  }
+  if (requireFounder && !['founder', 'admin'].includes(me?.authority ?? '')) {
     return <Navigate to="/" replace />;
   }
 
@@ -198,7 +214,7 @@ function AppRoutes() {
       <Route
         path="/admin/settings"
         element={
-          <ProtectedRoute requireAdmin>
+          <ProtectedRoute requireFounder>
             <AdminSettingsPage />
           </ProtectedRoute>
         }

@@ -28,6 +28,7 @@
  * — read-only isn't an error, so it doesn't borrow `danger`.
  */
 import * as React from 'react';
+import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -161,16 +162,8 @@ export function AdminUsersPage() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {r.authority === 'founder' ? (
-                        <button
-                          className={`text-label ${r.is_clearing_founder ? 'text-cleared' : 'text-ink-3 hover:text-ink'}`}
-                          onClick={async () => {
-                            await api.patch(`/api/admin/users/${r.id}`, { isClearingFounder: !r.is_clearing_founder });
-                            resource.reload();
-                          }}
-                        >
-                          {r.is_clearing_founder ? 'Yes — the seat' : 'Make the clearing founder'}
-                        </button>
+                      {r.authority === 'founder' && !r.read_only ? (
+                        <ClearingFounderToggle row={r} onDone={() => resource.reload()} />
                       ) : (
                         <span className="text-ink-3">—</span>
                       )}
@@ -187,8 +180,12 @@ export function AdminUsersPage() {
                           <button
                             className="text-label text-ink-3 hover:text-ink"
                             onClick={async () => {
-                              await api.post(`/api/admin/users/${r.id}/restore`, {});
-                              resource.reload();
+                              try {
+                                await api.post(`/api/admin/users/${r.id}/restore`, {});
+                                resource.reload();
+                              } catch (err) {
+                                toast.error(err instanceof ApiClientError ? err.message : 'Could not restore the account');
+                              }
                             }}
                           >
                             Restore
@@ -198,8 +195,12 @@ export function AdminUsersPage() {
                             <button
                               className="text-label text-ink-3 hover:text-ink"
                               onClick={async () => {
-                                await api.patch(`/api/admin/users/${r.id}`, { isActive: !r.is_active });
-                                resource.reload();
+                                try {
+                                  await api.patch(`/api/admin/users/${r.id}`, { isActive: !r.is_active });
+                                  resource.reload();
+                                } catch (err) {
+                                  toast.error(err instanceof ApiClientError ? err.message : 'Could not change the account status');
+                                }
                               }}
                             >
                               {r.is_active ? 'Deactivate' : 'Activate'}
@@ -219,6 +220,83 @@ export function AdminUsersPage() {
         )}
       </ResourceView>
     </div>
+  );
+}
+
+/**
+ * The single-click control that reassigns who can clear every task and
+ * point company-wide — exactly one row may hold this seat (a partial
+ * unique index enforces it server-side, mapped to a friendly 409 if
+ * another founder already has it). Confirmed the same way delete and
+ * read-only are: setting the seat takes it away from whoever holds it
+ * today, which is destructive to that person's role even though the
+ * row being clicked isn't deleted.
+ */
+function ClearingFounderToggle({ row, onDone }: { row: AdminUserRow; onDone: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const next = !row.is_clearing_founder;
+
+  async function handleConfirm() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.patch(`/api/admin/users/${row.id}`, { isClearingFounder: next });
+      setOpen(false);
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'Could not change the clearing founder seat');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <button className={`text-label ${row.is_clearing_founder ? 'text-cleared' : 'text-ink-3 hover:text-ink'}`}>
+          {row.is_clearing_founder ? 'Yes — the seat' : 'Make the clearing founder'}
+        </button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {next ? `Make ${row.email} the clearing founder?` : `Remove ${row.email} as the clearing founder?`}
+          </DialogTitle>
+          <DialogDescription>
+            {next ? (
+              <>
+                Only {row.email} will be able to clear a verified task and decide flagged
+                cancellations from now on. Whoever holds the seat today loses that ability the
+                moment you confirm — only one founder can hold it at a time.
+              </>
+            ) : (
+              <>
+                No founder will hold the clearing seat after this — nobody will be able to clear a
+                verified task or decide a flagged cancellation until someone is given the seat
+                again.
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        {error ? (
+          <p role="alert" className="text-label text-danger">
+            {error}
+          </p>
+        ) : null}
+
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button loading={submitting} onClick={handleConfirm}>
+            {next ? 'Make the clearing founder' : 'Remove the seat'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

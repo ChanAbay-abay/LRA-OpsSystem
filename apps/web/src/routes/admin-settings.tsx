@@ -1,9 +1,12 @@
 /**
  * LRA Global Ops :: /admin/settings
  *
- * The single `ops.settings` row (PRD.md §3.4/§5). Admin console per
- * Chan's ask tonight — admin is his operating seat, and `core.is_founder()`
- * already includes admin, so this PATCH is not a policy weakening.
+ * The single `ops.settings` row (PRD.md §3.4/§5). Open to founder and
+ * admin, matching `settings.ts`'s `requireAuthority('founder', 'admin')`
+ * and `ops.settings`'s RLS update policy (`core.is_founder()`, which
+ * already includes admin) — PRD.md names the founder as this screen's
+ * owner; admin is added alongside per Chan's ask tonight, not in place
+ * of the founder.
  */
 import * as React from 'react';
 import { toast } from 'sonner';

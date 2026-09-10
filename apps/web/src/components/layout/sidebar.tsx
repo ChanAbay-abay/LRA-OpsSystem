@@ -71,12 +71,23 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
     items.push({ to: '/digest', label: 'Weekly digest', icon: Gauge });
   }
 
-  const adminItems: NavItem[] = [
+  // `/admin/users`, `/admin/everything` and `/admin/audit` are served by
+  // `admin.ts`, whose whole router is `requireAuthority('admin')` — admin
+  // only. `/admin/settings` is the one exception: `settings.ts` is
+  // `requireAuthority('founder', 'admin')` and `ops.settings`'s RLS
+  // update policy is `core.is_founder()` (which already includes admin),
+  // so a founder is a legitimate caller of that screen too. Gating the
+  // whole "Admin" section to `authority === 'admin'` left a founder with
+  // no way to reach a screen the server grants them — a reachable route
+  // with no link to it. See App.tsx's `requireFounder`.
+  const adminOnlyItems: NavItem[] = [
     { to: '/admin/users', label: 'People & access', icon: UserCog },
-    { to: '/admin/settings', label: 'Settings', icon: SlidersHorizontal },
     { to: '/admin/everything', label: 'Everything', icon: FileClock },
     { to: '/admin/audit', label: 'Audit', icon: ShieldCheck },
   ];
+  const settingsItem: NavItem = { to: '/admin/settings', label: 'Settings', icon: SlidersHorizontal };
+  const adminItems: NavItem[] =
+    me?.authority === 'admin' ? [adminOnlyItems[0], settingsItem, ...adminOnlyItems.slice(1)] : [settingsItem];
 
   return (
     <div className="flex h-full w-sidebar shrink-0 flex-col overflow-y-auto bg-navy-900 on-navy">
@@ -116,9 +127,9 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </nav>
 
-      {me?.authority === 'admin' ? (
+      {me?.authority === 'admin' || me?.authority === 'founder' ? (
         <>
-          <div className="px-3 pt-4 pb-1.5 text-eyebrow text-on-dark-3">Admin</div>
+          <div className="px-3 pt-4 pb-1.5 text-eyebrow text-on-dark-3">{me?.authority === 'admin' ? 'Admin' : 'Settings'}</div>
           <nav className="flex flex-col gap-0.5 px-3">
             {adminItems.map((item) => (
               <NavLink

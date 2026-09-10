@@ -88,6 +88,37 @@ export default async function adminRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
   app.addHook('onRequest', requireAuthority('admin'));
 
+  // Every write in this router runs on `serviceClient`, which connects as
+  // the service role and therefore bypasses RLS entirely. That is justified
+  // per-handler below, but it has one consequence worth naming: the
+  // `not core.is_read_only()` clause that every write policy in
+  // 20260910120100_core_read_only_accounts.sql carries is NOT consulted here,
+  // and cannot be -- `core.is_read_only()` reads `core.auth_user_id()`, which
+  // is null on a service-role connection, so it returns false for everyone.
+  //
+  // Every other write path in the API runs on `userClient` and is therefore
+  // covered by that clause. This router is the single exception, so the check
+  // the database would have made is made here instead. Without it, an account
+  // marked read-only that also holds `authority = 'admin'` would keep the full
+  // provisioning surface -- invite, patch, delete, restore, purge -- while the
+  // UI told everyone it could write nothing. Nothing currently seeded is such
+  // an account (ERC and DCA are founders, and are refused by the hook above),
+  // but /admin/users can create one in two clicks, and a guarantee that holds
+  // only because nobody has exercised the gap is not a guarantee.
+  //
+  // Reads are deliberately untouched: read-only means "sees what oversight
+  // sees and writes nothing", so only the mutating verbs are refused.
+  app.addHook('onRequest', async (req) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return;
+    if (req.user.readOnly) {
+      throw new ApiError(
+        403,
+        'This account is read-only. It can see everything here and change nothing.',
+        'READ_ONLY_ACCOUNT'
+      );
+    }
+  });
+
   app.post('/users', async (req) => {
     const body = inviteSchema.parse(req.body);
     // Service client: this whole router is `requireAuthority('admin')`-

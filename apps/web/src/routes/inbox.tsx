@@ -5,11 +5,12 @@
  * the full list. Marking read is the only mutation, matching what
  * `core.notifications`' RLS trigger allows.
  */
+import { toast } from 'sonner';
 import { PageHeader } from '@/components/layout/app-shell';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
-import { api } from '@/lib/api';
+import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface Notification {
@@ -33,8 +34,16 @@ export function InboxPage() {
 
   async function markRead(id: string) {
     if (readOnly) return;
-    await api.post(`/api/notifications/${id}/read`);
-    resource.reload();
+    try {
+      await api.post(`/api/notifications/${id}/read`);
+      resource.reload();
+    } catch (err) {
+      // Same reasoning as the read-only short-circuit above: without
+      // this, a failed request left the unread dot silently stuck with
+      // no way to tell why. A toast is the lightest honest fix — the
+      // dot itself just stays lit and the next successful click clears it.
+      toast.error(err instanceof ApiClientError ? err.message : 'Could not mark this as read');
+    }
   }
 
   return (

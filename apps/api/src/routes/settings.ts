@@ -13,7 +13,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireAuthority, requireMembership } from '../middleware/auth.js';
-import { userClient } from '../lib/supabase.js';
+import { userClient, writeAudit } from '../lib/supabase.js';
 
 const patchSchema = z.object({
   recurringCapPct: z.number().min(0).max(0.999).optional(),
@@ -51,8 +51,31 @@ export default async function settingsRoutes(app: FastifyInstance) {
     if (body.leaderboardVisibility !== undefined) patch.leaderboard_visibility = body.leaderboardVisibility;
     if (body.timezone !== undefined) patch.timezone = body.timezone;
 
+    // These parameters drive the recurring cap and the reliability
+    // formula that scores every person in the company, retroactively
+    // across the scoreboard's 13-week windows — read the row on the
+    // same userClient (not serviceClient, which would bypass RLS) so
+    // the audit row carries a real before/after diff of only the
+    // fields that actually changed, matching the shape the direct-edit
+    // audit trigger already uses for tasks (20260910170000).
+    const { data: before, error: beforeError } = await db.schema('ops').from('settings').select('*').eq('id', true).single();
+    if (beforeError) throw beforeError;
+
     const { data, error } = await db.schema('ops').from('settings').update(patch).eq('id', true).select().single();
     if (error) throw error;
+
+    const changedKeys = Object.keys(patch).filter((key) => key !== 'updated_by' && before[key] !== data[key]);
+    if (changedKeys.length) {
+      await writeAudit(req.user, {
+        module: 'ops',
+        action: 'admin.settings.patch',
+        entityType: 'ops.settings',
+        entityId: 'settings',
+        oldValues: Object.fromEntries(changedKeys.map((key) => [key, before[key]])),
+        newValues: Object.fromEntries(changedKeys.map((key) => [key, data[key]])),
+      });
+    }
+
     return { data };
   });
 }
