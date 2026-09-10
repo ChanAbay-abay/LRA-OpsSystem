@@ -30,6 +30,8 @@ import nowRoutes from './routes/now.js';
 import scoreboardRoutes from './routes/scoreboard.js';
 import taskEditRequestsRoutes from './routes/task-edit-requests.js';
 import taskEditBatchesRoutes from './routes/task-edit-batches.js';
+import taskTransfersRoutes from './routes/task-transfers.js';
+import feedbackRoutes from './routes/feedback.js';
 
 export function buildServer() {
   const app = Fastify({
@@ -144,6 +146,8 @@ export function buildServer() {
   app.register(scoreboardRoutes, { prefix: '/api/scoreboard' });
   app.register(taskEditRequestsRoutes, { prefix: '/api/task-edit-requests' });
   app.register(taskEditBatchesRoutes, { prefix: '/api/task-edit-batches' });
+  app.register(taskTransfersRoutes, { prefix: '/api/task-invites' });
+  app.register(feedbackRoutes, { prefix: '/api/feedback' });
 
   return app;
 }

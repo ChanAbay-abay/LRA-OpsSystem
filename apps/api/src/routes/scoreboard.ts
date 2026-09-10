@@ -75,9 +75,24 @@ interface WeekRow {
 interface CommittedTaskRow {
   id: string;
   owner_user_id: string;
+  committed_by_user_id: string | null;
   status: string;
   committed_points: number | null;
   committed_week_id: string;
+}
+
+/**
+ * Who a committed task's promise counts against. 2026-09-11, Chan: a
+ * transferred task's ownership moves but its Monday commitment stays
+ * with whoever made it -- `committed_by_user_id` (stamped once, at
+ * commit time, immutable outside that moment) is that person.
+ * `owner_user_id` is the fallback ONLY for rows committed before that
+ * column existed (backfilled to the then-owner by the migration, since
+ * transfer did not exist yet and the two were necessarily the same
+ * person) -- every row committed from here on always carries it.
+ */
+function committerOf(t: CommittedTaskRow): string {
+  return t.committed_by_user_id ?? t.owner_user_id;
 }
 
 interface OpenTaskRow {
@@ -529,7 +544,7 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
         await db
           .schema('ops')
           .from('tasks')
-          .select('id, owner_user_id, status, committed_points, committed_week_id')
+          .select('id, owner_user_id, committed_by_user_id, status, committed_points, committed_week_id')
           .in('committed_week_id', windowWeekIds)
       ).data ?? []
     : [];
@@ -551,7 +566,8 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
     const tasksThisWeek = committedTasks.filter((t) => t.committed_week_id === w.id);
     const byOwner = new Map<string, CommittedTaskRow[]>();
     for (const t of tasksThisWeek) {
-      (byOwner.get(t.owner_user_id) ?? byOwner.set(t.owner_user_id, []).get(t.owner_user_id)!).push(t);
+      const committer = committerOf(t);
+      (byOwner.get(committer) ?? byOwner.set(committer, []).get(committer)!).push(t);
     }
     for (const member of roster) {
       const tasks = byOwner.get(member.userId) ?? [];
@@ -783,7 +799,9 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
 
       let carryOverRate: number | null = null;
       if (mostRecent) {
-        const tasksThatWeek = committedTasks.filter((t) => t.committed_week_id === mostRecent.weekId && t.owner_user_id === m.userId);
+        const tasksThatWeek = committedTasks.filter(
+          (t) => t.committed_week_id === mostRecent.weekId && committerOf(t) === m.userId
+        );
         if (tasksThatWeek.length > 0) {
           const carried = tasksThatWeek.filter((t) => !['cleared', 'cancelled'].includes(t.status)).length;
           carryOverRate = carried / tasksThatWeek.length;

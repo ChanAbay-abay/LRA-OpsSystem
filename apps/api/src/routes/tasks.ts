@@ -31,7 +31,15 @@ const TASK_STATUSES = [
 
 const createSchema = z.object({
   weekId: z.string().uuid(),
-  ownerUserId: z.string().uuid().optional(), // defaults to self; oversight may set another owner
+  // Undefined -> defaults to self. A real uuid -> oversight may create a
+  // task for someone else. `null` -> deliberately unassigned (2026-09-11:
+  // "tasks cannot move from the week's list until someone is assigned...
+  // any of the employees can take up the task or have the GM assign
+  // someone to it at a later time") -- the database's own tasks_insert
+  // RLS (owner_user_id = self OR oversight) is the real gate on both the
+  // "someone else" and the "nobody yet" cases; this route only produces a
+  // clearer 403 than PostgREST's generic policy-violation message would.
+  ownerUserId: z.string().uuid().nullable().optional(),
   taskTypeId: z.string().uuid().nullable().optional(),
   title: z.string().min(1),
   description: z.string().optional(),
@@ -45,14 +53,12 @@ const patchSchema = z.object({
   taskTypeId: z.string().uuid().nullable().optional(),
   clientRef: z.string().nullable().optional(),
   // Owner reassignment on a direct edit. `ops.enforce_task_transition`'s
-  // definition-lock guard (2b) already lists owner_user_id among the
-  // five columns a founder/admin may still change on a committed,
-  // locked task -- the only gap was this route refusing to forward the
-  // field at all, which left the direct-edit dialog disabling the Owner
-  // toggle even though the database would have allowed it. Restricted to
-  // founder/admin below, the same authorities 2b exempts -- an ordinary
-  // owner or GM reassigning ownership through this endpoint would be
-  // granting a new capability this migration was never asked to add.
+  // statement 2c is the real gate (2026-09-11): oversight may assign it
+  // to anyone, and the new owner may claim it themselves if it is
+  // currently unassigned. The route below only widens FAR enough to let
+  // both of those legitimate calls reach the database -- an ordinary
+  // staff member reassigning someone ELSE'S task is still refused here,
+  // before ever touching PostgREST.
   ownerUserId: z.string().uuid().optional(),
 });
 
@@ -274,12 +280,20 @@ export function blockDisplayName(
   }
 }
 
-/** Attach `ownerPosition` / `ownerName` to a batch of tasks, per Chan's ask that position mean something in the board's grouping. */
-export async function enrichWithOwners<T extends { owner_user_id: string }>(
+/**
+ * Attach `ownerPosition` / `ownerName` to a batch of tasks, per Chan's ask
+ * that position mean something in the board's grouping.
+ *
+ * `owner_user_id` is nullable (2026-09-11: unassigned tasks) -- a null
+ * owner simply resolves to `ownerName: null, ownerPosition: null`, which
+ * is exactly the "Unassigned" state every screen that renders an owner
+ * already has to handle for a name it could not look up.
+ */
+export async function enrichWithOwners<T extends { owner_user_id: string | null }>(
   db: ReturnType<typeof serviceClient>,
   tasks: T[]
 ): Promise<(T & { ownerPosition: string | null; ownerName: string | null })[]> {
-  const ownerIds = [...new Set(tasks.map((t) => t.owner_user_id))];
+  const ownerIds = [...new Set(tasks.map((t) => t.owner_user_id).filter((id): id is string => id !== null))];
   if (!ownerIds.length) return tasks.map((t) => ({ ...t, ownerPosition: null, ownerName: null }));
 
   const [{ data: memberships }, { data: users }] = await Promise.all([
@@ -302,6 +316,7 @@ export async function enrichWithOwners<T extends { owner_user_id: string }>(
   const personById = new Map((people ?? []).map((p) => [p.id, p]));
 
   return tasks.map((t) => {
+    if (t.owner_user_id === null) return { ...t, ownerPosition: null, ownerName: null };
     const u = userById.get(t.owner_user_id);
     const person = u?.person_id ? personById.get(u.person_id) : undefined;
     const ownerName = person ? person.display_name ?? `${person.first_name} ${person.last_name}` : u?.email ?? null;
@@ -600,9 +615,16 @@ export default async function tasksRoutes(app: FastifyInstance) {
 
   app.post('/', async (req) => {
     const body = createSchema.parse(req.body);
-    const ownerUserId = body.ownerUserId ?? req.user.id;
+    // `undefined` (the field was never sent) defaults to self; an
+    // explicit `null` means "leave it unassigned" and must be told apart
+    // from that default, not folded into it.
+    const ownerUserId = body.ownerUserId === undefined ? req.user.id : body.ownerUserId;
     if (ownerUserId !== req.user.id && req.user.authority === 'staff') {
-      throw new ApiError(403, 'only oversight may create a task for someone else', 'FORBIDDEN');
+      throw new ApiError(
+        403,
+        'only oversight may create a task for someone else, or leave it unassigned',
+        'FORBIDDEN'
+      );
     }
 
     const db = userClient(req.accessToken);
@@ -635,8 +657,17 @@ export default async function tasksRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const body = patchSchema.parse(req.body);
 
-    if (body.ownerUserId !== undefined && !['founder', 'admin'].includes(req.user.authority)) {
-      throw new ApiError(403, "only a founder or admin may reassign a task's owner directly", 'FORBIDDEN');
+    if (body.ownerUserId !== undefined) {
+      const isOversight = ['gm', 'founder', 'admin'].includes(req.user.authority) && !req.user.readOnly;
+      const isSelfClaim = body.ownerUserId === req.user.id;
+      if (!isOversight && !isSelfClaim) {
+        throw new ApiError(
+          403,
+          "only a GM, founder or admin may reassign a task's owner directly -- or, if it is "
+            + 'unassigned, the new owner may claim it themselves',
+          'FORBIDDEN'
+        );
+      }
     }
 
     const db = userClient(req.accessToken);
@@ -650,6 +681,54 @@ export default async function tasksRoutes(app: FastifyInstance) {
 
     const { data, error } = await db.schema('ops').from('tasks').update(patch).eq('id', id).select().single();
     if (error) throw new ApiError(422, error.message, error.code ?? 'PATCH_REFUSED');
+    return { data };
+  });
+
+  /**
+   * Self-claim (2026-09-11, Chan: "any of the employees can take up the
+   * task"). A thin, explicit shorthand for `PATCH /:id { ownerUserId: self }`
+   * -- same write, same trigger (statement 2c's self-claim branch), just a
+   * clearer verb than a generic PATCH for the one action every ops member
+   * (not only oversight) may take on someone else's -- well, nobody's --
+   * task. The database refuses it outright if the task is not actually
+   * unassigned; that refusal sentence is forwarded verbatim.
+   */
+  app.post('/:id/claim', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const { data, error } = await db
+      .schema('ops')
+      .from('tasks')
+      .update({ owner_user_id: req.user.id })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw new ApiError(422, error.message, error.code ?? 'CLAIM_REFUSED');
+    return { data };
+  });
+
+  /**
+   * Transfer by invite (2026-09-11, Chan: "invite + accept is enough").
+   * The CURRENT owner invites another active ops member to take a task
+   * over; nobody else may invite on their behalf. `ops.tasks_assignment_invites`'
+   * own BEFORE INSERT trigger is the real gate (current-owner check,
+   * active-member check, one-pending-invite-per-task check) -- this route
+   * only shapes the request and forwards that trigger's refusal verbatim.
+   * Accept/decline/cancel live under `/api/task-invites`, a peer resource,
+   * not a task sub-route -- an invite outlives being looked at from "the
+   * task's" side the moment it is addressed to someone.
+   */
+  app.post('/:id/invite-transfer', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = z.object({ toUserId: z.string().uuid() }).parse(req.body);
+    const db = userClient(req.accessToken);
+    const { data, error } = await db
+      .schema('ops')
+      .from('task_assignment_invites')
+      .insert({ task_id: id, from_user_id: req.user.id, to_user_id: body.toUserId })
+      .select()
+      .single();
+    if (error) throw new ApiError(422, error.message, error.code ?? 'INVITE_REFUSED');
     return { data };
   });
 

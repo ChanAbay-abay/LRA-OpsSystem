@@ -6,6 +6,7 @@
  * `core.notifications`' RLS trigger allows.
  */
 import { toast } from 'sonner';
+import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/app-shell';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
@@ -24,6 +25,7 @@ interface Notification {
 
 export function InboxPage() {
   const { me } = useAuth();
+  const navigate = useNavigate();
   const resource = useResource((signal) => api.get<Notification[]>('/api/notifications', { signal }), []);
   // `core.notifications`' own update policy refuses a read-only caller
   // (`… and not core.is_read_only()`,
@@ -46,6 +48,18 @@ export function InboxPage() {
     }
   }
 
+  // `link` has been carried on every notification row since it was
+  // introduced, and this was the only place that could have rendered
+  // it — nothing did, so every notification the system has ever sent
+  // was a dead end. Clicking a row now marks it read (if unread) AND
+  // takes the caller to what it's actually about; a row with no link
+  // (older rows from before this fix, or an event type that never set
+  // one) still just marks itself read, same as before.
+  function openNotification(n: Notification) {
+    if (!n.is_read) void markRead(n.id);
+    if (n.link) navigate(n.link);
+  }
+
   return (
     <div>
       <PageHeader title="Notifications" help="inbox" />
@@ -60,7 +74,7 @@ export function InboxPage() {
             {rows.map((n) => (
               <button
                 key={n.id}
-                onClick={() => !n.is_read && markRead(n.id)}
+                onClick={() => openNotification(n)}
                 className={cn('flex w-full flex-col gap-0.5 border-b border-hairline px-4 py-3 text-left last:border-0', !n.is_read && 'bg-[#F2F7FF]')}
               >
                 <div className="flex items-center gap-2">

@@ -45,6 +45,31 @@ describe('/api/tasks route resolution', () => {
     await app.close();
   });
 
+  test('the assignment/transfer routes added 2026-09-11 all resolve, and do not shadow /board or /:id/notes', async () => {
+    const app = buildServer();
+    await app.ready();
+    const id = '1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60718';
+
+    const claim = app.findRoute({ method: 'POST', url: `/api/tasks/${id}/claim` });
+    assert.ok(claim, 'POST /api/tasks/:id/claim must resolve');
+    assert.equal(claim.params.id, id);
+
+    const invite = app.findRoute({ method: 'POST', url: `/api/tasks/${id}/invite-transfer` });
+    assert.ok(invite, 'POST /api/tasks/:id/invite-transfer must resolve');
+    assert.equal(invite.params.id, id);
+
+    const list = app.findRoute({ method: 'GET', url: '/api/task-invites' });
+    assert.ok(list, 'GET /api/task-invites must resolve');
+
+    for (const verb of ['accept', 'decline', 'cancel']) {
+      const match = app.findRoute({ method: 'POST', url: `/api/task-invites/${id}/${verb}` });
+      assert.ok(match, `POST /api/task-invites/:id/${verb} must resolve`);
+      assert.equal(match.params.id, id);
+    }
+
+    await app.close();
+  });
+
   test('the nested literal routes under /:id are untouched', async () => {
     const app = buildServer();
     await app.ready();
