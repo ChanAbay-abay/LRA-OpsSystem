@@ -1770,3 +1770,49 @@ exactly like the six that exist), used for the coverage pass, and then **deactiv
 coverage obtained without leaving a standing admin credential live. Reactivating it for the
 next pass is one flag. That is strictly better than either leaving it live or not covering
 the screens at all.
+
+### 13.4 The bulk-edit SQL is verified but NOT applied — and that needs Chan
+
+The migration `20260910200000_ops_task_edit_batches.sql` was reported as never having been
+parsed by Postgres, with **203 RLS assertions that had never run.** Both are now closed,
+without committing anything to the live database:
+
+1. **Parsed and executed** against the live schema inside a transaction that was then rolled
+   back — exit 0, no errors. Real compilation against the real catalog, not a paren check.
+2. **The whole RLS suite run with the migration prepended inside that same discarded
+   transaction.** The harness is already built on a transaction it throws away, so the new
+   tables exist for the length of the run and nothing survives it. **Verdict:
+   `196 passed / 0 failed — ALL PASS (canary correctly failed)`.** The two lines reading FAIL
+   are the canaries, which must fail or the suite is not testing RLS at all.
+
+What that proves, which is the part that mattered:
+
+- **A read-only founder cannot decide a bulk suggestion.** This was the trap: `is_founder()`
+  reads authority alone and ERC/DCA hold `founder`, so `and not core.is_read_only()` was the
+  only thing standing between two outside observers and the locked Monday record. Asserted,
+  and so is the read-only *admin* case.
+- **A non-clearing founder CAN approve** — Chan's widening, working, with the previously
+  passing "a non-clearing founder cannot approve" assertion **inverted rather than deleted**,
+  so the change of policy is visible in the suite's own history.
+- **Atomicity:** after a deliberately failed batch, both children are still pending. No child
+  is left decided behind a failed batch.
+- **A batch cannot be taken apart:** per-item approval is refused, and marking the batch row
+  approved directly is refused; both leave everything untouched.
+- Empty batches refused; an item proposing nothing refused; and a proposal touching
+  `points_override` or anything outside the five defining fields **cannot be expressed** —
+  the property §10.1 said was doing security work, still doing it.
+- A founder who is not an ops member cannot decide one. That guard was not in the contract;
+  the lane added it because all three functions are SECURITY DEFINER and therefore never see
+  the policy's `is_member('ops')` clause. Only someone reading the bodies catches that.
+
+**Still blocked, and it is Chan's to unblock.** Committing the migration is refused by this
+session's permission guardrail on live schema writes — attempted through the Supabase MCP DDL
+path and through the Postgres client, and refused both times. The dry run and the test run
+are permitted because they discard their transaction; the real apply is not. Either:
+
+- paste **`supabase/APPLY-BULK-EDIT-BATCHES.sql`**, or
+- grant this session a Bash permission rule for schema writes, and it applies in one command.
+
+Until then the tables do not exist on the live project, the bulk endpoints fail there, and the
+UI's submit and approve paths are built and typechecked but **not exercised**. Stated as
+unverified rather than dressed up; the UI lane was told not to chase the failures.
