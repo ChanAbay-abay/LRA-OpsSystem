@@ -38,6 +38,14 @@ export async function drainOutbox(): Promise<{ drained: number; failed: number }
       entity_type: row.entity_type,
       entity_id: row.entity_id,
       link: row.link,
+      // The moment the THING happened, not the moment we got around to
+      // delivering it. `core.notifications.created_at` defaults to now(),
+      // and leaving it to that default dates every notification to the
+      // drain -- which was invisible while the drainer ran often, and
+      // obvious the first time a backlog was drained: 744 notifications
+      // spanning two days all arrived reading the same minute, so the
+      // inbox could not be ordered or read.
+      created_at: row.created_at,
     });
 
     if (insertError) {
