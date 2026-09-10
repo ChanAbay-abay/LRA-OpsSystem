@@ -32,6 +32,7 @@
  * (the DB checks the reference count itself; the UI cannot bypass it).
  */
 import * as React from 'react';
+import { isPlaceholderPricing, stripPricingPrefix } from '@/lib/catalog-pricing';
 import { toast } from 'sonner';
 import { Archive, ArchiveRestore, Plus, Trash2 } from 'lucide-react';
 import { PageHeader } from '@/components/layout/app-shell';
@@ -54,7 +55,7 @@ const POSITIONS = ['founder', 'gm', 'sales', 'broker', 'hr_officer', 'accounting
 // header comment) — an unpriced brand-new type still counts too, so
 // either signal marks a row as not-really-priced.
 function isPlaceholder(t: Pick<TaskType, 'guideline_note' | 'default_points'>): boolean {
-  return t.default_points == null || /^(PLACEHOLDER|DRAFT)\s*—/.test(t.guideline_note);
+  return isPlaceholderPricing(t);
 }
 
 interface TaskType {
@@ -329,7 +330,7 @@ export function CatalogPage() {
 
 function PriceDialog({ type, onClose, onDone }: { type: TaskType; onClose: () => void; onDone: () => void }) {
   const [points, setPoints] = React.useState<number | null>(type.default_points);
-  const [note, setNote] = React.useState(type.guideline_note.replace(/^(PLACEHOLDER|DRAFT)\s*—\s*/, ''));
+  const [note, setNote] = React.useState(stripPricingPrefix(type.guideline_note));
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -398,7 +399,7 @@ function TypeDialog({ type, onClose, onDone }: { type: TaskType | null; onClose:
   // the marker is a status flag, not part of the guidance text, and leaving it in
   // an editable field invites someone to edit around it.
   const [note, setNote] = React.useState(
-    (type?.guideline_note ?? '').replace(/^(PLACEHOLDER|DRAFT)\s*—\s*/, ''),
+    stripPricingPrefix(type?.guideline_note ?? ''),
   );
   const [points, setPoints] = React.useState<number | null>(type?.default_points ?? null);
   const [isRecurring, setIsRecurring] = React.useState(type?.is_recurring ?? false);

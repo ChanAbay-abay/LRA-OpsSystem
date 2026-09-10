@@ -47,6 +47,7 @@ import { CardRail, RailControls } from '@/components/scoreboard/card-rail';
 import { useRail } from '@/components/scoreboard/use-rail';
 import { PeriodTabs } from '@/components/scoreboard/period-tabs';
 import { PersonCard, PersonCardSkeleton } from '@/components/scoreboard/person-card';
+import { PointsReference } from '@/components/scoreboard/points-reference';
 import {
   PERIOD_STORAGE_KEY,
   periodCaption,
@@ -145,6 +146,12 @@ export function ScoreboardPage() {
           </>
         )}
       </ResourceView>
+
+      {/* Its own resource, deliberately outside the ResourceView above —
+          the catalog isn't part of the scoreboard summary and a slow or
+          restricted leaderboard should never hide the one thing that
+          explains the numbers on it. */}
+      <PointsReference />
     </div>
   );
 }
