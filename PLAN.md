@@ -1170,3 +1170,213 @@ score and hit-rate* (the judgement of them) that becomes founder-only.
 founder + admin only. Whether the **GM** should see reliability is genuinely ambiguous — the
 GM manages the team but is also measured by the same instrument. Including them is a one-line
 change; say the word.
+
+---
+
+## 11. Chan's asks, 2026-09-10 (overnight)
+
+Given with the same standing authority as §10 and the same instruction restated:
+**"dont stop to report back to me. stop when there's something i actually have to
+review."** Nothing here may end in a state that blocks him, and nothing here is a
+question put back to him unless proceeding either way would be unsafe.
+
+| # | Ask | Status |
+|---|---|---|
+| 1 | Now-page tasks must be **interactable** | in flight |
+| 2 | **"users cant unblock a task, fix it"** | in flight |
+| 3 | Make it **clear which tasks you're blocking and which you're not** | in flight |
+| 4 | Scoreboard: denser, no raw points, three buckets, earned-vs-possible, four periods, a card per person in a horizontal rail | in flight |
+| 5 | "outside of these, keep going and improve UX as you go" | standing |
+
+### 11.1 Ask #2 had TWO root causes, and the first one was not about permissions at all
+
+**Root cause 1 — every bodyless POST in the web app was dead before it left the browser.**
+Reproduced with curl against the running API, not reasoned:
+
+```
+POST /api/blocks/:id/resolve   ->  400
+{"code":"FST_ERR_CTP_EMPTY_JSON_BODY",
+ "message":"Body cannot be empty when content-type is set to 'application/json'"}
+```
+
+`apps/web/src/lib/api.ts` set `Content-Type: application/json` on **every** request, and
+`api.post(path)` with no second argument sends `body: undefined`. Fastify's JSON
+content-type parser was therefore handed a request that declared a JSON body and contained
+none, and refused it **before the route handler ran.** The request never reached the
+database, which is exactly why the failure looked identical for the block's creator, the
+person named in it, oversight and admin alike: **no permission rule was ever consulted.**
+
+It was never only about blocks. Seven call sites were dead the same way:
+
+| Path | What it does |
+|---|---|
+| `POST /api/blocks/:id/resolve` | resolve a block — from the task modal **and** the board |
+| `POST /api/notifications/:id/read` | mark a notification read |
+| `POST /api/tasks/:id/commit` | commit a task to the week |
+| `POST /api/weeks/:id/generate-recurring` | generate a week's recurring tasks |
+| `POST /api/weeks/:id/briefing/open` | **open the Monday briefing** |
+| `POST /api/weeks/:id/briefing/close` | **close the Monday briefing** |
+
+That is most of the Monday flow — the thing this system exists for — broken from the UI,
+while every one of those endpoints passed its own API-level test, because the tests call
+the routes directly and never go through `lib/api.ts`. **The seam between the client and
+the API had no test at all, and that is where the bug lived.**
+
+Fixed once, at the source: the header is sent only when there is a body. Verified by
+driving all five non-destructive paths with curl — each now returns a real domain refusal
+(`404 task not found`, `422 unknown week`, …) instead of the content-type error. `briefing/
+close` was deliberately not called: closing a week is irreversible.
+
+**Root cause 2 — and the mirror was on the wrong side of it.**
+
+Underneath the content-type bug there was a second, genuine permission defect — and it is
+still real, because with root cause 1 fixed the request now reaches RLS and gets refused.
+
+`ops.task_blocks_update` grants the block's `created_by`, its named `blocking_user_id`,
+or `core.is_oversight()`. The board's detail modal gated its Resolve control on
+`isOversight || task.owner_user_id === me.id`. **Those are two different sets, and the
+mismatch runs in both directions:**
+
+- a task's **owner** who did not declare the block was shown a Resolve button the
+  database would refuse — Chan's report, exactly;
+- the staff member who **declared** the block was allowed by RLS but had the button
+  hidden from them.
+
+So the fix is two-sided, and the database half is the substantive one: **the owner of a
+blocked task is a legitimate resolver.** They are the person who finds out first that
+the thing they were waiting on has arrived, and denying them the resolve is what turned
+the whole Blocked column into a dead end — a card that can enter and never leave.
+
+The lesson generalises past this one policy: **a client-side permission mirror that was
+never diffed against the policy it mirrors is not a mirror, it is a second opinion.**
+`lib/task-permissions.ts` was written with exactly this discipline for `moveRefusal`
+(one refusal string per `raise exception`); the block panel simply never got the same
+treatment. Every remaining write surface in the web app should be diffed against its
+policy the same way — that is the pattern to search for, not this one instance.
+
+### 11.2 Ask #3 is an information-architecture problem, not a styling one
+
+"Which tasks you're blocking and which tasks you're not" are two different relationships
+to a block that the app rendered identically:
+
+- **your work is stuck** — someone or something is holding *you* up. This is the
+  exoneration side; PRD §5.2 already promises the reliability formula will not count it
+  against you, and the screen should say so.
+- **you are holding someone else up** — the accountability side. This never had a
+  surface at all, despite `ops.task_blocks.blocking_user_id` existing since Phase 3 and
+  the reliability formula already charging a modifier for it (`hoursBlockedByThem`).
+
+A person was being scored on hours of other people's work they had blocked, with **no
+screen that told them they were blocking anything.** That is the defect. `/api/now` gains
+`blockingOthers[]` and the Now screen gains the section for it.
+
+### 11.3 Ask #4: killing the raw-points readout without hiding the cap
+
+Chan: "i dont see a point in seeing the raw points." He is right that
+`cappedScore / rawClearedPoints raw` on every row is noise — it shows a second number on
+every row to explain a haircut that applies to some rows some weeks.
+
+But §2.6 is explicit that the recurring cap must never land as a **silent** haircut, and
+that constraint outlives the readout that was serving it. So the two-number readout goes
+and the disclosure stays, moved to where it actually applies: when a person's capped
+score differs from their raw cleared total, the card must still be able to tell them so.
+Deleting the readout and the disclosure together would have been the easy reading of the
+instruction and the wrong one.
+
+The four buckets (`toDo` / `pending` / `completed` / `atRisk`, against `possible`) are
+DESIGN §6's bank-balance metaphor applied to a person instead of a task, which is why
+they are named in that vocabulary rather than a new one. `cancelled` is excluded from
+every bucket **and** from `possible` — a cancelled task is not a point someone failed to
+earn, and putting it in the denominator would quietly punish people for work the company
+called off.
+
+### 11.4 Judgement calls made tonight, all one-line reversals
+
+Flagged rather than silently chosen, per Chan's standing rule.
+
+1. **Read-only accounts are off the scoreboard rail.** ERC and DCA are read-only founder
+   accounts belonging to the two other brokerages' principals — they watch LRA, they do
+   not work in it, and they can never own, submit or clear a task. Their cards were
+   therefore permanently empty seats: not "scored zero this week" but *cannot ever
+   score*, which is a different claim and one the card had no way to make. They still
+   **see** the whole scoreboard — read-only is a flag on the write half, never the read
+   half. Filtered in the list handler, not in `buildScoreboard`, so
+   `GET /api/scoreboard/:userId` still resolves their own profile instead of 404ing with
+   "not an active ops member," which would be false. `routes/briefing.ts`'s standup
+   scorecard walks the same roster and **still lists them** — that screen is about who is
+   in the room, arguably a different question, so it was left alone rather than changed by
+   extension.
+2. **The recurring-cap disclosure is scoped to the This-week window.** `cappedScore` is a
+   weekly figure by construction, so claiming a this-week haircut against a 13-week total
+   would have been a quieter lie than the two-number readout Chan asked to delete.
+3. **`periods.all` is not re-anchored on `?weekId=`.** "All time" means all time even when
+   the caller is inspecting a past week.
+4. **A zero carries no tone.** `.num-pending`'s amber and dashed underline mean "these
+   points exist and have not cleared yet"; painted on a `0` it announced a debt that was
+   not there, and on a card with three zeroed buckets it was the loudest thing on screen.
+5. **Read-only accounts are not offered as a block target, a task owner, or a
+   reassignment target either.** Same reasoning as #1, applied to every picker that names
+   a person: a read-only founder cannot start, submit, clear or resolve anything, so
+   naming one asks for something they are structurally unable to give — and in the block
+   case it would still charge them a reliability point every 8 hours the block stayed
+   open. Three call sites: `task-detail-dialog.tsx`'s person picker,
+   `create-task-dialog.tsx`'s owner select, `task-edit-request-dialog.tsx`'s reassignment
+   select. `readOnly` is optional on every client-side `Member` type on purpose — a
+   payload that does not carry it must never accidentally exclude a real teammate.
+
+### 11.5 One migration is written but NOT applied — Chan's paste, as usual
+
+`supabase/migrations/20260910190000_ops_task_block_owner_resolves.sql` — the database half
+of ask #2 — **has not been applied to `ttrjzyyuktropkufkcoj`.** This is the project's
+standing arrangement, not a new obstacle: no agent here has ever held DDL credentials, so
+migrations go through the Supabase SQL editor. Paste-ready as
+**`supabase/APPLY-BLOCK-OWNER-RESOLVES.sql`**, same convention as the three `APPLY-*.sql`
+files already in that directory.
+
+`scripts/run-rls-tests.sh` needs the same credential, so the **nine new assertions written
+for this policy have never run.** They will on the next `npm run test:rls`.
+
+**Consequence, stated plainly.** Resolving a block **works today** for the three
+identities the live policy already grants — the block's creator, the person it names, and
+oversight — because root cause 1 (§11.1) is a client fix and is already in. Verified
+end-to-end in the browser: a person-target block was raised from the task modal, appeared
+on the named person's Now screen under "Work you are holding up," and was resolved by
+them.
+
+The **one** case still refused until this migration is applied is a task's owner who
+neither raised the block nor is named in it and is not oversight. The client mirror
+(`blockResolveRefusal`) reflects the post-migration policy, so the UI offers them the
+action and the database declines it — as `409 BLOCK_NOT_OPEN`, "That block is already
+resolved, or it is not yours to resolve." Wrong for that person, but a sentence rather
+than a stack trace.
+
+**Verified against the live database after Chan applied it (2026-09-10, in the browser):**
+GM raised an external block on Broker's task; Broker — the owner, who neither raised it nor
+is named in it and is not oversight — resolved it. The block now reads "Was waiting on
+Manila port authority · raised by GM (demo) · resolved by Broker (demo)". That write was
+refused an hour earlier. Demo state restored.
+
+### 11.6 A third defect, found while verifying the second
+
+**Choosing an action from a task card's 3-dot menu also opened the task modal on top of
+whatever the action opened.** Reproduced, then root-caused from a captured stack trace
+rather than guessed:
+
+`TaskCardMenuButton` renders its menu through `DropdownMenu.Portal`. A Radix portal moves
+the menu's DOM node to `document.body` but leaves it **a child of the card in the React
+tree** — and React dispatches synthetic events along the fiber tree, not the DOM tree. So
+clicking "Declare a block" inside that portal propagated up to the card's own `onClick` and
+opened the detail dialog over the block dialog the menu item had just opened, inerting it.
+
+The trigger button's existing `stopPropagation` could never have helped: the click that
+matters lands on the menu ITEM, in the portal, not on the trigger. **The right-click path
+never had the bug, and that is what isolated it** — `TaskCardContextMenu` wraps the card
+from the outside, so its portal's fiber chain does not run through the card's handler.
+
+Fixed by comparing against the real DOM subtree in the card's `onClick`
+(`if (!e.currentTarget.contains(e.target)) return;`) rather than patching this one menu —
+a click that did not physically happen inside the card is not a click on the card, and that
+holds for any portalled control put inside a card later. Verified both ways in the browser:
+the menu now opens exactly one dialog, and clicking the card body still opens the task.
+
+Everything else this session is applied, built and tested.
