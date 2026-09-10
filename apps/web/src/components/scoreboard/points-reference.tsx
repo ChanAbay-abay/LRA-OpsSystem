@@ -45,9 +45,22 @@ export function PointsReference() {
 
   return (
     <div className="mt-6">
+      {/*
+        Framed as EXAMPLES, not as a price list. Chan's reason is the
+        useful one: "this will help them be able to gauge better which
+        tasks are worth what incase they have a task thats outside what
+        we already have set." The catalog will never cover every job a
+        brokerage does, so the value of this panel is calibration by
+        analogy — find the listed work your task most resembles, and take
+        its number. A heading that reads like a definitive price list
+        invites the opposite conclusion: that unlisted work has no value.
+      */}
       <div className="mb-3">
-        <h2 className="text-subtitle text-ink">What a point is worth</h2>
-        <p className="text-body-sm text-ink-3">Active catalog work, grouped by the points it earns.</p>
+        <h2 className="text-subtitle text-ink">What work is worth, with examples</h2>
+        <p className="text-body-sm text-ink-3">
+          Doing something that isn't listed? Find the closest example and use its points — these are a guide for
+          judging effort, not the only work that counts.
+        </p>
       </div>
 
       <ResourceView
@@ -66,7 +79,8 @@ export function PointsReference() {
           if (groups.length === 0) {
             return (
               <p className="rounded-xl border border-hairline bg-surface p-4 text-body-sm text-ink-3">
-                Nothing has a real point value yet — every active type is still on placeholder pricing at /catalog.
+                No example is priced yet — every active type is still on placeholder pricing at /catalog, so there
+                is nothing to gauge against.
               </p>
             );
           }
