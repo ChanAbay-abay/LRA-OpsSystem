@@ -43,7 +43,7 @@ export function ReasonTextarea({
           touched && short && 'border-[#B3261E] focus-visible:border-[#B3261E] focus-visible:ring-[#FBEBE9]'
         )}
       />
-      <span className={cn('num num-xs self-end', touched && short ? 'text-danger' : 'text-ink-3')}>
+      <span className={cn('num text-num-xs self-end', touched && short ? 'text-danger' : 'text-ink-3')}>
         {value.trim().length}/{MIN_LENGTH} min
       </span>
     </div>

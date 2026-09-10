@@ -155,7 +155,11 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
           // amber/red semantic tokens -- next to identity, not a banner
           // repeated on every screen.
           <span
-            className="mb-2 inline-flex w-fit items-center gap-1 rounded-xs border border-white/15 bg-white/[.06] px-1.5 py-0.5 text-micro text-on-dark-3"
+            // `flex`, not `inline-flex`: as an inline box the chip flowed
+            // on the same line as the Sign out button below it and the
+            // `mb-2` did nothing, so the two collided in the footer.
+            // Block-level makes the margin real and drops the button.
+            className="mb-2 flex w-fit items-center gap-1 rounded-xs border border-white/15 bg-white/[.06] px-1.5 py-0.5 text-micro text-on-dark-3"
             title="This account can see everything but change nothing."
           >
             <Eye className="size-3" aria-hidden />

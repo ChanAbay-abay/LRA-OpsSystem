@@ -356,12 +356,12 @@ function ScorecardSection({ scorecard, previousWeek }: { scorecard: ScorecardRow
                   <td className="px-3">
                     {row.name} <span className="text-eyebrow text-ink-3">{row.position}</span>
                   </td>
-                  <td className="num num-sm px-3 text-right">{row.committedPoints}</td>
-                  <td className="num num-sm px-3 text-right">{row.clearedCommittedPoints}</td>
+                  <td className="num text-num-sm px-3 text-right">{row.committedPoints}</td>
+                  <td className="num text-num-sm px-3 text-right">{row.clearedCommittedPoints}</td>
                   {showHitRate ? (
-                    <td className="num num-sm px-3 text-right">{row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`}</td>
+                    <td className="num text-num-sm px-3 text-right">{row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`}</td>
                   ) : null}
-                  <td className="num num-sm px-3 text-right text-ink">{row.clearedPoints}</td>
+                  <td className="num text-num-sm px-3 text-right text-ink">{row.clearedPoints}</td>
                 </tr>
               ))}
             </tbody>
@@ -384,7 +384,7 @@ function CarryOverSection({ carryOvers }: { carryOvers: CarryOver[] }) {
             <div key={c.id} className="flex items-center gap-4 border-b border-hairline px-4 py-2 text-body-sm last:border-0">
               <span className="flex-1 truncate">{c.title}</span>
               <span className="text-ink-3">{c.ownerName}</span>
-              <span className={cn('num num-xs flex items-center gap-1', c.carryOverCount >= 3 ? 'text-danger' : 'text-ink-3')}>
+              <span className={cn('num text-num-xs flex items-center gap-1', c.carryOverCount >= 3 ? 'text-danger' : 'text-ink-3')}>
                 <RotateCcw className="size-3" aria-hidden /> {c.carryOverCount}w
               </span>
             </div>
@@ -409,7 +409,7 @@ function BlocksSection({ blocks }: { blocks: { open: OpenBlock[]; byBlocker: Arr
               {blocks.open.map((b) => (
                 <li key={b.id} className="text-body-sm">
                   <span className="text-ink">{b.blockingName ?? 'Unknown'}</span> — {b.reason}{' '}
-                  <span className="num num-xs text-ink-3">({b.hoursOpen}h)</span>
+                  <span className="num text-num-xs text-ink-3">({b.hoursOpen}h)</span>
                 </li>
               ))}
             </ul>
@@ -424,7 +424,7 @@ function BlocksSection({ blocks }: { blocks: { open: OpenBlock[]; byBlocker: Arr
               {blocks.byBlocker.map((b) => (
                 <li key={b.label} className="flex justify-between text-body-sm">
                   <span>{b.label}</span>
-                  <span className="num num-sm text-ink">{Math.round(b.hours)}h</span>
+                  <span className="num text-num-sm text-ink">{Math.round(b.hours)}h</span>
                 </li>
               ))}
             </ul>
@@ -479,7 +479,7 @@ function CommitSection({
             <div key={person.userId} className="rounded-xl border border-hairline bg-surface p-4">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-strong text-ink">{person.name}</p>
-                <span className="num num-md text-ink-2">{total}</span>
+                <span className="num text-num-md text-ink-2">{total}</span>
               </div>
               <p className="mb-1 text-eyebrow text-ink-3">Committed</p>
               {theirCommitted.length === 0 ? (
