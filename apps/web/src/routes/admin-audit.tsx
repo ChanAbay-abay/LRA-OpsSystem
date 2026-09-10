@@ -38,6 +38,7 @@ export function AdminAuditPage() {
       <PageHeader
         title="Audit timeline"
         description="Append-only — no role, including service_role, can UPDATE or DELETE a row here. This is a read, not a report you can edit."
+        help="admin-audit"
       />
       <div className="mb-3 max-w-xs">
         <Input placeholder="Filter by entity type (e.g. ops.task)" value={entityType} onChange={(e) => setEntityType(e.target.value)} />

@@ -27,6 +27,7 @@ import { useResource } from '@/lib/use-resource';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { bandChipClass, BAND_LABEL, type ReliabilityBand } from '@/lib/reliability-ui';
+import { positionLabel } from '@/lib/labels';
 
 interface WeeklyContribution {
   weekId: string;
@@ -119,7 +120,8 @@ export function PersonPage() {
             <>
               <PageHeader
                 title={p.name ?? 'Unnamed'}
-                description={`${p.position.replace('_', ' ')} · week of ${p.currentWeek.weekStart}`}
+                description={`${positionLabel(p.position)} · week of ${p.currentWeek.weekStart}`}
+                help="person"
               />
 
               {/*

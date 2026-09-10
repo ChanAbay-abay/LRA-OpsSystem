@@ -124,6 +124,7 @@ export function CatalogPage() {
       <PageHeader
         title="Task catalog"
         description="What LRA's work is worth, in the founder's own words."
+        help="catalog"
         actions={
           canEdit ? (
             <Button onClick={() => setEditingType('new')}>

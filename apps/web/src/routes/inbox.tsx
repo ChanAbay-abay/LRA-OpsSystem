@@ -48,7 +48,7 @@ export function InboxPage() {
 
   return (
     <div>
-      <PageHeader title="Notifications" />
+      <PageHeader title="Notifications" help="inbox" />
       <ResourceView
         resource={resource}
         skeleton={<SkeletonRows rows={5} height={56} />}

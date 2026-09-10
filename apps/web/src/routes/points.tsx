@@ -14,6 +14,8 @@ import { useResource } from '@/lib/use-resource';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
+import { taskStatusTransition } from '@/lib/labels';
+import { formatDuration } from '@/lib/duration';
 
 interface Balance {
   user_id: string;
@@ -64,7 +66,7 @@ export function PointsPage() {
     [me?.id]
   );
   const balance = balanceResource.data;
-  const [oldestDays, setOldestDays] = React.useState<number | null>(null);
+  const [oldestMs, setOldestMs] = React.useState<number | null>(null);
 
   // `Date.now()` was being called inline in the render body (defect #7)
   // -- React treats that as impure regardless of whether the result is
@@ -72,11 +74,16 @@ export function PointsPage() {
   // Computing it here, in an effect that only re-runs when the fetched
   // timestamp actually changes, keeps the impure call out of render
   // entirely rather than just hiding it behind a memo.
+  //
+  // DESIGN.md §18.2's second bug on this screen: this used to floor to
+  // whole DAYS (`Math.floor(ms / 864e5)`), so anything under 24h old
+  // rendered "oldest item waiting 0d". The raw ms now goes straight to
+  // `formatDuration` (§18.1) instead — the arithmetic is deleted, not
+  // fixed, because `formatDuration` already owns every one of its
+  // thresholds.
   React.useEffect(() => {
-    setOldestDays(
-      balance?.oldest_pending_since
-        ? Math.floor((Date.now() - new Date(balance.oldest_pending_since).getTime()) / 864e5)
-        : null
+    setOldestMs(
+      balance?.oldest_pending_since ? Date.now() - new Date(balance.oldest_pending_since).getTime() : null
     );
   }, [balance?.oldest_pending_since]);
 
@@ -84,7 +91,7 @@ export function PointsPage() {
 
   return (
     <div>
-      <PageHeader title="My points" description="Cleared, waiting to clear, and committed." />
+      <PageHeader title="My points" description="Cleared, waiting to clear, and committed." help="points" />
 
       <ResourceView
         resource={balanceResource}
@@ -101,9 +108,14 @@ export function PointsPage() {
               <span className="num text-[40px] font-medium leading-none text-pending">{pending}</span>
               <span className="num text-num-sm text-ink-2">{balance?.pending_with_gm ?? 0} with GM</span>
               <span className="num text-num-sm text-ink-2">{balance?.pending_with_founder ?? 0} with Founder</span>
-              {oldestDays != null ? (
-                <span className={cn('num text-num-xs', oldestDays >= 4 ? 'text-danger' : oldestDays >= 2 ? 'text-pending' : 'text-ink-3')}>
-                  oldest item waiting {oldestDays}d
+              {oldestMs != null ? (
+                <span
+                  className={cn(
+                    'num text-num-xs',
+                    oldestMs >= 4 * 86_400_000 ? 'text-danger' : oldestMs >= 2 * 86_400_000 ? 'text-pending' : 'text-ink-3'
+                  )}
+                >
+                  Oldest item waiting {formatDuration(oldestMs)}
                 </span>
               ) : null}
             </div>
@@ -129,7 +141,7 @@ export function PointsPage() {
               <div key={row.id} className="flex items-center gap-4 border-b border-hairline px-3 py-2 text-body-sm last:border-0">
                 <span className="num text-num-xs w-32 shrink-0 text-ink-3">{new Date(row.created_at).toLocaleString()}</span>
                 <span className="flex-1 truncate">
-                  {row.from_status} → {row.to_status}
+                  {taskStatusTransition(row.from_status, row.to_status)}
                   {row.reason ? <span className="ml-2 text-ink-3">— {row.reason}</span> : null}
                 </span>
                 <span className={cn('num text-num-sm shrink-0', row.state === 'cleared' ? 'text-cleared' : 'text-ink-3')}>

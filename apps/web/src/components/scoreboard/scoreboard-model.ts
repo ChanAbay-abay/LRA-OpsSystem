@@ -31,8 +31,15 @@
  *      where it applies.
  */
 import type { ReliabilityBand } from '@/lib/reliability-ui';
+// Relative, not `@/lib/labels` — this module is unit-tested directly by
+// `node --test`, which resolves imports with plain Node module
+// resolution and has no Vite alias to expand `@/`. A `type`-only import
+// (like the `ReliabilityBand` one above) gets erased and never hits
+// this problem; `periodTabLabel` is a real runtime import, so it needs
+// a path Node can actually follow.
+import { periodTabLabel, type PeriodKey } from '../../lib/labels';
 
-export type PeriodKey = 'week' | 'month' | 'quarter' | 'all';
+export type { PeriodKey };
 
 export const PERIOD_KEYS: readonly PeriodKey[] = ['week', 'month', 'quarter', 'all'];
 
@@ -42,12 +49,15 @@ export const PERIOD_KEYS: readonly PeriodKey[] = ['week', 'month', 'quarter', 'a
  * API sends back in `weekCount`. The tabs carry the intent (so two tabs
  * never end up with the same label on a young dataset) and the caption
  * carries the fact — see `periodShortfall`.
+ *
+ * DESIGN.md §17.1's move table: the words now live in `lib/labels.ts`.
+ * Sourced from there so `period-tabs.tsx`'s call site needs no change.
  */
 export const PERIOD_TAB_LABEL: Record<PeriodKey, string> = {
-  week: 'This week',
-  month: '4 weeks',
-  quarter: '13 weeks',
-  all: 'All time',
+  week: periodTabLabel('week'),
+  month: periodTabLabel('month'),
+  quarter: periodTabLabel('quarter'),
+  all: periodTabLabel('all'),
 };
 
 /** Weeks each window is *meant* to span. `all` spans whatever exists. */

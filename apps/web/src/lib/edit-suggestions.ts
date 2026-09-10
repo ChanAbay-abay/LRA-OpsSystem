@@ -32,6 +32,7 @@
 
 import type { EditRequestFieldKey, EditRequestStatus, FieldDiff, TaskEditRequest } from './task-edit-requests';
 import type { Actor } from './task-permissions';
+import { suggestionFieldLabel } from './labels';
 
 /** The five fields `ops.task_edit_requests` can carry, reused rather than re-listed. */
 export type SuggestionField = EditRequestFieldKey;
@@ -67,12 +68,17 @@ export const SUGGESTION_FIELDS: SuggestionField[] = [
   'client_ref',
 ];
 
+/**
+ * DESIGN.md §17.1's move table: the words now live in `lib/labels.ts`.
+ * Sourced from there so the briefing screens' several `SUGGESTION_FIELD_LABEL[x]`
+ * call sites need no change.
+ */
 export const SUGGESTION_FIELD_LABEL: Record<SuggestionField, string> = {
-  title: 'Title',
-  description: 'Description',
-  task_type_id: 'Catalog type',
-  owner_user_id: 'Owner',
-  client_ref: 'Client reference',
+  title: suggestionFieldLabel('title'),
+  description: suggestionFieldLabel('description'),
+  task_type_id: suggestionFieldLabel('task_type_id'),
+  owner_user_id: suggestionFieldLabel('owner_user_id'),
+  client_ref: suggestionFieldLabel('client_ref'),
 };
 
 /**

@@ -27,6 +27,7 @@ import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
+import { leaderboardVisibilityLabel } from '@/lib/labels';
 
 interface Settings {
   recurring_cap_pct: number;
@@ -74,7 +75,11 @@ export function AdminSettingsPage() {
 
   return (
     <div>
-      <PageHeader title="Ops settings" description="Recurring cap, staleness, reliability window, leaderboard visibility." />
+      <PageHeader
+        title="Ops settings"
+        description="Recurring cap, staleness, reliability window, leaderboard visibility."
+        help="admin-settings"
+      />
       <ResourceView resource={resource} skeleton={<SkeletonRows rows={1} height={240} />}>
         {() =>
           settings ? (
@@ -137,8 +142,8 @@ export function AdminSettingsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">Everyone</SelectItem>
-              <SelectItem value="oversight_only">Oversight only</SelectItem>
+              <SelectItem value="all">{leaderboardVisibilityLabel('all')}</SelectItem>
+              <SelectItem value="oversight_only">{leaderboardVisibilityLabel('oversight_only')}</SelectItem>
             </SelectContent>
           </Select>
         </Field>

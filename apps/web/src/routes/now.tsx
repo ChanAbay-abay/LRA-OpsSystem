@@ -51,7 +51,8 @@ import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { STATUS_LABEL, blockRelation, blockRelationLabel, statusTone } from '@/lib/task-types';
+import { blockRelation, blockRelationLabel, statusTone } from '@/lib/task-types';
+import { taskStatusLabel } from '@/lib/labels';
 
 const POLL_MS = 20_000;
 
@@ -133,7 +134,7 @@ function StatusChip({ status }: { status: string }) {
         tones[statusTone(status)]
       )}
     >
-      {STATUS_LABEL[status] ?? status}
+      {taskStatusLabel(status)}
     </span>
   );
 }
@@ -385,7 +386,11 @@ export function NowPage() {
 
   return (
     <div>
-      <PageHeader title="Now" description="What's on your plate right now. Refreshes automatically every 20 seconds." />
+      <PageHeader
+        title="Now"
+        description="What's on your plate right now. Refreshes automatically every 20 seconds."
+        help="now"
+      />
 
       <ResourceView resource={resource} skeleton={<SkeletonRows rows={4} height={64} />}>
         {() => {

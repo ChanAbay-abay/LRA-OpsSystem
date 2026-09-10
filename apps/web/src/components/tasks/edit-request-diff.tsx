@@ -23,6 +23,7 @@
 import * as React from 'react';
 import { AlertTriangle, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { editRequestStatusLabel } from '@/lib/labels';
 import type { EditRequestStatus, FieldDiff, TaskEditRequest } from '@/lib/task-edit-requests';
 import type { TaskEditBatch } from '@/lib/edit-suggestions';
 
@@ -31,13 +32,6 @@ const STATUS_TONE: Record<EditRequestStatus, string> = {
   approved: 'border-cleared-border bg-cleared-wash text-cleared',
   rejected: 'border-danger-border bg-danger-wash text-danger',
   withdrawn: 'border-hairline bg-surface-2 text-ink-3',
-};
-
-const STATUS_LABEL: Record<EditRequestStatus, string> = {
-  pending: 'Pending',
-  approved: 'Approved',
-  rejected: 'Rejected',
-  withdrawn: 'Withdrawn',
 };
 
 export function EditRequestStatusChip({ status }: { status: EditRequestStatus }) {
@@ -49,7 +43,7 @@ export function EditRequestStatusChip({ status }: { status: EditRequestStatus })
         STATUS_TONE[status]
       )}
     >
-      {STATUS_LABEL[status]}
+      {editRequestStatusLabel(status)}
     </span>
   );
 }

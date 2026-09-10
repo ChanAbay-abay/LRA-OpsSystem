@@ -35,6 +35,7 @@ import { useResource, type ResourceStatus } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { taskStatusLabel } from '@/lib/labels';
 import {
   COLUMN_STATUS,
   blockResolveRefusal,
@@ -46,7 +47,6 @@ import {
   type MovableTask,
 } from '@/lib/task-permissions';
 import {
-  STATUS_LABEL,
   blockRelation,
   blockRelationLabel,
   blockSubmitRefusal,
@@ -100,7 +100,7 @@ function Chip({
 }
 
 function StatusChip({ status }: { status: string }) {
-  return <Chip tone={statusTone(status)}>{STATUS_LABEL[status] ?? status}</Chip>;
+  return <Chip tone={statusTone(status)}>{taskStatusLabel(status)}</Chip>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

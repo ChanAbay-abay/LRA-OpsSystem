@@ -558,6 +558,7 @@ export function FounderDigest() {
       <PageHeader
         title="This week"
         description="What your team is doing, what is stuck, and what is waiting on you. Points are banked when you approve."
+        help="digest"
       />
 
       <ResourceView resource={resource} skeleton={<SkeletonRows rows={5} height={64} />}>

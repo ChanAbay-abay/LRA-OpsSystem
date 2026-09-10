@@ -23,14 +23,9 @@
  * degrades to today's behaviour, it never grants anything.
  */
 
-export type BoardColumn =
-  | 'backlog'
-  | 'this_week'
-  | 'in_progress'
-  | 'blocked'
-  | 'submitted'
-  | 'verified'
-  | 'cleared';
+import { boardColumnLabel, taskStatusLabel, type BoardColumn } from './labels';
+
+export type { BoardColumn };
 
 /** Columns that map onto a real `ops.task_status`. `blocked` and `this_week` do not. */
 export const COLUMN_STATUS: Partial<Record<BoardColumn, string>> = {
@@ -41,14 +36,21 @@ export const COLUMN_STATUS: Partial<Record<BoardColumn, string>> = {
   cleared: 'cleared',
 };
 
+/**
+ * DESIGN.md §17.1's move table: the words now live in `lib/labels.ts`,
+ * the one file in the web app allowed to hold a display string for a
+ * database enum. `COLUMN_LABEL` stays exported as the same
+ * `Record<BoardColumn, string>` shape it always was, sourced from there,
+ * so board.tsx's dozen `COLUMN_LABEL[x]` call sites need no change.
+ */
 export const COLUMN_LABEL: Record<BoardColumn, string> = {
-  backlog: 'Backlog',
-  this_week: 'This week',
-  in_progress: 'In progress',
-  blocked: 'Blocked',
-  submitted: 'Submitted',
-  verified: 'Verified',
-  cleared: 'Cleared',
+  backlog: boardColumnLabel('backlog'),
+  this_week: boardColumnLabel('this_week'),
+  in_progress: boardColumnLabel('in_progress'),
+  blocked: boardColumnLabel('blocked'),
+  submitted: boardColumnLabel('submitted'),
+  verified: boardColumnLabel('verified'),
+  cleared: boardColumnLabel('cleared'),
 };
 
 /** The minimum a task has to tell us for the ladder below to decide. */
@@ -134,7 +136,7 @@ export function moveRefusal(task: MovableTask, to: BoardColumn, actor: Actor | n
         if (!task.task_type_id) return 'Give this task a catalog type before submitting it.';
         return null;
       }
-      return `A task in ${task.status === 'todo' ? 'Backlog' : 'In progress'} can’t go straight to ${COLUMN_LABEL[to]}.`;
+      return `A task in ${taskStatusLabel(task.status)} can’t go straight to ${COLUMN_LABEL[to]}.`;
     }
 
     case 'submitted': {

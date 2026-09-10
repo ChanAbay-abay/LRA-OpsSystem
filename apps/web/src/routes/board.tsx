@@ -101,6 +101,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ResourceView, SkeletonBoard } from '@/components/ui/resource-state';
+import { Hint } from '@/components/ui/hint';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
@@ -418,15 +419,16 @@ function TaskCard({
       <span className="text-eyebrow text-ink-3">{task.ownerPosition ?? '—'}</span>
       <p className="line-clamp-2 text-strong text-ink">{task.title}</p>
       {blockNote ? (
-        <p
-          className={cn(
-            'truncate text-micro text-blocked',
-            blockNote.relation === 'waiting-on-you' && 'font-semibold'
-          )}
-          title={blockNote.label}
-        >
-          {blockNote.label}
-        </p>
+        <Hint text={blockNote.label}>
+          <p
+            className={cn(
+              'truncate text-micro text-blocked',
+              blockNote.relation === 'waiting-on-you' && 'font-semibold'
+            )}
+          >
+            {blockNote.label}
+          </p>
+        </Hint>
       ) : null}
       <div className="flex items-center justify-between">
         <div
@@ -1295,6 +1297,7 @@ export function BoardPage() {
         <PageHeader
           title="Board"
           description="Drag to move. Every drop goes through the same check a button click would."
+          help="board"
           actions={
             <Button
               onClick={() => setCreateOpen(true)}
@@ -1387,6 +1390,7 @@ export function BoardPage() {
       <PageHeader
         title="Board"
         description="Drag to move. Every drop goes through the same check a button click would."
+        help="board"
         actions={
           <Button
             onClick={() => setCreateOpen(true)}

@@ -46,7 +46,11 @@ export function AdminEverythingPage() {
 
   return (
     <div>
-      <PageHeader title="Everything" description="Every task, every ledger row, every open block — the full picture." />
+      <PageHeader
+        title="Everything"
+        description="Every task, every ledger row, every open block — the full picture."
+        help="admin-everything"
+      />
 
       <h2 className="mb-2 text-subtitle text-ink">Open blocks ({blocksResource.data?.length ?? 0})</h2>
       <div className="mb-6">

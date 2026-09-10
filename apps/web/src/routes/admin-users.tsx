@@ -99,6 +99,7 @@ export function AdminUsersPage() {
       <PageHeader
         title="Provisioning"
         description="Invite the GM, Sales and Broker. Re-running an invite is safe — it repairs missing rows instead of duplicating."
+        help="admin-users"
         actions={
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>

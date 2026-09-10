@@ -31,41 +31,51 @@
  */
 import type { ReactNode } from 'react';
 import { MobileSidebarTrigger, Sidebar } from './sidebar';
+import { HintProvider } from '@/components/ui/hint';
+import { WhatIsThis } from '@/components/ui/what-is-this';
+import type { HelpTopicId } from '@/lib/help';
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-canvas md:flex-row">
-      <Sidebar />
-      <MobileSidebarTrigger />
-      {/*
-        `min-h-0` is what actually makes the scroll happen HERE and not
-        on the document (Chan: "when scrolling, it scrolls the whole
-        page … it should just scroll the right section, not the nav on
-        the left"). A flex child's default `min-height: auto` refuses to
-        shrink below its content, so `overflow-y-auto` on it never has
-        anything to scroll and the overflow escapes to the page — taking
-        the sidebar with it. The wrapper above is `h-screen
-        overflow-hidden` so there is no page scroll left to escape to.
-      */}
-      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+    // `HintProvider` (`@radix-ui/react-tooltip`'s `Provider`) sits here,
+    // once, so every `<Hint>` in the app shares one 350ms open delay
+    // and a 300ms `skipDelayDuration` group (DESIGN.md §20.2) — moving
+    // from one hinted control to another nearby one opens the second
+    // tooltip instantly instead of waiting out the delay again.
+    <HintProvider delayDuration={350} skipDelayDuration={300}>
+      <div className="flex h-screen flex-col overflow-hidden bg-canvas md:flex-row">
+        <Sidebar />
+        <MobileSidebarTrigger />
         {/*
-          `h-full` so a route that wants to own the viewport can. The shell
-          already claims to (`h-screen overflow-hidden` above), but this
-          wrapper was content-sized, so a route asking for `h-full` resolved
-          against its own content instead of the screen and got nothing.
-          `/board` needs it: its lane scroller must be the vertical scroll
-          container for `position: sticky` lane headers to have anything to
-          stick to (DESIGN.md §13).
-
-          Safe for every other route: with `border-box` sizing this is exactly
-          `<main>`'s height, and a page taller than that simply overflows the
-          wrapper and is scrolled by `<main>` as before -- verified on
-          /scoreboard, /briefing and /points, which are all taller than one
-          screen.
+          `min-h-0` is what actually makes the scroll happen HERE and not
+          on the document (Chan: "when scrolling, it scrolls the whole
+          page … it should just scroll the right section, not the nav on
+          the left"). A flex child's default `min-height: auto` refuses to
+          shrink below its content, so `overflow-y-auto` on it never has
+          anything to scroll and the overflow escapes to the page — taking
+          the sidebar with it. The wrapper above is `h-screen
+          overflow-hidden` so there is no page scroll left to escape to.
         */}
-        <div className="mx-auto h-full max-w-app px-6 py-6 lg:px-8">{children}</div>
-      </main>
-    </div>
+        <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+          {/*
+            `h-full` so a route that wants to own the viewport can. The shell
+            already claims to (`h-screen overflow-hidden` above), but this
+            wrapper was content-sized, so a route asking for `h-full` resolved
+            against its own content instead of the screen and got nothing.
+            `/board` needs it: its lane scroller must be the vertical scroll
+            container for `position: sticky` lane headers to have anything to
+            stick to (DESIGN.md §13).
+
+            Safe for every other route: with `border-box` sizing this is exactly
+            `<main>`'s height, and a page taller than that simply overflows the
+            wrapper and is scrolled by `<main>` as before -- verified on
+            /scoreboard, /briefing and /points, which are all taller than one
+            screen.
+          */}
+          <div className="mx-auto h-full max-w-app px-6 py-6 lg:px-8">{children}</div>
+        </main>
+      </div>
+    </HintProvider>
   );
 }
 
@@ -73,15 +83,25 @@ export function PageHeader({
   title,
   description,
   actions,
+  help,
 }: {
   title: string;
   description?: string;
   actions?: ReactNode;
+  /**
+   * DESIGN.md §20.3: required on purpose. A screen cannot ship without
+   * an entry in `lib/help.ts` — TypeScript enforces that across every
+   * route, which is what makes "know more" real instead of aspirational.
+   */
+  help: HelpTopicId;
 }) {
   return (
     <div className="mb-5 flex items-start justify-between gap-4">
       <div>
-        <h1 className="text-title text-ink">{title}</h1>
+        <h1 className="flex items-center gap-2 text-title text-ink">
+          {title}
+          <WhatIsThis topic={help} />
+        </h1>
         {description ? <p className="mt-1 text-body-sm text-ink-3">{description}</p> : null}
       </div>
       {actions}

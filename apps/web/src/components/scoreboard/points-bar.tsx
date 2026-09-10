@@ -23,6 +23,7 @@
  * bans motion on filtering — switching period must swap the shape, not
  * animate to it.
  */
+import { pointsSegmentLabel } from '@/lib/labels';
 import { bucketSegments, type PointBuckets, type SegmentKey } from './scoreboard-model';
 
 const SEGMENT_FILL: Record<SegmentKey, string> = {
@@ -32,11 +33,12 @@ const SEGMENT_FILL: Record<SegmentKey, string> = {
   toDo: 'var(--surface-3)',
 };
 
+// DESIGN.md §17.1's move table: the words now live in `lib/labels.ts`.
 const SEGMENT_WORD: Record<SegmentKey, string> = {
-  completed: 'completed',
-  pending: 'pending approval',
-  atRisk: 'awaiting a cancellation decision',
-  toDo: 'still to do',
+  completed: pointsSegmentLabel('completed'),
+  pending: pointsSegmentLabel('pending'),
+  atRisk: pointsSegmentLabel('atRisk'),
+  toDo: pointsSegmentLabel('toDo'),
 };
 
 export function PointsBar({ buckets }: { buckets: PointBuckets }) {

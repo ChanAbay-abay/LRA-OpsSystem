@@ -81,7 +81,7 @@ test('laneOf finds the lane a column renders in, tabbed or not', () => {
 });
 
 test('a lane announces both of its columns, in flow order', () => {
-  assert.equal(laneLabel(laneOf('backlog')), 'Backlog / This week');
+  assert.equal(laneLabel(laneOf('backlog')), 'Backlog / This Week');
   assert.equal(laneLabel(laneOf('verified')), 'Verified / Cleared');
   assert.equal(laneLabel(laneOf('submitted')), 'Submitted');
 });
@@ -132,8 +132,8 @@ test('a match in the hidden tab is reported, with the tab that holds it', () => 
   assert.equal(matchesElsewhereLabel({ column: 'cleared', count: 3 }, true), '3 matches in Cleared');
   assert.equal(matchesElsewhereLabel({ column: 'cleared', count: 1 }, true), '1 match in Cleared');
   // Unfiltered, the same affordance is about work existing, not searching.
-  assert.equal(matchesElsewhereLabel({ column: 'this_week', count: 4 }, false), '4 tasks in This week');
-  assert.equal(matchesElsewhereLabel({ column: 'this_week', count: 1 }, false), '1 task in This week');
+  assert.equal(matchesElsewhereLabel({ column: 'this_week', count: 4 }, false), '4 tasks in This Week');
+  assert.equal(matchesElsewhereLabel({ column: 'this_week', count: 1 }, false), '1 task in This Week');
 });
 
 test('no affordance when the active tab has its own matches — it would point away from the answer', () => {

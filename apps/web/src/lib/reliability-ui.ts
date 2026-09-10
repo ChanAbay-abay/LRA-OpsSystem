@@ -14,14 +14,22 @@
  * response, the same way every other domain enum in this app (task
  * status, authority) is typed locally rather than shared cross-runtime.
  */
-export type ReliabilityBand = 'excellent' | 'solid' | 'watch' | 'at_risk' | 'unrated';
+import { reliabilityBandLabel, type ReliabilityBand } from './labels';
 
+export type { ReliabilityBand };
+
+/**
+ * DESIGN.md §17.1's move table: the words now live in `lib/labels.ts`.
+ * `BAND_LABEL` stays exported as the same `Record<ReliabilityBand,
+ * string>` it always was, sourced from there, so its two call sites
+ * (`person-card.tsx`, `routes/person.tsx`) need no change.
+ */
 export const BAND_LABEL: Record<ReliabilityBand, string> = {
-  excellent: 'Excellent',
-  solid: 'Solid',
-  watch: 'Watch',
-  at_risk: 'At risk',
-  unrated: 'Unrated',
+  excellent: reliabilityBandLabel('excellent'),
+  solid: reliabilityBandLabel('solid'),
+  watch: reliabilityBandLabel('watch'),
+  at_risk: reliabilityBandLabel('at_risk'),
+  unrated: reliabilityBandLabel('unrated'),
 };
 
 export const BAND_CLASS: Record<ReliabilityBand, string> = {

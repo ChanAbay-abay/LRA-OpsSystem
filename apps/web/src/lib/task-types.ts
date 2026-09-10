@@ -99,16 +99,12 @@ export interface TaskBlock {
   resolvedByName: string | null;
 }
 
-export const STATUS_LABEL: Record<string, string> = {
-  todo: 'Backlog',
-  in_progress: 'In progress',
-  submitted: 'Submitted',
-  verified: 'Verified',
-  cleared: 'Cleared',
-  rejected: 'Returned',
-  cancelled: 'Cancelled',
-  pending_cancellation: 'Awaiting cancellation decision',
-};
+/**
+ * `STATUS_LABEL` used to live here (DESIGN.md §17.1's move table) — it
+ * is `taskStatusLabel` in `lib/labels.ts` now, the one file in the web
+ * app allowed to hold a display string for a database enum. Import it
+ * from there directly; this file is types and tone, not words.
+ */
 
 /** Which DESIGN.md §2.3 semantic hue a status belongs to. One hue per meaning. */
 export function statusTone(status: string): 'neutral' | 'pending' | 'cleared' | 'danger' {
@@ -124,63 +120,19 @@ export function initials(name: string | null) {
 }
 
 // ---------------------------------------------------------------------
-// Block relationships
+// Block relationships — moved to `lib/labels.ts` (DESIGN.md §17.1's
+// move table: "wording unchanged"), re-exported here so every existing
+// `import { blockRelation, blockRelationLabel } from '@/lib/task-types'`
+// keeps working without a call-site change in this pass.
 // ---------------------------------------------------------------------
 
-/**
- * Chan, 2026-09-10: "i want it to be more clear which tasks you're
- * blocking and which tasks you're not."
- *
- * Two relationships used to render identically — a block on your own
- * work that you are waiting on someone for, and a block that names YOU
- * as the thing everyone else is waiting for. They are opposite
- * accountabilities, so they get their own words everywhere a block is
- * rendered (Now's two sections, the board card, the modal's block
- * panel) and those words are decided here, once.
- *
- * `waiting-on-you` deliberately outranks `raised-by-you`: if you both
- * declared the block and are named as the blocker, the consequential
- * fact is that the work is stalled on you, not that you filed it.
- */
-export type BlockRelation = 'waiting-on-you' | 'raised-by-you' | 'waiting-on-other';
-
-export interface BlockParties {
-  created_by: string;
-  blocking_user_id: string | null;
-}
-
-export function blockRelation(block: BlockParties, meId: string | undefined): BlockRelation {
-  if (meId && block.blocking_user_id === meId) return 'waiting-on-you';
-  if (meId && block.created_by === meId) return 'raised-by-you';
-  return 'waiting-on-other';
-}
-
-/**
- * The one sentence for a relationship, short enough for a 288px board
- * card's truncated caption and complete enough for its `title` and the
- * modal. `blockingName` is whoever/whatever the block names — a team
- * member's display name or the free-text outside party.
- */
-export function blockRelationLabel(
-  relation: BlockRelation,
-  blockingName: string | null,
-  target?: string
-): string {
-  // A block whose name could not be resolved still has to read as
-  // something true. "someone else" is wrong for a task-target block —
-  // that block names no person at all — so the fallback follows the
-  // target. DESIGN.md §8: an absence is rendered as an absence, never
-  // as a guessed name.
-  const named = blockingName ?? (target === 'task' ? 'another task' : 'someone else');
-  switch (relation) {
-    case 'waiting-on-you':
-      return 'Waiting on you';
-    case 'raised-by-you':
-      return `You flagged this — waiting on ${named}`;
-    case 'waiting-on-other':
-      return `Waiting on ${named}`;
-  }
-}
+export {
+  blockRelation,
+  blockRelationLabel,
+  type BlockRelation,
+  type BlockParties,
+  type BlockTarget,
+} from './labels';
 
 // ---------------------------------------------------------------------
 // Declaring a block — what makes a draft sendable

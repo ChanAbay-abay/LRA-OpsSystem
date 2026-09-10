@@ -127,7 +127,11 @@ function QueueList() {
 
   return (
     <div>
-      <PageHeader title="Approvals" description="Oldest first. Age is measured from the server clock, not the browser's." />
+      <PageHeader
+        title="Approvals"
+        description="Oldest first. Age is measured from the server clock, not the browser's."
+        help="queue"
+      />
       <ResourceView
         resource={resource}
         skeleton={<SkeletonRows rows={4} height={52} />}

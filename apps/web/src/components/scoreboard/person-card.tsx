@@ -34,6 +34,8 @@ import { Link } from 'react-router-dom';
 import { Percent } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { bandChipClass, BAND_LABEL } from '@/lib/reliability-ui';
+import { Hint } from '@/components/ui/hint';
+import { positionLabel } from '@/lib/labels';
 import { PointsBar } from './points-bar';
 import {
   capDisclosure,
@@ -143,7 +145,7 @@ export function PersonCard({
         </span>
         <span className="min-w-0">
           <span className="block truncate text-strong text-ink">{row.name ?? 'Unnamed'}</span>
-          <span className="block truncate text-micro capitalize text-ink-3">{row.position}</span>
+          <span className="block truncate text-micro text-ink-3">{positionLabel(row.position)}</span>
         </span>
       </div>
 
@@ -155,14 +157,13 @@ export function PersonCard({
         <div className="flex items-center justify-between gap-2">
           <span className="text-eyebrow text-ink-3">Completed</span>
           {cap ? (
-            <span
-              title={capSentence(cap)}
-              className="inline-flex h-5 shrink-0 items-center gap-1 rounded-xs border border-pending-border bg-pending-wash px-[7px] text-label text-pending"
-            >
-              <Percent className="size-3 shrink-0" aria-hidden />
-              Capped <span className="num text-num-xs">{cap.capped}</span>
-              <span className="sr-only">. {capSentence(cap)}</span>
-            </span>
+            <Hint text={capSentence(cap)}>
+              <span className="inline-flex h-5 shrink-0 items-center gap-1 rounded-xs border border-pending-border bg-pending-wash px-[7px] text-label text-pending">
+                <Percent className="size-3 shrink-0" aria-hidden />
+                Capped <span className="num text-num-xs">{cap.capped}</span>
+                <span className="sr-only">. {capSentence(cap)}</span>
+              </span>
+            </Hint>
           ) : null}
         </div>
         <div className="mt-1.5 flex items-baseline gap-1.5">

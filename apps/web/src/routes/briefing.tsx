@@ -291,6 +291,7 @@ export function BriefingPage() {
       <PageHeader
         title="Monday briefing"
         description={week ? `W${weekNumber(week.week_start)} · ${week.week_start} – ${week.week_end}` : undefined}
+        help="briefing"
         actions={
           isOversight && week && week.state === 'planning' ? (
             <div className="flex gap-2">

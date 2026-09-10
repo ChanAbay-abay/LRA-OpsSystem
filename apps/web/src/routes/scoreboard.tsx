@@ -91,6 +91,7 @@ export function ScoreboardPage() {
             ? 'Points completed, waiting to clear and still to do — and each person’s reliability.'
             : 'Points completed, waiting to clear and still to do.'
         }
+        help="scoreboard"
       />
 
       {restricted ? (
