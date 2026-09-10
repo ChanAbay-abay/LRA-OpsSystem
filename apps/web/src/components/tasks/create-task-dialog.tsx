@@ -15,12 +15,19 @@
  * standing rule that the UI must not offer what the database will
  * refuse.
  *
- * Fields: task type (carries the catalog's point value — picking one is
- * how the task gets priced), title, assignee, week. `weekId` is
- * required by the API; this dialog defaults to the current Manila week
- * (`GET /api/weeks/current`) and falls back to the most recent open/
- * planning week from `GET /api/weeks?limit=8` when the current one
- * hasn't been created yet, same as the briefing's own empty state.
+ * Fields: task type (`<TaskTypePicker>` — carries the catalog's point
+ * value; picking one is how the task gets priced), title, assignee,
+ * week.
+ *
+ * `weekId` is required by the API, and this dialog preselects the
+ * current Manila week (`GET /api/weeks/current`) ONLY when it can
+ * actually take a task (not `closed`). It never falls back to a
+ * different week on the user's behalf — an earlier revision did (the
+ * most recent open/planning week from `GET /api/weeks?limit=8`), and
+ * that silently landed a task in last week whenever the current one was
+ * closed (Chan, 2026-09-11). When the current week can't take a task,
+ * the field is left empty, the reason is stated next to it, and the
+ * person picks a week themselves.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
@@ -29,16 +36,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { TaskTypePicker, type PickableTaskType } from '@/components/tasks/task-type-picker';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
+import { fmtWeekRange } from '@/lib/dates';
+import { weekStateLabel } from '@/lib/labels';
 
-interface TaskType {
-  id: string;
-  name: string;
-  category: string;
-  default_points: number | null;
-  is_active: boolean;
-}
+type TaskType = PickableTaskType;
 
 interface Member {
   userId: string;
@@ -87,6 +91,11 @@ export function CreateTaskDialog({
   const [typeId, setTypeId] = React.useState<string>('');
   const [ownerId, setOwnerId] = React.useState<string>(defaultOwnerId ?? me?.id ?? '');
   const [weekId, setWeekId] = React.useState<string>('');
+  // The live Manila week, as `GET /api/weeks/current` reported it — kept
+  // separately from `weeks` so the "why is nothing preselected" message
+  // below can say WHY (never created yet vs. closed) rather than a bare
+  // "pick one".
+  const [currentWeek, setCurrentWeek] = React.useState<Week | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -103,6 +112,7 @@ export function CreateTaskDialog({
         setTypes(allTypes.filter((t) => t.is_active));
         setMembers(roster);
         setWeeks(recent);
+        setCurrentWeek(current ?? null);
         // A closed week is the finished artifact of that week
         // (docs/AGENT-LESSONS.md §9) — it cannot take a new, uncommitted
         // task, and the API's own RLS never checked week state on
@@ -110,19 +120,21 @@ export function CreateTaskDialog({
         // 20260910120100_core_read_only_accounts.sql has no week-state
         // clause at all), so a closed week silently accepted one and it
         // rendered in today's Backlog regardless of the week it was
-        // tagged with (2026-09-10 regression, defect #2). Fixing the
-        // database guard is out of this pass's lane (routes/tasks.ts and
-        // the migration aren't in it — see the coder's report); this
-        // dialog does the honest thing it can do on its own side: never
-        // offer a week the task couldn't really belong to. Prefer the
-        // live current week; a fresh project may not have created it yet
-        // (Phase 5's `POST /api/weeks` is oversight-only), so fall back
-        // to the most recent NON-CLOSED week — never to `recent[0]`,
-        // which can itself be closed right after a rollover.
-        const selectable = recent.filter((w) => w.state !== 'closed');
-        const fallback = selectable[0];
-        const preferred = current && current.state !== 'closed' ? current : undefined;
-        setWeekId(preferred?.id ?? fallback?.id ?? '');
+        // tagged with (2026-09-10 regression, defect #2).
+        //
+        // A previous pass here "fixed" that by falling back to the most
+        // recent non-closed week when the current one was closed — but
+        // that is the same bug in a smaller costume: the fallback week
+        // is never THIS week, so a task created with no explanation
+        // landed in an older week the person never chose (Chan,
+        // 2026-09-11: "when creating a task it falls into last week
+        // instead of this week"). A silently wrong week is worse than an
+        // empty picker. So: preselect the current week ONLY when it can
+        // actually take a task. When it can't — closed, or not created
+        // yet — leave the field empty, and the message block below says
+        // exactly why. The person picks a week themselves; nothing is
+        // ever chosen for them.
+        setWeekId(current && current.state !== 'closed' ? current.id : '');
       })
       .catch((err) => {
         if (cancelled) return;
@@ -136,11 +148,18 @@ export function CreateTaskDialog({
     };
   }, []);
 
-  const selectedType = types.find((t) => t.id === typeId) ?? null;
   // Only a week that can actually receive a new task is offered — never
   // a dead option a person could pick and get a silent, wrong result
   // from (see the fetch effect above for why).
   const selectableWeeks = weeks.filter((w) => w.state !== 'closed');
+  const selectedWeek = weeks.find((w) => w.id === weekId) ?? null;
+  // Says WHY nothing was preselected — "closed" and "doesn't exist yet"
+  // are different situations and read as different sentences.
+  const currentWeekUnavailableReason = !currentWeek
+    ? "This week hasn't been created yet."
+    : currentWeek.state === 'closed'
+      ? "This week is closed and can't take a new task."
+      : null;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -206,31 +225,10 @@ export function CreateTaskDialog({
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="task-type">
+              <Label>
                 Task type <span className="text-micro text-ink-3">— sets the point value</span>
               </Label>
-              <Select value={typeId} onValueChange={setTypeId} disabled={loadingLists}>
-                <SelectTrigger id="task-type">
-                  <SelectValue placeholder="No catalog type (price it later)" />
-                </SelectTrigger>
-                <SelectContent>
-                  {types.map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.name} — {t.default_points ?? '—'} pts
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {selectedType ? (
-                <p className="text-micro text-ink-3">
-                  {selectedType.category} · {selectedType.default_points ?? 'unpriced'} points
-                </p>
-              ) : (
-                <p className="text-micro text-ink-3">
-                  A task needs a catalog type before it can be submitted for approval — this can be set now or from the
-                  task later.
-                </p>
-              )}
+              <TaskTypePicker types={types} value={typeId} onChange={setTypeId} disabled={loadingLists} />
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -306,7 +304,7 @@ export function CreateTaskDialog({
                 {!weekId ? <option value="">Pick a week</option> : null}
                 {selectableWeeks.map((w) => (
                   <option key={w.id} value={w.id}>
-                    {w.week_start} – {w.week_end} ({w.state})
+                    {fmtWeekRange(w.week_start, w.week_end)} · {weekStateLabel(w.state)}
                   </option>
                 ))}
               </select>
@@ -318,6 +316,14 @@ export function CreateTaskDialog({
                 <p className="text-micro text-danger">
                   Every recent week is closed — a closed week is the finished record of that week and can't take a new
                   task. Ask a GM or founder to open this week from the briefing first.
+                </p>
+              ) : !weekId && currentWeekUnavailableReason && !loadingLists ? (
+                // Never a silent substitute (Chan, 2026-09-11: the task
+                // landed in last week). Say why nothing is preselected
+                // and hand the person the picker instead.
+                <p className="text-micro text-pending">
+                  {currentWeekUnavailableReason} Pick a week above, or ask a GM or founder to open this week from the
+                  briefing.
                 </p>
               ) : null}
             </div>
@@ -338,7 +344,10 @@ export function CreateTaskDialog({
                 disabled={!canSubmit}
                 title={readOnly ? 'This account is read-only. It can see everything here and change nothing.' : undefined}
               >
-                Create task
+                {/* Names the week it will actually use — the submit
+                    button is the last honest place to say so before the
+                    write happens (never a silent substitute). */}
+                {selectedWeek ? `Create task — ${fmtWeekRange(selectedWeek.week_start, selectedWeek.week_end)}` : 'Create task'}
               </Button>
             </DialogFooter>
           </form>
