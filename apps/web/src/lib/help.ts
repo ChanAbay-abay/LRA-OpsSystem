@@ -71,10 +71,18 @@ export const HELP = {
     body: [
       "This is where the week gets planned. You look back at last week, decide what carries over, clear any blocks, and commit to this week's work.",
       "Once it's closed, this week's commitments are locked and everyone can see who agreed to what.",
+      // Chan's ask: this distinction is the one people trip on, and it
+      // belongs where the ritual happens rather than in a document
+      // nobody opens. "make sure that lives somewhere like in the
+      // briefing process so everyone knows. maybe in the guide"
+      "Assigned and committed are different things. ASSIGNED is whose task it is — that can change any time, and anyone can pick up a task nobody has taken yet. COMMITTED is what you promised on Monday, for this week. It locks when the briefing closes, and it's what your hit-rate measures.",
+      "So a task can be assigned to you without being committed — work that came up on Wednesday is yours to do, but it was never a promise you made, and it won't count against you.",
+      "If you commit to something and a colleague ends up finishing it, that shows as handed off — not as a miss for you, and not as a promise you kept. The points go to whoever did the work.",
     ],
     todo: [
       'Review last week and decide what still needs doing.',
       'Pick your tasks for this week under your name.',
+      'Take any unassigned task you can do, or ask the GM to assign it.',
       "Close the briefing once everyone has committed.",
     ],
   },
