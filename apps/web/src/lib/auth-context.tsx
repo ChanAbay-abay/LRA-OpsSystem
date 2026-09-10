@@ -62,6 +62,18 @@ interface AuthContextValue {
   session: Session | null;
   me: Me | null;
   loading: boolean;
+  /**
+   * Why `/api/me` could not be loaded, or null. A signed-in session whose
+   * profile never arrives is NOT the same state as one still in flight,
+   * and conflating them is what left `/queue` and `/digest` on the
+   * loading shell forever with the API down: `loading` goes false, `me`
+   * stays null, and any gate written as `!me` waits on something that is
+   * never coming. Deliberately not set when two consecutive 401s end the
+   * session — that path signs out and the login redirect is the answer.
+   */
+  meError: string | null;
+  /** Re-run the profile load, for the Retry on that failure panel. */
+  retryMe: () => void;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -72,11 +84,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = React.useState<Session | null>(null);
   const [me, setMe] = React.useState<Me | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const [meError, setMeError] = React.useState<string | null>(null);
 
   const fetchMe = React.useCallback(async () => {
     try {
       const profile = await api.get<Me>('/api/me');
       setMe(profile);
+      setMeError(null);
       return;
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -91,6 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         try {
           const profile = await api.get<Me>('/api/me');
           setMe(profile);
+          setMeError(null);
           return;
         } catch (retryErr) {
           // Two consecutive 401s on the same session is the real
@@ -104,10 +119,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             await supabase.auth.signOut({ scope: 'local' });
           }
           setMe(null);
+          // No `meError`: this path has just signed the device out, so
+          // the session goes null and ProtectedRoute redirects to
+          // /login. A failure panel behind a redirect is never seen.
           return;
         }
       }
       setMe(null);
+      setMeError(
+        err instanceof ApiClientError && err.message
+          ? err.message
+          : 'Could not reach the server to load your profile.'
+      );
     }
   }, []);
 
@@ -116,6 +139,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // wrapper means whichever fires first wins and the other awaits the
   // same request, instead of both firing their own `GET /api/me`.
   const loadMe = React.useMemo(() => singleFlight(fetchMe), [fetchMe]);
+
+  const retryMe = React.useCallback(() => {
+    setMeError(null);
+    void loadMe();
+  }, [loadMe]);
 
   React.useEffect(() => {
     // One subscription to `lib/session-store.ts` instead of this
@@ -135,6 +163,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
       } else {
         setMe(null);
+        setMeError(null);
         if (first) setLoading(false);
         first = false;
       }
@@ -180,7 +209,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ session, me, loading, signIn, signOut }}>
+    <AuthContext.Provider value={{ session, me, loading, meError, retryMe, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   );

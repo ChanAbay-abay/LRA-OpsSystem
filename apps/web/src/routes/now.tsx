@@ -371,12 +371,17 @@ export function NowPage() {
     return () => window.clearInterval(timer);
   }, [resource.status, modalOpen, refresh]);
 
+  // WHETHER this section renders is the server's decision
+  // (`now.canActOnApprovals`); this only names WHICH step it is. So the
+  // founder/admin arm is gone: re-deriving "you may clear" from
+  // `authority === 'founder'` was a third copy of a rule the server
+  // already owns, and the copy is wrong for the two founders it does not
+  // distinguish — a read-only founder and a founder without the clearing
+  // seat both read as "founder" here. Everyone the server lets act who
+  // is not a GM is at the clearing step, so asking about the GM alone
+  // cannot drift as the clearing rule changes.
   const approvalLabel =
-    me?.authority === 'gm'
-      ? 'Submitted, waiting on you to verify'
-      : me?.authority === 'founder' || me?.authority === 'admin'
-        ? 'Verified, waiting on you to clear'
-        : '';
+    me?.authority === 'gm' ? 'Submitted, waiting on you to verify' : 'Verified, waiting on you to clear';
 
   return (
     <div>

@@ -11,7 +11,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppShell } from '@/components/layout/app-shell';
-import { SkeletonRows } from '@/components/ui/resource-state';
+import { SkeletonRows, UnreachablePanel } from '@/components/ui/resource-state';
 import { LoginPage } from '@/routes/login';
 import { SetPasswordPage } from '@/routes/set-password';
 import { NowPage } from '@/routes/now';
@@ -95,7 +95,7 @@ function ProtectedRoute({
    */
   requireFounder?: boolean;
 }) {
-  const { session, me, loading } = useAuth();
+  const { session, me, loading, meError, retryMe } = useAuth();
 
   if (loading) return <ShellSkeleton />;
   if (!session) {
@@ -104,6 +104,22 @@ function ProtectedRoute({
   // `me` is still in flight for a beat after the session settles; the
   // shell skeleton is the honest answer, not a redirect on a role we
   // have not read yet.
+  //
+  // But "in flight" and "never arriving" are different states, and this
+  // gate used to treat them as one. With the API down, `loading` goes
+  // false and `me` stays null, so every role-gated route sat on the
+  // shell skeleton indefinitely — reproduced past 20s on /queue and
+  // /digest, while every ungated route showed a proper Retry panel.
+  // That is the same "infinite loading must tell the visitor" defect
+  // Chan reported once already, resurfacing on the two routes whose
+  // gate reads `me` rather than the route's own resource.
+  if (meError) {
+    return (
+      <AppShell>
+        <UnreachablePanel message={meError} onRetry={retryMe} />
+      </AppShell>
+    );
+  }
   if ((requireAdmin || requireOversight || requireFounder) && !me) return <ShellSkeleton />;
   if (requireAdmin && me?.authority !== 'admin') {
     return <Navigate to="/" replace />;
