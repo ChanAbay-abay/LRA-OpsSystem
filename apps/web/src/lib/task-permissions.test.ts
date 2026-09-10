@@ -15,12 +15,14 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import {
+  blockResolveRefusal,
   canDragTask,
   definitionLockRefusal,
   dragRefusal,
   moveRefusal,
   type Actor,
   type MovableTask,
+  type ResolvableBlock,
 } from './task-permissions';
 
 const ALL_COLUMNS = [
@@ -222,4 +224,88 @@ test('a read-only founder (ERC/DCA) is still locked out — founder authority al
 
 test('no signed-in actor: the lock still applies (a null actor never bypasses)', () => {
   assert.notEqual(definitionLockRefusal({ is_committed: true }, 'open', null), null);
+});
+
+// ---------------------------------------------------------------------
+// blockResolveRefusal — the mirror of ops.task_blocks_update
+// ---------------------------------------------------------------------
+//
+// Chan, 2026-09-10: "users cant unblock a task, fix it." The bug was a
+// mirror that did not match the policy in EITHER direction, so these
+// tests are written against the policy's four allowed identities
+// (created_by, blocking_user_id, is_oversight, and the task owner the
+// 20260910190000 migration adds), not against what the old UI did.
+
+const RAISER: Actor = { id: 'u-raiser', authority: 'staff', isClearingFounder: false, readOnly: false };
+const NAMED: Actor = { id: 'u-named', authority: 'staff', isClearingFounder: false, readOnly: false };
+const OWNER: Actor = { id: 'u-owner', authority: 'staff', isClearingFounder: false, readOnly: false };
+const BYSTANDER: Actor = { id: 'u-bystander', authority: 'staff', isClearingFounder: false, readOnly: false };
+
+const blockOn = (over: Partial<ResolvableBlock> = {}): ResolvableBlock => ({
+  created_by: RAISER.id,
+  blocking_user_id: NAMED.id,
+  ...over,
+});
+const ownedTask = { owner_user_id: OWNER.id };
+
+test('the person who declared the block may resolve it — created_by = core.auth_user_id()', () => {
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, RAISER), null);
+});
+
+test('the person the block names may resolve it — blocking_user_id = core.auth_user_id()', () => {
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, NAMED), null);
+});
+
+test('the blocked task’s owner may resolve it — the migration’s fourth branch, and Chan’s actual report', () => {
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, OWNER), null);
+});
+
+test('oversight may resolve any block — core.is_oversight() is gm, founder, admin', () => {
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, GM), null);
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, FOUNDER), null);
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, OTHER_FOUNDER), null);
+  assert.equal(blockResolveRefusal(blockOn(), ownedTask, ADMIN), null);
+});
+
+test('a staff bystander is refused, and told who can', () => {
+  const refusal = blockResolveRefusal(blockOn(), ownedTask, BYSTANDER);
+  assert.match(refusal ?? '', /raised this block/);
+  assert.match(refusal ?? '', /owner/);
+  assert.match(refusal ?? '', /GM\/founder/);
+});
+
+test('an external block (no blocking_user_id) is still resolvable by its raiser and the owner, not by a bystander', () => {
+  const external = blockOn({ blocking_user_id: null });
+  assert.equal(blockResolveRefusal(external, ownedTask, RAISER), null);
+  assert.equal(blockResolveRefusal(external, ownedTask, OWNER), null);
+  assert.notEqual(blockResolveRefusal(external, ownedTask, BYSTANDER), null);
+});
+
+test('a null blocking_user_id never matches a signed-in actor by accident', () => {
+  // Guards the shape of the check itself: `null === actor.id` must not
+  // be reachable through a stray falsy comparison.
+  const external = blockOn({ created_by: RAISER.id, blocking_user_id: null });
+  assert.notEqual(blockResolveRefusal(external, { owner_user_id: 'u-someone-else' }, BYSTANDER), null);
+});
+
+test('read-only is checked FIRST — a read-only founder resolves nothing, even a block they raised', () => {
+  // `not core.is_read_only()` wraps the whole disjunction in the
+  // policy, so it cannot be reached through any of the four branches.
+  assert.match(blockResolveRefusal(blockOn(), ownedTask, READ_ONLY_FOUNDER) ?? '', /read-only/);
+  assert.match(
+    blockResolveRefusal(blockOn({ created_by: READ_ONLY_FOUNDER.id }), ownedTask, READ_ONLY_FOUNDER) ?? '',
+    /read-only/
+  );
+  assert.match(
+    blockResolveRefusal(blockOn({ blocking_user_id: READ_ONLY_FOUNDER.id }), ownedTask, READ_ONLY_FOUNDER) ?? '',
+    /read-only/
+  );
+  assert.match(
+    blockResolveRefusal(blockOn(), { owner_user_id: READ_ONLY_FOUNDER.id }, READ_ONLY_FOUNDER) ?? '',
+    /read-only/
+  );
+});
+
+test('nobody signed in resolves nothing', () => {
+  assert.match(blockResolveRefusal(blockOn(), ownedTask, null) ?? '', /not signed in/);
 });

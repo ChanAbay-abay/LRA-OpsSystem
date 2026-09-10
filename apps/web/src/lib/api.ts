@@ -8,6 +8,7 @@
  * guess a shape.
  */
 import { getAccessTokenSync } from './session-store';
+import { buildHeaders } from './request-headers';
 
 const API_URL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:3001';
 
@@ -69,6 +70,7 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
+
 async function request<T>(path: string, init: RequestInit = {}, external?: AbortSignal): Promise<T> {
   // Read from the one session-store subscription (lib/session-store.ts)
   // instead of calling `supabase.auth.getSession()` here. That call used
@@ -92,11 +94,7 @@ async function request<T>(path: string, init: RequestInit = {}, external?: Abort
     res = await fetch(`${API_URL}${path}`, {
       ...init,
       signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        ...init.headers,
-      },
+      headers: buildHeaders(init.body, token, init.headers),
     });
   } catch (err) {
     // A caller-initiated abort (the component unmounted, or a newer

@@ -79,6 +79,8 @@ interface Member {
   authority: string | null;
   position: string;
   name: string | null;
+  /** `core.users.read_only` (ERC, DCA). Optional: a missing value must never exclude a real teammate. */
+  readOnly?: boolean;
 }
 
 export interface LockedTask {
@@ -290,7 +292,11 @@ export function TaskEditRequestDialog({
                   <SelectContent>
                     {me ? <SelectItem value={me.id}>{me.email} (you)</SelectItem> : null}
                     {members
-                      .filter((m) => m.userId && m.userId !== me?.id)
+                      // A read-only account can never move a task, so it
+                      // is never a legal reassignment target either --
+                      // same rule as the new-task dialog and the block
+                      // picker (PLAN.md §11.4 #1).
+                      .filter((m) => m.userId && m.userId !== me?.id && !m.readOnly)
                       .map((m) => (
                         <SelectItem key={m.userId} value={m.userId}>
                           {m.name ?? m.email ?? m.userId}

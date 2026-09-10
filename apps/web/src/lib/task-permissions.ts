@@ -238,3 +238,68 @@ export function definitionLockRefusal(
     'once the week has left planning; ask the GM to raise a task edit request'
   );
 }
+
+// ---------------------------------------------------------------------
+// Block resolution
+// ---------------------------------------------------------------------
+
+/**
+ * The minimum a block has to tell us. Both fields come straight off the
+ * `ops.task_blocks` row `GET /api/tasks/:id/blocks` returns.
+ */
+export interface ResolvableBlock {
+  created_by: string;
+  blocking_user_id: string | null;
+}
+
+/**
+ * `null` when this person may resolve this block; otherwise why not, in
+ * a sentence meant to be read on a disabled button.
+ *
+ * A faithful mirror of `ops.task_blocks_update`
+ * (20260910120100_core_read_only_accounts.sql, extended by
+ * 20260910190000_ops_task_block_owner_resolves.sql), which is the policy
+ * `POST /api/blocks/:id/resolve` actually runs under. The database is
+ * still the only enforcement — this exists so the Resolve control is
+ * offered to exactly the people the database will accept, and shown
+ * disabled with the reason to everyone else.
+ *
+ * Chan, 2026-09-10: "users cant unblock a task, fix it." Root cause was
+ * two different sets: RLS granted the block's `created_by`, its named
+ * `blocking_user_id`, or `core.is_oversight()`, while the modal gated
+ * its button on `isOversight || task.owner_user_id === me.id`. So the
+ * task's OWNER saw a button the database refused, and the person who
+ * declared the block — whom the database allows — was shown no button
+ * at all. The migration adds the owner as a fourth allowed identity
+ * (the owner is who finds out first that the thing is unblocked); this
+ * function is the same four identities, in the same order, with the
+ * read-only wrapper in the same place.
+ *
+ * Order matters and matches the policy's own shape: `not
+ * core.is_read_only()` wraps the whole disjunction, so a read-only
+ * founder (ERC/DCA) is refused before authority is ever considered —
+ * the same reason `moveRefusal` checks `readOnly` ahead of the admin
+ * bypass. `core.caller_is_active()` has no client-side equivalent and is
+ * deliberately not guessed at: a mirror that drifts must degrade to
+ * today's behaviour, never grant something.
+ */
+export function blockResolveRefusal(
+  block: ResolvableBlock,
+  task: { owner_user_id: string },
+  actor: Actor | null
+): string | null {
+  if (!actor) return 'You are not signed in.';
+  if (actor.readOnly) return 'Your account is read-only.';
+  // `core.is_oversight()` is `authority in ('gm','founder','admin')`, so
+  // admin is inside that same branch rather than a separate bypass —
+  // but it is checked here, second, to keep this function's shape
+  // identical to `moveRefusal`'s.
+  if (actor.authority === 'admin') return null;
+
+  if (block.created_by === actor.id) return null; // created_by = core.auth_user_id()
+  if (block.blocking_user_id === actor.id) return null; // blocking_user_id = core.auth_user_id()
+  if (actor.authority === 'gm' || actor.authority === 'founder') return null; // core.is_oversight()
+  if (task.owner_user_id === actor.id) return null; // the migration's fourth branch
+
+  return 'Only the person who raised this block, whoever it names, the task’s owner, or a GM/founder can resolve it.';
+}

@@ -46,6 +46,8 @@ interface Member {
   authority: string | null;
   position: string;
   name: string | null;
+  /** `core.users.read_only` (ERC, DCA). Optional: a missing value must never exclude a real teammate. */
+  readOnly?: boolean;
 }
 
 interface Week {
@@ -217,7 +219,13 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
                     </SelectItem>
                   ) : null}
                   {members
-                    .filter((m) => m.userId && m.userId !== me?.id)
+                    // Read-only accounts (ERC, DCA -- the two other
+                    // brokerages' principals) are excluded as owners: a
+                    // read-only caller cannot start, submit or clear
+                    // anything, so a task assigned to one can never move.
+                    // Same reasoning as the block picker and the
+                    // scoreboard rail (PLAN.md §11.4 #1).
+                    .filter((m) => m.userId && m.userId !== me?.id && !m.readOnly)
                     .map((m) => (
                       <SelectItem key={m.userId} value={m.userId}>
                         {m.name ?? m.email ?? m.userId}

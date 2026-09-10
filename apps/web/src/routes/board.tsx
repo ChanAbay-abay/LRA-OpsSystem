@@ -90,17 +90,13 @@ import {
   buildTaskMenuItems,
   type TaskMenuHandlers,
 } from '@/components/tasks/task-card-menu';
-import { TaskEditRequestDialog } from '@/components/tasks/task-edit-request-dialog';
-import { EditRequestCard } from '@/components/tasks/edit-request-diff';
-import { ReasonTextarea } from '@/components/ui/reason-textarea';
-import { Button } from '@/components/ui/button';
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+  BlockDialog,
+  FlagCancellationDialog,
+  TaskDetailDialog,
+  TaskNotesDialog,
+} from '@/components/tasks/task-detail-dialog';
+import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ResourceView, SkeletonBoard } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
@@ -115,41 +111,30 @@ import {
   moveRefusal,
   type Actor,
   type BoardColumn,
-  type MovableTask,
 } from '@/lib/task-permissions';
-import { buildFieldDiffs, type DiffResolvers, type TaskEditRequest } from '@/lib/task-edit-requests';
+import { blockRelation, blockRelationLabel, initials, type BlockRelation, type Task } from '@/lib/task-types';
 
-interface Task {
+/**
+ * One open `ops.task_blocks` row as `GET /api/blocks/open` returns it —
+ * the raw row, no name enrichment. Only the four fields the board's
+ * block caption reads are declared.
+ */
+interface OpenBlock {
   id: string;
-  title: string;
-  description: string | null;
-  status: string;
-  owner_user_id: string;
-  week_id: string;
-  task_type_id: string | null;
-  client_ref: string | null;
-  catalog_points: number | null;
-  points_override: number | null;
-  points_override_reason: string | null;
-  points_awarded: number | null;
-  is_recurring: boolean;
-  is_committed: boolean;
-  committed_points: number | null;
-  carry_over_count: number;
-  rejected_reason: string | null;
+  task_id: string;
+  /** Which of the three block targets this row is — see `blockDisplayName` on the API side. */
+  target: string;
+  created_by: string;
+  blocking_user_id: string | null;
+  /**
+   * Reachable from the UI since the block dialog gained its target
+   * picker (2026-09-10). The board resolves this to a title from the
+   * board payload it already holds -- see `blockNoteFor` -- rather than
+   * asking the API for one.
+   */
+  blocking_task_id: string | null;
+  blocking_external: string | null;
   created_at: string;
-  last_activity_at: string;
-  cleared_at: string | null;
-  openBlockCount: number;
-  noteCount: number;
-  ownerName: string | null;
-  ownerPosition: string | null;
-  // Present once a cancellation has been flagged (PLAN.md's cancellation
-  // ladder). `pre_cancellation_status` is what places the card back in
-  // its real column while `status` itself reads `pending_cancellation`.
-  pre_cancellation_status: string | null;
-  cancellation_reason: string | null;
-  cancellation_requested_at: string | null;
 }
 
 type Board = Record<BoardColumn, Task[]> & {
@@ -207,10 +192,6 @@ function pointsChip(t: Task) {
   );
 }
 
-function initials(name: string | null) {
-  return (name ?? '?').slice(0, 2).toUpperCase();
-}
-
 function TaskCard({
   task,
   dragging,
@@ -222,6 +203,7 @@ function TaskCard({
   onFlagCancellation,
   onOpenNotes,
   onOpenDetail,
+  blockNote,
 }: {
   task: Task;
   dragging?: boolean;
@@ -237,6 +219,18 @@ function TaskCard({
   onFlagCancellation?: (task: Task) => void;
   onOpenNotes?: (task: Task) => void;
   onOpenDetail?: (task: Task) => void;
+  /**
+   * Chan, 2026-09-10: "i want it to be more clear which tasks you're
+   * blocking and which tasks you're not." A card in the Blocked column
+   * used to give no hint which side of the block the reader is on. This
+   * is the oldest open block's relationship, in words, from
+   * `lib/task-types.ts` — one sentence, truncated, in the same place
+   * and the same register as the `returned` card's rejection reason
+   * directly above. No new card region and no new hue (DESIGN.md §5.4 /
+   * §2.3): the accountability weight comes from `font-semibold` when
+   * the block names THIS person.
+   */
+  blockNote?: { label: string; relation: BlockRelation } | null;
 }) {
   const pendingCancellation = task.status === 'pending_cancellation';
   const returned = task.status === 'rejected';
@@ -287,7 +281,30 @@ function TaskCard({
       {...attributes}
       role="button"
       tabIndex={0}
-      onClick={() => onOpenDetail?.(task)}
+      // The `contains` guard is not defensive — it fixes a reproduced
+      // defect (2026-09-10, stack trace captured). `TaskCardMenuButton`
+      // renders its Radix dropdown through `DropdownMenu.Portal`, and a
+      // Radix portal moves the menu's DOM node to `document.body` while
+      // leaving it a CHILD OF THIS CARD IN THE REACT TREE. React
+      // dispatches synthetic events along the fiber tree, not the DOM
+      // tree, so clicking "Declare a block" in that menu propagated up
+      // to this `onClick` and opened the task modal ON TOP OF the block
+      // dialog the menu item had just opened — inerting it.
+      //
+      // The trigger button's own `stopPropagation` cannot help: the click
+      // that matters happens on the menu ITEM, in the portal, not on the
+      // trigger. The right-click path never had the bug, which is what
+      // isolated it: `TaskCardContextMenu` wraps this card from the
+      // OUTSIDE, so its portal's fiber chain does not run through here.
+      //
+      // Comparing against the real DOM subtree is the fix that survives
+      // any future portalled control placed inside a card, rather than a
+      // per-menu patch: a click that did not physically happen inside
+      // this card is not a click on this card.
+      onClick={(e) => {
+        if (!e.currentTarget.contains(e.target as Node)) return;
+        onOpenDetail?.(task);
+      }}
       onKeyDown={(e) => {
         // Space is dnd-kit's pick-up key; Enter is ours, so the two
         // keyboard paths (move a card / read a card) never collide.
@@ -306,7 +323,7 @@ function TaskCard({
           ? `${task.title}, flagged for cancellation, not draggable. Waiting on the clearing founder's decision.`
           : returned
             ? `${task.title}, returned for rework${task.rejected_reason ? `: ${task.rejected_reason}` : ''}. Owned by ${task.ownerName ?? 'unknown'}. Enter to open.`
-            : `${task.title}, ${task.points_override ?? task.catalog_points ?? 'unpriced'} points, owned by ${task.ownerName ?? 'unknown'}. Enter to open.`
+            : `${task.title}, ${task.points_override ?? task.catalog_points ?? 'unpriced'} points, owned by ${task.ownerName ?? 'unknown'}.${blockNote ? ` ${blockNote.label}.` : ''} Enter to open.`
       }
       className={cn(
         'group relative flex cursor-pointer flex-col gap-2 rounded-lg border p-3 text-left',
@@ -378,6 +395,17 @@ function TaskCard({
       ) : null}
       <span className="text-eyebrow text-ink-3">{task.ownerPosition ?? '—'}</span>
       <p className="line-clamp-2 text-strong text-ink">{task.title}</p>
+      {blockNote ? (
+        <p
+          className={cn(
+            'truncate text-micro text-blocked',
+            blockNote.relation === 'waiting-on-you' && 'font-semibold'
+          )}
+          title={blockNote.label}
+        >
+          {blockNote.label}
+        </p>
+      ) : null}
       <div className="flex items-center justify-between">
         <div
           className="flex size-5 items-center justify-center rounded-full bg-navy-800 text-micro text-white"
@@ -448,6 +476,7 @@ function Column({
   onFlagCancellation,
   onOpenNotes,
   onOpenDetail,
+  blockNoteFor,
 }: {
   id: BoardColumn;
   droppable: boolean;
@@ -464,6 +493,8 @@ function Column({
   onFlagCancellation?: (task: Task) => void;
   onOpenNotes: (task: Task) => void;
   onOpenDetail: (task: Task) => void;
+  /** The oldest open block's relationship for a task, in words. Null for a task with no open block. */
+  blockNoteFor: (task: Task) => { label: string; relation: BlockRelation } | null;
 }) {
   const blocked = isDragging && dropRefusal !== null;
   const { setNodeRef, isOver } = useDroppable({ id, disabled: !droppable || blocked });
@@ -494,6 +525,7 @@ function Column({
       }
       onOpenNotes={onOpenNotes}
       onOpenDetail={onOpenDetail}
+      blockNote={blockNoteFor(t)}
     />
     );
   };
@@ -607,6 +639,17 @@ export function BoardPage() {
     for (const w of weeksResource.data ?? []) m.set(w.id, w.state);
     return m;
   }, [weeksResource.data]);
+  // Chan, 2026-09-10: "i want it to be more clear which tasks you're
+  // blocking and which tasks you're not." The board payload carries an
+  // open-block COUNT per card and nothing about WHO the block names, so
+  // a card in Blocked could not say whether the reader was waiting or
+  // being waited on. `GET /api/blocks/open` already exists and returns
+  // every open block in one small read (a live board's open blocks are
+  // a handful of rows), and `/api/members` resolves the named blocker's
+  // display name -- both refreshed by `load()` alongside the board, so
+  // resolving a block updates the caption without a reload.
+  const [openBlocks, setOpenBlocks] = React.useState<OpenBlock[] | null>(null);
+  const [nameByUser, setNameByUser] = React.useState<Map<string, string>>(() => new Map());
   const [activeTask, setActiveTask] = React.useState<Task | null>(null);
   const [blockTarget, setBlockTarget] = React.useState<Task | null>(null);
   const [cancelTarget, setCancelTarget] = React.useState<Task | null>(null);
@@ -632,12 +675,81 @@ export function BoardPage() {
     if (boardResource.status === 'ready' && boardResource.data) setBoard(boardResource.data);
   }, [boardResource.status, boardResource.data]);
 
+  const loadOpenBlocks = React.useCallback(() => {
+    api
+      .get<OpenBlock[]>('/api/blocks/open')
+      .then(setOpenBlocks)
+      .catch(() => {
+        // A card without its block caption is the pre-2026-09-10 board:
+        // still complete, just less specific. Not worth a second error
+        // toast on top of the board's own.
+      });
+  }, []);
+
   const load = React.useCallback(() => {
     api
       .get<Board>('/api/tasks/board')
       .then(setBoard)
       .catch(() => toast.error('Could not refresh the board'));
-  }, []);
+    loadOpenBlocks();
+  }, [loadOpenBlocks]);
+
+  // The board's first paint comes from `boardResource`, not `load()`, so
+  // the block captions need their own mount read. The roster is stable
+  // for the length of a session and is read once, never on refresh.
+  React.useEffect(() => {
+    loadOpenBlocks();
+    api
+      .get<{ userId: string; name: string | null }[]>('/api/members')
+      .then((members) => setNameByUser(new Map(members.filter((m) => m.name).map((m) => [m.userId, m.name!]))))
+      .catch(() => {});
+  }, [loadOpenBlocks]);
+
+  // Every task the board is holding, by id -- the lookup a
+  // `task`-target block's caption needs. Built from the payload already
+  // on screen (`/api/tasks/board` is not week-scoped, so a blocking task
+  // from another week is in here too) rather than from a second read.
+  const titleByTask = React.useMemo(() => {
+    const m = new Map<string, string>();
+    if (!board) return m;
+    for (const column of COLUMNS) for (const t of board[column.id]) m.set(t.id, t.title);
+    return m;
+  }, [board]);
+
+  /**
+   * The oldest open block on a task, in the words `lib/task-types.ts`
+   * decides. Oldest rather than newest: if a task is stuck on two
+   * things, the one it has been stuck on longest is the one that needs
+   * chasing. The `Ban N` badge already carries how many there are.
+   */
+  const blockNoteFor = React.useCallback(
+    (task: Task): { label: string; relation: BlockRelation } | null => {
+      if (!openBlocks) return null;
+      const mine = openBlocks
+        .filter((b) => b.task_id === task.id)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      const oldest = mine[0];
+      if (!oldest) return null;
+      const relation = blockRelation(oldest, me?.id);
+      // The three targets, resolved from what this screen already has:
+      // the roster read for a person, the board payload itself for a
+      // blocking task (every task is in it -- `/api/tasks/board` is not
+      // week-scoped -- so a task title costs no extra request), and the
+      // row's own free text for an outside party.
+      const blockingName =
+        oldest.target === 'person'
+          ? oldest.blocking_user_id
+            ? (nameByUser.get(oldest.blocking_user_id) ?? null)
+            : null
+          : oldest.target === 'task'
+            ? oldest.blocking_task_id
+              ? (titleByTask.get(oldest.blocking_task_id) ?? null)
+              : null
+            : oldest.blocking_external;
+      return { label: blockRelationLabel(relation, blockingName, oldest.target), relation };
+    },
+    [openBlocks, nameByUser, titleByTask, me?.id]
+  );
 
   // Keep the open detail dialog in step with the board it came from, so
   // a note added or a block resolved inside it doesn't leave the dialog
@@ -975,6 +1087,7 @@ export function BoardPage() {
               onFlagCancellation={isOversight && canWrite ? setCancelTarget : undefined}
               onOpenNotes={setNotesTarget}
               onOpenDetail={openDetail}
+              blockNoteFor={blockNoteFor}
             />
           ))}
         </div>
@@ -1028,856 +1141,5 @@ export function BoardPage() {
         <CreateTaskDialog onClose={() => setCreateOpen(false)} onCreated={load} />
       ) : null}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------
-// Task detail
-// ---------------------------------------------------------------------
-
-interface Note {
-  id: string;
-  body: string;
-  created_at: string;
-  authorName: string | null;
-}
-
-interface TaskBlock {
-  id: string;
-  target: string;
-  reason: string;
-  created_at: string;
-  resolved_at: string | null;
-  blockingName: string | null;
-  createdByName: string | null;
-  resolvedByName: string | null;
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  todo: 'Backlog',
-  in_progress: 'In progress',
-  submitted: 'Submitted',
-  verified: 'Verified',
-  cleared: 'Cleared',
-  rejected: 'Returned',
-  cancelled: 'Cancelled',
-  pending_cancellation: 'Awaiting cancellation decision',
-};
-
-/**
- * One chip geometry for the whole detail header.
- *
- * The row used to mix `text-micro` (line-height 1.30) with `text-num-xs`
- * (1.20) and one chip carried a 12px icon, so four chips sitting on the
- * same line rendered at three different heights with their text off a
- * shared baseline. Height is fixed here and the type is set `leading-none`
- * so the line-height token can never drive the box again; tone is the
- * only thing a caller varies.
- */
-function Chip({
-  tone = 'neutral',
-  className,
-  children,
-}: {
-  tone?: 'neutral' | 'pending' | 'cleared' | 'danger' | 'info';
-  className?: string;
-  children: React.ReactNode;
-}) {
-  const tones = {
-    neutral: 'border-hairline bg-surface-2 text-ink-2',
-    pending: 'border-pending-border bg-pending-wash text-pending',
-    cleared: 'border-cleared-border bg-cleared-wash text-cleared',
-    danger: 'border-danger-border bg-danger-wash text-danger',
-    info: 'border-info-border bg-info-wash text-info',
-  } as const;
-  return (
-    <span
-      className={cn(
-        'inline-flex h-[22px] shrink-0 items-center gap-1 whitespace-nowrap rounded-xs border px-2',
-        'text-micro font-medium leading-none',
-        tones[tone],
-        className
-      )}
-    >
-      {children}
-    </span>
-  );
-}
-
-function statusTone(status: string) {
-  if (status === 'cleared') return 'cleared' as const;
-  if (status === 'submitted' || status === 'verified') return 'pending' as const;
-  if (status === 'rejected' || status === 'cancelled' || status === 'pending_cancellation') return 'danger' as const;
-  return 'neutral' as const;
-}
-
-function StatusChip({ status }: { status: string }) {
-  return <Chip tone={statusTone(status)}>{STATUS_LABEL[status] ?? status}</Chip>;
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <p className="text-eyebrow text-ink-3">{label}</p>
-      <div className="mt-0.5 text-body-sm text-ink">{children}</div>
-    </div>
-  );
-}
-
-/**
- * Chan's ask: "each task has a modal card that opens bigger when you
- * click it showing more detail of the actual task and the notes history
- * etc." One dialog, three things in it — what the task IS (the fields
- * the card has no room for), why it is stuck (its blocks, with the
- * resolve action for whoever is allowed to resolve them), and what has
- * been said about it (the append-only worklog, newest work at the
- * bottom, with the composer under it).
- *
- * Nothing here writes a status: moving a task stays on the board and in
- * Approvals, where the ladder is already enforced end to end. Adding a
- * second, subtly different move surface is exactly how two paths drift.
- */
-function TaskDetailDialog({
-  task,
-  weekState,
-  onClose,
-  onChanged,
-  onFlagCancellation,
-  onDeclareBlock,
-}: {
-  task: Task;
-  /** The task's own week's `state` (`ops.weeks.state`) — null when the week isn't in the recent set `BoardPage` fetched. */
-  weekState?: string | null;
-  onClose: () => void;
-  onChanged: () => void;
-  onFlagCancellation?: (task: Task) => void;
-  onDeclareBlock: (task: Task) => void;
-}) {
-  const { me } = useAuth();
-  const [notes, setNotes] = React.useState<Note[] | null>(null);
-  const [blocks, setBlocks] = React.useState<TaskBlock[] | null>(null);
-  const [body, setBody] = React.useState('');
-  const [submitting, setSubmitting] = React.useState(false);
-  const [moving, setMoving] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const closed = task.status === 'cleared' || task.status === 'cancelled';
-  const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
-  const readOnly = me?.readOnly ?? false;
-  const canResolveBlock = (isOversight || task.owner_user_id === me?.id) && !readOnly;
-
-  const loadNotes = React.useCallback(() => {
-    api
-      .get<Note[]>(`/api/tasks/${task.id}/notes`)
-      .then(setNotes)
-      .catch(() => toast.error('Could not load the worklog'));
-  }, [task.id]);
-
-  const loadBlocks = React.useCallback(() => {
-    api
-      .get<TaskBlock[]>(`/api/tasks/${task.id}/blocks`)
-      .then(setBlocks)
-      .catch(() => setBlocks([]));
-  }, [task.id]);
-
-  React.useEffect(() => {
-    loadNotes();
-    loadBlocks();
-  }, [loadNotes, loadBlocks]);
-
-  async function addNote() {
-    setSubmitting(true);
-    setError(null);
-    try {
-      await api.post(`/api/tasks/${task.id}/notes`, { body });
-      setBody('');
-      loadNotes();
-      onChanged();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not add the note');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function resolveBlock(blockId: string) {
-    try {
-      await api.post(`/api/blocks/${blockId}/resolve`);
-      loadBlocks();
-      onChanged();
-    } catch (err) {
-      toast.error(err instanceof ApiClientError ? err.message : 'Could not resolve the block');
-    }
-  }
-
-  const points = task.points_awarded ?? task.points_override ?? task.catalog_points;
-  const openBlocks = (blocks ?? []).filter((b) => !b.resolved_at);
-
-  // Chan, 2026-09-09: "there should be a button on the task modal to
-  // submit for approval, and vice versa if it's been submitted they can
-  // take it back."
-  //
-  // This is the same `POST /api/tasks/:id/status` the board's drop
-  // calls, gated by the same `moveRefusal` mirror the columns are dimmed
-  // with — not a second ladder. `openBlockCount` is taken from the
-  // blocks this dialog just loaded rather than the board's snapshot, so
-  // resolving a block in the panel above immediately unlocks Submit
-  // without a board refresh.
-  const movable: MovableTask = {
-    status: task.status,
-    owner_user_id: task.owner_user_id,
-    ownerPosition: task.ownerPosition,
-    task_type_id: task.task_type_id,
-    openBlockCount: blocks == null ? task.openBlockCount : openBlocks.length,
-  };
-  const actor: Actor | null = me
-    ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder, readOnly: me.readOnly }
-    : null;
-
-  // PLAN.md §10.1 — the definition lock. `lockRefusal` is the trigger's
-  // own sentence (task-permissions.ts's `definitionLockRefusal`, a
-  // faithful mirror of `ops.enforce_task_transition` guard 2b); reused
-  // verbatim here instead of writing a second vocabulary for the same
-  // refusal. `null` means the definition is still open to a direct edit.
-  const lockRefusal = definitionLockRefusal(task, weekState, actor);
-  const isGm = me?.authority === 'gm';
-  // Chan: "once the meeting is concluded, those todos should be set and
-  // not editable by the staff. Only admin and founder." The trigger's
-  // own exemption already lets a founder/admin through guard 2b, which
-  // is exactly why `lockRefusal` above is `null` for them even on a
-  // locked task -- but that also meant the "Definition locked" banner
-  // (and the only button that ever opened an edit surface) never
-  // rendered for the one persona who is actually allowed to use it
-  // (2026-09-10 regression, defect #3). This mirrors the same "would
-  // this be locked for someone without the exemption" condition
-  // `definitionLockRefusal` checks, without the actor branch, purely to
-  // decide whether to surface the direct-edit affordance -- it grants
-  // nothing; `PATCH /api/tasks/:id` is still enforced by the same
-  // trigger regardless of what this renders.
-  const lockedForOthers = task.is_committed && weekState != null && weekState !== 'planning';
-  const isFounderOrAdmin = me?.authority === 'founder' || me?.authority === 'admin';
-  const [requestingChange, setRequestingChange] = React.useState(false);
-  const [editingDirect, setEditingDirect] = React.useState(false);
-  const [editRequests, setEditRequests] = React.useState<TaskEditRequest[] | null>(null);
-  const [lookupTypes, setLookupTypes] = React.useState<{ id: string; name: string }[]>([]);
-  const [lookupMembers, setLookupMembers] = React.useState<{ userId: string; name: string | null; email: string | null }[]>([]);
-
-  const loadEditRequests = React.useCallback(() => {
-    api
-      .get<TaskEditRequest[]>(`/api/task-edit-requests?taskId=${task.id}`)
-      .then(setEditRequests)
-      .catch(() => setEditRequests([]));
-  }, [task.id]);
-
-  // Every ops member can read this task's edit-request history (the same
-  // "everyone is in the loop" RLS the migration's SELECT policy grants) —
-  // Task 4's "close the loop" for the requester happens simply by this
-  // section existing and always reflecting the real status, not by a
-  // separate notification surface.
-  React.useEffect(() => {
-    loadEditRequests();
-  }, [loadEditRequests]);
-
-  // Name/type lookups for the diff renderer, fetched only once a request
-  // actually exists to show (or the requester is about to raise one) —
-  // no point paying for two extra requests on the common case of a task
-  // with no edit-request history at all.
-  React.useEffect(() => {
-    if (!requestingChange && !editRequests?.length) return;
-    let cancelled = false;
-    Promise.all([
-      api.get<{ id: string; name: string }[]>('/api/catalog'),
-      api.get<{ userId: string; name: string | null; email: string | null }[]>('/api/members'),
-    ])
-      .then(([types, members]) => {
-        if (cancelled) return;
-        setLookupTypes(types);
-        setLookupMembers(members);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [requestingChange, editRequests?.length]);
-
-  const diffResolve: DiffResolvers = {
-    taskTypeName: (id) => lookupTypes.find((t) => t.id === id)?.name ?? 'Unknown type',
-    memberName: (id) => lookupMembers.find((m) => m.userId === id)?.name ?? lookupMembers.find((m) => m.userId === id)?.email ?? 'Unknown',
-  };
-
-  const statusAction: { to: BoardColumn; label: string; hint: string; variant?: 'primary' | 'secondary' } | null =
-    task.status === 'todo' || task.status === 'in_progress'
-      ? {
-          to: 'submitted',
-          label: 'Submit for approval',
-          hint: 'Sends this to the GM to verify. Points are awarded once the founder clears it.',
-        }
-      : task.status === 'submitted'
-        ? {
-            to: 'in_progress',
-            label: 'Take it back',
-            hint: 'Pulls this out of the GM’s queue and back into In progress. Nothing is lost.',
-            variant: 'secondary',
-          }
-        : task.status === 'rejected'
-          ? {
-              to: 'backlog',
-              label: 'Rework it',
-              hint: 'Returns this to Backlog so it can be reworked and submitted again.',
-              variant: 'secondary',
-            }
-          : null;
-  const statusRefusal = statusAction ? moveRefusal(movable, statusAction.to, actor) : null;
-
-  async function moveStatus(to: BoardColumn) {
-    const status = COLUMN_STATUS[to];
-    if (!status) return;
-    setMoving(true);
-    try {
-      await api.post(`/api/tasks/${task.id}/status`, { to: status });
-      onChanged();
-    } catch (err) {
-      toast.error(err instanceof ApiClientError ? err.message : 'The move was refused');
-    } finally {
-      setMoving(false);
-    }
-  }
-
-  return (
-    <>
-    <Dialog open onOpenChange={(v) => !v && onClose()}>
-      {/*
-        Chan, 2026-09-10 (PLAN.md §10 #3): "once the modal is tall
-        enough, it should just make the comment section scrollable
-        before it makes the modal scrollable." The dialog itself no
-        longer scrolls (`overflow-hidden`, capped at 85vh) — it grows
-        with content up to that cap, and everything above the worklog
-        (identity, status, action row, fields, blocks) stays in normal
-        flow and always visible. Only the worklog list gets its own
-        `overflow-y-auto` region, sized by `flex-1 min-h-0` to take
-        whatever room is left once the fixed pieces above and below it
-        (composer, footer) have claimed theirs. `min-h-0` is load-bearing
-        here — without it a flex child never shrinks below its content's
-        natural height, and the "own scroll region" never kicks in.
-      */}
-      <DialogContent className="flex max-h-[85vh] w-[min(680px,92vw)] max-w-none flex-col overflow-hidden">
-        <DialogHeader className="shrink-0">
-          <DialogTitle className="pr-6">{task.title}</DialogTitle>
-        </DialogHeader>
-
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
-        <div className="flex shrink-0 flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <StatusChip status={task.status} />
-          {task.is_committed ? <Chip tone="info">Committed this week</Chip> : null}
-          {task.is_recurring ? <Chip>Recurring</Chip> : null}
-          {task.carry_over_count > 0 ? (
-            <Chip tone={task.carry_over_count >= 3 ? 'danger' : 'neutral'}>
-              <RotateCcw className="size-3 shrink-0" aria-hidden />
-              Carried {task.carry_over_count}w
-            </Chip>
-          ) : null}
-          {openBlocks.length > 0 ? (
-            <Chip tone="danger">
-              <Ban className="size-3 shrink-0" aria-hidden />
-              Blocked
-            </Chip>
-          ) : null}
-          {lockRefusal ? (
-            <Chip>
-              <Lock className="size-3 shrink-0" aria-hidden />
-              Definition locked
-            </Chip>
-          ) : null}
-        </div>
-
-        {/*
-          Task 1 (PLAN.md §10.1): this is a normal state of the week, not
-          an error — same banner geometry as the statusAction row below
-          it, not the danger-toned refusal treatment. The message is the
-          trigger's own sentence (`definitionLockRefusal`), so it never
-          drifts from what the database will actually say if someone
-          tries anyway. Progress (status/notes/blocks) is never affected
-          by this and nothing here implies it is — the statusAction row
-          right below stays fully live.
-        */}
-        {lockRefusal ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface-2 px-3 py-2.5">
-            <p className="flex max-w-[400px] items-start gap-1.5 text-body-sm text-ink-2">
-              <Lock className="mt-0.5 size-3.5 shrink-0 text-ink-3" aria-hidden />
-              {lockRefusal}
-            </p>
-            {isGm && !readOnly ? (
-              <Button variant="secondary" size="sm" onClick={() => setRequestingChange(true)}>
-                Request a change
-              </Button>
-            ) : null}
-          </div>
-        ) : lockedForOthers && isFounderOrAdmin && !readOnly ? (
-          // The founder/admin bypass in words: this task's definition
-          // WOULD be locked for anyone else, but the database already
-          // lets this caller through -- so the direct edit path is
-          // offered instead of the GM's request banner, never both.
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface-2 px-3 py-2.5">
-            <p className="flex max-w-[400px] items-start gap-1.5 text-body-sm text-ink-2">
-              <Lock className="mt-0.5 size-3.5 shrink-0 text-ink-3" aria-hidden />
-              This task's definition is locked for the week for everyone but a founder or admin — that's you.
-            </p>
-            <Button variant="secondary" size="sm" onClick={() => setEditingDirect(true)}>
-              <Pencil className="size-3.5" aria-hidden />
-              Edit directly
-            </Button>
-          </div>
-        ) : null}
-
-        {statusAction ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface-2 px-3 py-2.5">
-            <p className="max-w-[380px] text-body-sm text-ink-2">
-              {statusRefusal ?? statusAction.hint}
-            </p>
-            <Button
-              variant={statusAction.variant === 'secondary' ? 'secondary' : 'primary'}
-              loading={moving}
-              disabled={statusRefusal != null}
-              title={statusRefusal ?? undefined}
-              onClick={() => moveStatus(statusAction.to)}
-            >
-              {statusAction.label}
-            </Button>
-          </div>
-        ) : null}
-
-        <div className="grid grid-cols-2 gap-3 rounded-lg border border-hairline bg-surface-2 p-3 sm:grid-cols-4">
-          <Field label="Owner">
-            <span className="flex items-center gap-1.5">
-              <span className="flex size-5 items-center justify-center rounded-full bg-navy-800 text-micro text-white">
-                {initials(task.ownerName)}
-              </span>
-              {task.ownerName ?? 'Unknown'}
-            </span>
-          </Field>
-          <Field label="Position">{task.ownerPosition ?? '—'}</Field>
-          <Field label={task.points_awarded != null ? 'Points awarded' : 'Points'}>
-            <span className="num text-num-md">{points ?? '—'}</span>
-            {task.points_override != null ? <span className="ml-1 text-micro text-ink-3">overridden</span> : null}
-          </Field>
-          <Field label="Client ref">{task.client_ref || '—'}</Field>
-        </div>
-
-        {task.points_override_reason ? (
-          <p className="text-body-sm text-ink-2">
-            <span className="text-eyebrow text-ink-3">Override reason </span>
-            {task.points_override_reason}
-          </p>
-        ) : null}
-
-        <div>
-          <p className="mb-1 text-eyebrow text-ink-3">Description</p>
-          {task.description ? (
-            <p className="whitespace-pre-wrap break-words text-body-sm text-ink">{task.description}</p>
-          ) : (
-            <p className="text-body-sm text-ink-3">No description was written for this task.</p>
-          )}
-        </div>
-
-        {task.rejected_reason ? (
-          <div className="rounded-lg border border-danger-border bg-danger-wash px-3 py-2">
-            <p className="text-eyebrow text-danger">Returned</p>
-            <p className="text-body-sm text-ink-2">{task.rejected_reason}</p>
-          </div>
-        ) : null}
-
-        {task.status === 'pending_cancellation' ? (
-          <div className="rounded-lg border border-pending-border bg-pending-wash px-3 py-2">
-            <p className="text-eyebrow text-pending">Flagged for cancellation</p>
-            <p className="text-body-sm text-ink-2">{task.cancellation_reason ?? '—'}</p>
-            <p className="mt-1 text-micro text-ink-3">Waiting on the clearing founder’s decision.</p>
-          </div>
-        ) : null}
-
-        <div>
-          <p className="mb-1 text-eyebrow text-ink-3">Blocks</p>
-          {blocks == null ? (
-            <p className="text-body-sm text-ink-3">Loading…</p>
-          ) : blocks.length === 0 ? (
-            <p className="text-body-sm text-ink-3">Never blocked.</p>
-          ) : (
-            <ul className="flex flex-col gap-1.5">
-              {blocks.map((b) => (
-                <li
-                  key={b.id}
-                  className={cn(
-                    'flex items-start justify-between gap-3 rounded-md border px-3 py-2 text-body-sm',
-                    b.resolved_at ? 'border-hairline bg-surface-2 text-ink-3' : 'border-blocked-border bg-blocked-wash'
-                  )}
-                >
-                  <div>
-                    <p className={b.resolved_at ? 'text-ink-3' : 'text-ink'}>
-                      {b.blockingName ?? 'Unknown'} — {b.reason}
-                    </p>
-                    <p className="text-micro text-ink-3">
-                      raised by {b.createdByName ?? 'unknown'} · {new Date(b.created_at).toLocaleString()}
-                      {b.resolved_at ? ` · resolved by ${b.resolvedByName ?? 'unknown'}` : ''}
-                    </p>
-                  </div>
-                  {!b.resolved_at && canResolveBlock ? (
-                    <Button variant="secondary" size="sm" onClick={() => resolveBlock(b.id)}>
-                      Resolve
-                    </Button>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        </div>
-
-        {/*
-          The one scroll region past this point. `min-h-[96px]` keeps a
-          few rows visible even in a short dialog rather than collapsing
-          to nothing; `flex-1 min-h-0` lets it claim whatever height the
-          fixed pieces above and below (composer, footer) leave over, up
-          to the dialog's own 85vh cap. `overflow-x-auto` on the list
-          itself is the "wide content still gets its own overflow-x"
-          rule — a note's own text always wraps (`break-words`), but this
-          is the backstop for anything that doesn't (a long unbroken
-          token, a pasted table).
-
-          Task 4's change-request history (closing the loop — "the GM
-          should be able to see what happened to their request") shares
-          THIS scroll region rather than sitting in the fixed area above
-          with the chips/fields/blocks. Reproduced defect it fixes: a
-          first attempt put it in the fixed area, which grew past the
-          dialog's 85vh cap on a task with real history and the
-          flexbox algorithm silently clipped the overflow from the
-          bottom — hiding not just this section but the ENTIRE worklog
-          panel below it, with no scrollbar to hint anything was
-          missing (confirmed present in the DOM via `innerText`,
-          invisible on screen). Both this list and the worklog are
-          unbounded, append-only histories, so sharing the one scroll
-          region Chan's own design already carves out is the correct
-          fix, not a second one.
-        */}
-        <div className="flex min-h-[96px] flex-1 flex-col overflow-hidden">
-          <p className="mb-1 shrink-0 text-eyebrow text-ink-3">Worklog</p>
-          <div className="flex flex-1 flex-col gap-3 overflow-y-auto overflow-x-auto rounded-lg border border-hairline bg-surface p-3">
-            {editRequests && editRequests.length > 0 ? (
-              <div className="-mx-3 -mt-3 mb-1 border-b border-hairline pb-3">
-                <p className="px-3 pt-3 text-eyebrow text-ink-3">Change requests</p>
-                <div className="mt-1">
-                  {editRequests.map((r) => (
-                    <EditRequestCard key={r.id} request={r} diffs={buildFieldDiffs(r, diffResolve)} />
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            {!notes ? (
-              <p className="text-body-sm text-ink-3">Loading…</p>
-            ) : notes.length === 0 ? (
-              <p className="text-body-sm text-ink-3">No notes yet. The worklog is how a task narrates itself.</p>
-            ) : (
-              notes.map((n) => (
-                <div key={n.id} className="border-b border-hairline pb-2 last:border-0 last:pb-0">
-                  <p className="whitespace-pre-wrap break-words text-body-sm text-ink">{n.body}</p>
-                  <p className="num text-num-xs text-ink-3">
-                    {n.authorName ?? 'unknown'} · {new Date(n.created_at).toLocaleString()}
-                  </p>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-        </div>
-
-        {closed ? (
-          <p className="shrink-0 text-body-sm text-ink-3">This task is closed — the record is frozen and takes no new notes.</p>
-        ) : readOnly ? (
-          <p className="shrink-0 text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
-        ) : (
-          <div className="flex shrink-0 flex-col gap-2">
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value.slice(0, 4000))}
-              placeholder="What did you do? What's next?"
-              aria-label="Add a worklog note"
-              className="min-h-[70px] w-full rounded-md border border-hairline-strong bg-white px-[10px] py-2 text-body text-ink placeholder:text-ink-3 focus-visible:border-brand-600 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-brand-100"
-            />
-            {error ? <p className="text-label text-danger">{error}</p> : null}
-          </div>
-        )}
-
-        <DialogFooter className="shrink-0 flex-wrap">
-          {!closed && task.status !== 'pending_cancellation' && openBlocks.length === 0 ? (
-            <Button
-              variant="secondary"
-              disabled={readOnly}
-              title={readOnly ? 'Your account is read-only.' : undefined}
-              onClick={() => {
-                onClose();
-                onDeclareBlock(task);
-              }}
-            >
-              <Ban className="size-3.5" aria-hidden />
-              Declare a block
-            </Button>
-          ) : null}
-          {onFlagCancellation && !closed && task.status !== 'pending_cancellation' ? (
-            <Button
-              variant="secondary"
-              onClick={() => {
-                onClose();
-                onFlagCancellation(task);
-              }}
-            >
-              <XOctagon className="size-3.5" aria-hidden />
-              Flag for cancellation
-            </Button>
-          ) : null}
-          <Button variant="secondary" onClick={onClose}>
-            Close
-          </Button>
-          {!closed && !readOnly ? (
-            <Button loading={submitting} disabled={!body.trim()} onClick={addNote}>
-              Add note
-            </Button>
-          ) : null}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-
-    {requestingChange ? (
-      <TaskEditRequestDialog
-        task={task}
-        onClose={() => setRequestingChange(false)}
-        onCreated={loadEditRequests}
-      />
-    ) : null}
-
-    {editingDirect ? (
-      <TaskEditRequestDialog
-        task={task}
-        direct
-        onClose={() => setEditingDirect(false)}
-        onCreated={() => {
-          loadEditRequests();
-          loadNotes();
-          onChanged();
-        }}
-      />
-    ) : null}
-    </>
-  );
-}
-
-// The running worklog Chan asked for -- a task's narration, distinct
-// from its `description`. Append-only server-side; this dialog only
-// ever lists and posts, never edits or deletes a note. Reached from the
-// card's note-count button, which is the "jump straight to the
-// conversation" path; the full detail dialog above contains the same
-// worklog in its wider context.
-function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; onClose: () => void; onNoteAdded: () => void }) {
-  const { me } = useAuth();
-  const [notes, setNotes] = React.useState<Note[] | null>(null);
-  const [body, setBody] = React.useState('');
-  const [submitting, setSubmitting] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const closed = task.status === 'cleared' || task.status === 'cancelled';
-  const readOnly = me?.readOnly ?? false;
-
-  const load = React.useCallback(() => {
-    api
-      .get<Note[]>(`/api/tasks/${task.id}/notes`)
-      .then(setNotes)
-      .catch(() => toast.error('Could not load the worklog'));
-  }, [task.id]);
-  React.useEffect(() => load(), [load]);
-
-  async function submit() {
-    setSubmitting(true);
-    setError(null);
-    try {
-      await api.post(`/api/tasks/${task.id}/notes`, { body });
-      setBody('');
-      load();
-      onNoteAdded();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not add the note');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Worklog — "{task.title}"</DialogTitle>
-        </DialogHeader>
-        <div className="flex max-h-[320px] flex-col gap-3 overflow-y-auto">
-          {!notes ? (
-            <p className="text-body-sm text-ink-3">Loading…</p>
-          ) : notes.length === 0 ? (
-            <p className="text-body-sm text-ink-3">No notes yet.</p>
-          ) : (
-            notes.map((n) => (
-              <div key={n.id} className="border-b border-hairline pb-2 last:border-0">
-                <p className="whitespace-pre-wrap break-words text-body-sm text-ink">{n.body}</p>
-                <p className="text-num-xs num text-ink-3">
-                  {n.authorName ?? 'unknown'} · {new Date(n.created_at).toLocaleString()}
-                </p>
-              </div>
-            ))
-          )}
-        </div>
-        {closed ? (
-          <p className="text-body-sm text-ink-3">This task is closed — no new notes can be added.</p>
-        ) : readOnly ? (
-          <p className="text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
-        ) : (
-          <div className="flex flex-col gap-2">
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value.slice(0, 4000))}
-              placeholder="What did you do? What's next?"
-              className="min-h-[70px] w-full rounded-md border border-hairline-strong bg-white px-[10px] py-2 text-body text-ink placeholder:text-ink-3 focus-visible:outline-none focus-visible:border-brand-600 focus-visible:ring-[3px] focus-visible:ring-brand-100"
-            />
-            {error ? <p className="text-label text-danger">{error}</p> : null}
-          </div>
-        )}
-        <DialogFooter>
-          <Button variant="secondary" onClick={onClose}>
-            Close
-          </Button>
-          {!closed && !readOnly ? (
-            <Button loading={submitting} disabled={!body.trim()} onClick={submit}>
-              Add note
-            </Button>
-          ) : null}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// GM or founder flags a task for cancellation; the clearing founder
-// approves or refuses from /queue (PLAN.md's "one transition endpoint"
-// rule: this posts the same `POST /:id/status` every other move does,
-// just targeting `pending_cancellation`).
-function FlagCancellationDialog({ task, onClose, onDone }: { task: Task; onClose: () => void; onDone: () => void }) {
-  const [reason, setReason] = React.useState('');
-  const [submitting, setSubmitting] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-
-  async function submit() {
-    setSubmitting(true);
-    setError(null);
-    try {
-      await api.post(`/api/tasks/${task.id}/status`, { to: 'pending_cancellation', reason });
-      onDone();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not flag this task');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Flag "{task.title}" for cancellation</DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col gap-4">
-          <p className="text-body-sm text-ink-3">
-            The clearing founder will approve or refuse this. Nothing is cancelled yet, and no points are ever awarded on a
-            cancelled task.
-          </p>
-          <ReasonTextarea value={reason} onChange={setReason} placeholder="Why should this be cancelled?" />
-          {error ? <p className="text-label text-danger">{error}</p> : null}
-        </div>
-        <DialogFooter>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="destructive" loading={submitting} disabled={reason.trim().length < 10} onClick={submit}>
-            Flag for cancellation
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function BlockDialog({ task, onClose, onDone }: { task: Task; onClose: () => void; onDone: () => void }) {
-  const [target, setTarget] = React.useState<'task' | 'person' | 'external'>('external');
-  const [external, setExternal] = React.useState('');
-  const [reason, setReason] = React.useState('');
-  const [submitting, setSubmitting] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-
-  async function submit() {
-    setSubmitting(true);
-    setError(null);
-    try {
-      await api.post(`/api/tasks/${task.id}/blocks`, {
-        target,
-        blockingExternal: target === 'external' ? external : undefined,
-        reason,
-      });
-      onDone();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : 'Could not declare the block');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>What is blocking "{task.title}"?</DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col gap-4">
-          <Select value={target} onValueChange={(v) => setTarget(v as typeof target)}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="external">An outside party (BOC, carrier, client…)</SelectItem>
-              <SelectItem value="person">Someone on the team</SelectItem>
-              <SelectItem value="task">Another task</SelectItem>
-            </SelectContent>
-          </Select>
-          {target === 'external' ? (
-            <input
-              className="h-[34px] rounded-md border border-[#CBD2E0] px-[10px] text-body"
-              placeholder="Who? e.g. Bureau of Customs"
-              value={external}
-              onChange={(e) => setExternal(e.target.value)}
-            />
-          ) : (
-            <p className="text-body-sm text-ink-3">
-              Picking who or which task is blocking this needs the roster/task picker — not built in this pass. Use "outside
-              party" for now, or block from the task detail view once that lands.
-            </p>
-          )}
-          <ReasonTextarea value={reason} onChange={setReason} placeholder="Why is this blocked?" />
-          {error ? <p className="text-label text-danger">{error}</p> : null}
-        </div>
-        <DialogFooter>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            onClick={submit}
-            loading={submitting}
-            disabled={reason.trim().length < 10 || (target === 'external' && !external.trim())}
-          >
-            Declare block
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
