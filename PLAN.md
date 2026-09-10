@@ -1614,3 +1614,50 @@ Verified: founder now sees 7 own rows, and the `+3` cleared row reconciles with 
 - The briefing open/close and any Clear/Verify were not exercised: irreversible. **The Monday
   flow's two most important writes remain browser-unverified** — the thing to fix first with
   a disposable week.
+
+### 12.7 Three defects, one lesson about this project's tests
+
+Three of today's worst defects share a shape, and it is worth stating once rather than
+rediscovering a fourth time.
+
+| Defect | Endpoint test says | Reality |
+|---|---|---|
+| `Content-Type` on bodyless POSTs (§11.1) | seven endpoints green | seven buttons dead before the handler ran |
+| `204` on a permanent delete (§12.6) | endpoint correct | UI reported the exact opposite of what happened |
+| Settings audit row (below) | `PATCH /api/settings` → 200, correct body | the audit row was never written |
+
+**This project's tests verify what a handler returns. Its bugs live in what the handler does
+on the way** — the header it sends, the status it answers with, the side effect it writes.
+Every one of these was invisible to a test that calls the route directly and asserts on the
+response body, and every one was obvious within a minute of driving the real thing.
+
+**The settings audit row does not write, and the reason it went unnoticed is the point.**
+`core.audit_logs.entity_id` is `uuid`; the route passes the string `'settings'`; Postgres
+refuses it with `22P02`; and `writeAudit` catches that into a `console.error`. So the
+business write lands and the audit row silently does not. Verified by changing
+`stale_after_days` 3 → 4 through the UI (save succeeded, `audit_logs` stayed at 53 rows, 0
+of them settings) and reverting — the row is byte-identical to baseline. The fix belongs to
+another session's file and is routed to them: `entityId: undefined`, since `ops.settings` is
+a singleton keyed `id = true` and `entity_type` already identifies it.
+
+The deeper problem is `writeAudit`'s own contract. Its comment promises an audit failure is
+"logged loudly so the gap is visible rather than silently swallowed" — but `console.error`
+on a server nobody is tailing **is** silently swallowed, and what it swallowed here was the
+audit trail for the single highest-impact write in the system: the parameters that rescore
+every person retroactively across the scoreboard's 13-week windows. Not throwing is correct;
+an audit failure must not roll back a legitimate business action. But *not throwing* and
+*nobody finding out* are different choices and we currently have the second. **The audit
+table can stop working and no one learns until they go looking for a row that was never
+there.** Raised rather than changed — `lib/supabase.ts` is shared ground.
+
+### 12.8 The technique for testing an unreachable API
+
+Both sessions independently reached for `SIGSTOP` on the shared API, and both were wrong.
+Mine was worse than useless: server paused, the browser navigation then refused by this
+session's own permission classifier, and no way to look at the thing I had just broken.
+
+**The method that works touches nothing shared:** point `apps/web/.env`'s `VITE_API_URL` at
+a dead port, restart only the Vite on 5173, drive, then restore. `:3099` stays up for every
+other session the whole time, and there is no CORS trap because there is no server there to
+refuse the origin. Two people making the same wrong move an hour apart is a good sign it is
+the obvious one, which is exactly why it is written down here instead of remembered.
