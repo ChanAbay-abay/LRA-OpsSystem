@@ -1364,6 +1364,129 @@ select pg_temp.expect_blocked('blocks',
   $sql$update ops.task_blocks set resolved_at = now() - interval '30 days'
        where id = (select v from t_meta where k='backdated_block')$sql$);
 
+-- =======================================================================
+-- Auditing the founder/admin direct-edit path, and refusing an INSERT
+-- into a closed week (20260910170000_audit_direct_edits_and_closed_
+-- week_guard.sql). taskA is reused again: still committed, still in the
+-- now-`open` week -- exactly the record this whole feature protects.
+-- =======================================================================
+
+-- === Item 1: a direct definition edit now writes an audit row ========
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('audit-direct-edit',
+  'the clearing founder CAN still edit taskA''s client_ref directly (guard 2b''s exemption, untouched)',
+  $sql$update ops.tasks set client_ref = 'TEST-taskA-direct-edit-client-ref'
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+select pg_temp.expect_rows('audit-direct-edit',
+  'that direct edit wrote exactly one audit_logs row carrying before/after client_ref',
+  $sql$select count(*) from core.audit_logs
+       where entity_type = 'ops.task' and entity_id = (select v from t_meta where k='taskA')
+         and action = 'ops.task.definition_edited_directly'
+         and old_values ? 'client_ref'
+         and new_values ->> 'client_ref' = 'TEST-taskA-direct-edit-client-ref'
+         and (old_values ->> 'client_ref') is distinct from 'TEST-taskA-direct-edit-client-ref'$sql$,
+  1);
+
+-- === Item 1, the "do not drown the signal" half: an ordinary edit to
+--     an uncommitted task in a `planning` week writes NO audit row ====
+--
+-- A fresh week and a fresh task, never committed -- old.is_committed is
+-- false, so 0c's condition never applies. This must behave exactly as
+-- it always has.
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+insert into ops.weeks (week_start, state) values ('2099-04-06', 'planning');
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='broker'), (select v from t_meta where k='task_type'),
+         'TEST-taskPlanning', 'todo', (select uid from p where k='broker')
+  from ops.weeks w where w.week_start = '2099-04-06'
+  returning id
+)
+insert into t_meta (k, v) select 'taskPlanning', id from ins;
+set local role authenticated;
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_allowed('audit-direct-edit',
+  'an ordinary edit to an uncommitted task in a planning week still works, untouched by this fix',
+  $sql$update ops.tasks set title = 'TEST-taskPlanning (edited)'
+       where id = (select v from t_meta where k='taskPlanning')$sql$);
+
+select pg_temp.expect_rows('audit-direct-edit',
+  'that ordinary planning-week edit wrote NO audit row -- the signal stays reserved for a real, '
+  'locked-definition edit, not every edit anyone ever makes',
+  $sql$select count(*) from core.audit_logs
+       where entity_type = 'ops.task' and entity_id = (select v from t_meta where k='taskPlanning')
+         and action = 'ops.task.definition_edited_directly'$sql$,
+  0);
+
+-- === Regression guard for the suppression flag: the GM's edit-request
+--     approval earlier in this file (edit_req1, which renamed taskA to
+--     'TEST-taskA (renamed)') must have written exactly its own audit
+--     row, not a second one from this migration's new 0c block re-
+--     entering ops.tasks' trigger via the request's internal UPDATE ===
+
+-- Read these two as the founder, NOT as broker. `core.audit_logs`'
+-- SELECT policy is `actor_id = me OR core.can_read_audit(...)`, and
+-- can_read_audit grants oversight everything but a plain staff member
+-- only their OWN ops.task rows -- and nothing at all for entity_type
+-- 'ops.task_edit_request'. Left as broker, the "expected 1" assertion
+-- below failed for a pure visibility reason with the trigger working
+-- perfectly, AND the "expected 0" assertion passed vacuously: it would
+-- have gone green even if the duplicate row it exists to catch were
+-- really there. Lesson §4 -- verify the instrumentation can see the
+-- thing before believing either a positive or a negative from it.
+select pg_temp.become((select uid from p where k='founder'));
+
+select pg_temp.expect_rows('audit-direct-edit',
+  'GM''s approved edit request produced NO duplicate row from the direct-edit trigger it '
+  're-enters internally -- the suppression flag held',
+  $sql$select count(*) from core.audit_logs
+       where entity_type = 'ops.task' and entity_id = (select v from t_meta where k='taskA')
+         and action = 'ops.task.definition_edited_directly'
+         and new_values ->> 'title' = 'TEST-taskA (renamed)'$sql$,
+  0);
+
+select pg_temp.expect_rows('audit-direct-edit',
+  'the approved edit request itself still has its own, single audit row (unaffected by this migration)',
+  $sql$select count(*) from core.audit_logs
+       where entity_type = 'ops.task_edit_request'
+         and action = 'ops.task_edit_request.approved'
+         and new_values -> 'after_values' ->> 'title' = 'TEST-taskA (renamed)'$sql$,
+  1);
+
+-- === Item 2: an INSERT into an already-closed week is refused, and the
+--     mid-week `open` case -- the allow that matters most -- still works.
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+insert into ops.weeks (week_start, state) values ('2099-05-04', 'closed');
+set local role authenticated;
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('week-guard',
+  'a task cannot be INSERTed into an already-closed week',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+       select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+              'TEST-closed-week-insert', 'todo', (select uid from p where k='sales')
+       from ops.weeks w where w.week_start = '2099-05-04'$sql$);
+
+-- The allow case that matters most: the file's own current week is
+-- `open` at this point (closed the briefing earlier, via
+-- ops.close_briefing, well before this section) -- mid-week task
+-- creation must keep working exactly as before.
+select pg_temp.expect_allowed('week-guard',
+  'a task CAN still be INSERTed into the current, mid-week `open` week -- getting this wrong '
+  'would make it impossible to log any work discovered after Monday',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+       select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+              'TEST-open-week-insert', 'todo', (select uid from p where k='sales')
+       from ops.weeks w where w.week_start = ops.week_start_for(now())$sql$);
+
 reset role;
 
 -- ---------------------------------------------------------------------

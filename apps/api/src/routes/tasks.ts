@@ -44,6 +44,16 @@ const patchSchema = z.object({
   description: z.string().nullable().optional(),
   taskTypeId: z.string().uuid().nullable().optional(),
   clientRef: z.string().nullable().optional(),
+  // Owner reassignment on a direct edit. `ops.enforce_task_transition`'s
+  // definition-lock guard (2b) already lists owner_user_id among the
+  // five columns a founder/admin may still change on a committed,
+  // locked task -- the only gap was this route refusing to forward the
+  // field at all, which left the direct-edit dialog disabling the Owner
+  // toggle even though the database would have allowed it. Restricted to
+  // founder/admin below, the same authorities 2b exempts -- an ordinary
+  // owner or GM reassigning ownership through this endpoint would be
+  // granting a new capability this migration was never asked to add.
+  ownerUserId: z.string().uuid().optional(),
 });
 
 // A cancellation FLAG needs its reason enforced the same way as a
@@ -358,13 +368,24 @@ export default async function tasksRoutes(app: FastifyInstance) {
       })
       .select()
       .single();
-    if (error) throw error;
+    // `ops.enforce_initial_task_status` now refuses an insert into a
+    // closed week with a clear, human-readable message (20260910170000)
+    // -- forward it as a real ApiError instead of the raw Postgres error
+    // object every other write route in this file already avoids
+    // leaking (commit/uncommit/notes/blocks/override-points below all
+    // do the same translation).
+    if (error) throw new ApiError(422, error.message, error.code ?? 'CREATE_REFUSED');
     return { data };
   });
 
   app.patch('/:id', async (req) => {
     const { id } = req.params as { id: string };
     const body = patchSchema.parse(req.body);
+
+    if (body.ownerUserId !== undefined && !['founder', 'admin'].includes(req.user.authority)) {
+      throw new ApiError(403, "only a founder or admin may reassign a task's owner directly", 'FORBIDDEN');
+    }
+
     const db = userClient(req.accessToken);
 
     const patch: Record<string, unknown> = {};
@@ -372,9 +393,10 @@ export default async function tasksRoutes(app: FastifyInstance) {
     if (body.description !== undefined) patch.description = body.description;
     if (body.taskTypeId !== undefined) patch.task_type_id = body.taskTypeId;
     if (body.clientRef !== undefined) patch.client_ref = body.clientRef;
+    if (body.ownerUserId !== undefined) patch.owner_user_id = body.ownerUserId;
 
     const { data, error } = await db.schema('ops').from('tasks').update(patch).eq('id', id).select().single();
-    if (error) throw error;
+    if (error) throw new ApiError(422, error.message, error.code ?? 'PATCH_REFUSED');
     return { data };
   });
 

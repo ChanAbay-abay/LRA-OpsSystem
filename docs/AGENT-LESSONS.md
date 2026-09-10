@@ -189,3 +189,46 @@ The generator bug here was itself lesson §5 again: `seedHistory` guarded idempo
 "is this task already committed?" instead of the database's actual rule, "can this week take a
 commitment at all?" An already-closed history week is the finished artifact and must be skipped
 whole.
+
+---
+
+## 10. An assertion run as the wrong persona can pass vacuously
+
+**2026-09-10.** Two new audit-logging assertions ran as the `broker` persona. `core.audit_logs`'
+policy grants oversight everything but a staff member only their own `ops.task` rows, and
+nothing at all for `ops.task_edit_request`. So:
+
+- the "expect 1 audit row" assertion failed — for pure **visibility**, not because the row was
+  missing;
+- and the neighbouring "expect 0 duplicate rows" assertion **passed vacuously**. Staff could
+  never see those rows, so it would have gone green with the duplicate present. It was testing
+  nothing.
+
+The failure was the lucky half. The vacuous pass is the dangerous one: a green assertion that
+cannot fail is worse than a missing one, because it is counted as evidence.
+
+**Do:** when asserting that a row exists, was created, or was *not* duplicated, check that the
+persona running the assertion can actually **see** that row. An RLS-scoped test suite makes
+"absent" and "invisible" indistinguishable unless you choose the reader deliberately. Where a
+count is expected to be zero, first prove the same query returns non-zero for a case you know
+exists.
+
+---
+
+## 11. `is_local` scopes a setting to the transaction, not the statement
+
+**2026-09-10.** The audit migration suppressed double-logging during an edit-request approval by
+setting a GUC with `set_config(..., true)` — and never cleared it. `is_local = true` means
+*until this transaction ends*, not *for this statement*.
+
+So after an approval, any later direct definition edit **in the same transaction** silently wrote
+no audit row. Under PostgREST one request is one transaction, so it is invisible in production —
+which is exactly what makes it dangerous: it would have surfaced first in a batch or an RPC doing
+two things, long after anyone remembered the mechanism existed.
+
+The suppression meant to keep the log quiet had reintroduced the very hole the migration was
+written to close: the most privileged edit leaving the least trace.
+
+**Do:** clear a transaction-scoped flag as deliberately as you set it, immediately after the
+operation it was guarding. And when a flag suppresses an audit or safety behaviour, write the
+test that proves the behaviour comes **back** afterwards.
