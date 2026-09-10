@@ -158,23 +158,82 @@ async function purge() {
     if (existing) authUsers.push(existing);
   }
 
-  if (!authUsers.length) {
+  /*
+    A demo account can exist in core.users with NO auth login. That is not
+    a corrupt state, it is the normal outcome of a half-finished purge --
+    and it used to make purge unable to finish its own job, because it
+    looked ONLY in auth.users. A run that deleted the logins but failed
+    on the rows underneath left eight orphaned core.users rows that every
+    subsequent purge then skipped as "not found", while the next seed died
+    on users_email_key. Purge has to be able to clean up after itself.
+
+    So the id set is the union: every demo login, plus every core.users row
+    on the demo domain regardless of whether a login still exists.
+  */
+  const { data: orphanRows, error: orphanError } = await svc
+    .schema('core').from('users').select('id, email').like('email', `%@${DEMO_DOMAIN}`);
+  if (orphanError) throw orphanError;
+
+  const userIds = [...new Set([...authUsers.map((u) => u.id), ...(orphanRows ?? []).map((u) => u.id)])];
+
+  if (!userIds.length) {
     console.log('Nothing to purge — no demo accounts found.');
     return;
   }
 
-  const userIds = authUsers.map((u) => u.id);
+  const orphanCount = userIds.length - authUsers.length;
+  if (orphanCount > 0) {
+    console.log(`  ${orphanCount} core.users row(s) with no login — cleaning those up too.\n`);
+  }
+
+  /*
+    EVERY delete below is error-checked, and that is the whole lesson of
+    this function's history.
+
+    None of them used to be. PostgREST returns FK violations as a value,
+    not a throw, so a delete that hit a constraint reported success and
+    the script carried on to the next step -- which then failed for the
+    same reason, silently, all the way down. The visible result was a
+    purge that printed "removed <email>" for all six accounts while
+    leaving 8 core.users rows and 49 tasks in place, and a reseed that
+    then died on `users_email_key`.
+
+    The comment further down records a PREVIOUS session hitting this same
+    class of bug and fixing the one instance it saw (the dropped
+    auth.users cascade) without adding error checks -- so it came back the
+    moment ops.task_edit_requests was added, whose task_id FK is NO ACTION
+    and blocks the task delete. Check the errors; do not chase the tables.
+  */
+  const must = async (label, promise) => {
+    const { error } = await promise;
+    if (error) throw new Error(`purge step "${label}" failed: ${error.message}`);
+  };
+
+  // 0. Edit requests and their batches. Newer than the rest of this
+  //    function, and `task_edit_requests.task_id` is NO ACTION, so these
+  //    must go before any task can be deleted.
+  if (true) {
+    const { data: demoTaskIdsForEdits } = await svc
+      .schema('ops').from('tasks').select('id').in('owner_user_id', userIds);
+    const ids = (demoTaskIdsForEdits ?? []).map((t) => t.id);
+    if (ids.length) {
+      await must('task_edit_requests by task', svc.schema('ops').from('task_edit_requests').delete().in('task_id', ids));
+    }
+    await must('task_edit_requests by requester', svc.schema('ops').from('task_edit_requests').delete().in('requested_by', userIds));
+    await must('task_edit_batches by requester', svc.schema('ops').from('task_edit_batches').delete().in('requested_by', userIds));
+  }
 
   // 1. Blocks referencing demo tasks/users on either side.
   const { data: demoTasks } = await svc.schema('ops').from('tasks').select('id').in('owner_user_id', userIds);
   const taskIds = (demoTasks ?? []).map((t) => t.id);
 
   if (taskIds.length) {
-    await svc.schema('ops').from('task_blocks').delete().in('task_id', taskIds);
-    await svc.schema('ops').from('task_blocks').delete().in('blocking_task_id', taskIds);
+    await must('task_blocks by task', svc.schema('ops').from('task_blocks').delete().in('task_id', taskIds));
+    await must('task_blocks by blocking task', svc.schema('ops').from('task_blocks').delete().in('blocking_task_id', taskIds));
   }
-  await svc.schema('ops').from('task_blocks').delete().in('blocking_user_id', userIds);
-  await svc.schema('ops').from('task_blocks').delete().in('created_by', userIds);
+  await must('task_blocks by blocking user', svc.schema('ops').from('task_blocks').delete().in('blocking_user_id', userIds));
+  await must('task_blocks by creator', svc.schema('ops').from('task_blocks').delete().in('created_by', userIds));
+  await must('task_blocks by resolver', svc.schema('ops').from('task_blocks').delete().in('resolved_by', userIds));
 
   // 2. Ledger rows -- DELETE is permitted here only because this script
   //    runs as a direct service-role connection (core.is_system_caller())
@@ -182,18 +241,19 @@ async function purge() {
   //    ops_ledger_purge_exception.sql for why that exception exists and
   //    why core.audit_logs gets no equivalent.
   if (taskIds.length) {
-    await svc.schema('ops').from('point_ledger').delete().in('task_id', taskIds);
+    await must('point_ledger by task', svc.schema('ops').from('point_ledger').delete().in('task_id', taskIds));
   }
-  await svc.schema('ops').from('point_ledger').delete().in('user_id', userIds);
+  await must('point_ledger by user', svc.schema('ops').from('point_ledger').delete().in('user_id', userIds));
+  await must('point_ledger by actor', svc.schema('ops').from('point_ledger').delete().in('actor_id', userIds));
 
   // 3. Tasks.
   if (taskIds.length) {
-    await svc.schema('ops').from('tasks').delete().in('id', taskIds);
+    await must('tasks', svc.schema('ops').from('tasks').delete().in('id', taskIds));
   }
 
   // 4. People (memberships/notifications/outbox cascade from core.users
   //    itself; people does not, so it needs an explicit delete).
-  await svc.schema('core').from('people').delete().in('email', ALL_PERSONAS.map((p) => p.email));
+  await must('people', svc.schema('core').from('people').delete().in('email', ALL_PERSONAS.map((p) => p.email)));
 
   // 4b. Notes, memberships, notifications and outbox rows, then the
   //     core.users rows themselves.
@@ -209,12 +269,45 @@ async function purge() {
   //     leaving accounts that could not be signed into and a ledger
   //     emptied out from under still-'cleared' tasks. Delete explicitly.
   if (taskIds.length) {
-    await svc.schema('ops').from('task_notes').delete().in('task_id', taskIds);
+    await must('task_notes by task', svc.schema('ops').from('task_notes').delete().in('task_id', taskIds));
   }
-  await svc.schema('core').from('memberships').delete().in('user_id', userIds);
-  await svc.schema('core').from('notifications').delete().in('user_id', userIds);
-  await svc.schema('core').from('notification_outbox').delete().in('recipient_id', userIds);
-  await svc.schema('core').from('users').delete().in('id', userIds);
+  await must('memberships', svc.schema('core').from('memberships').delete().in('user_id', userIds));
+  await must('notifications', svc.schema('core').from('notifications').delete().in('user_id', userIds));
+  await must('notification_outbox', svc.schema('core').from('notification_outbox').delete().in('recipient_id', userIds));
+
+  // Attribution columns that are NO ACTION rather than CASCADE. They keep
+  // a demo user alive from tables that outlive the demo data -- the week
+  // somebody closed, the catalog type they created -- so they are cleared
+  // before the users go. Nulling loses nothing that matters here: these
+  // rows are seed content, and core.audit_logs (which is the actual
+  // record) is append-only and untouched.
+  for (const [schema, table, column] of [
+    ['ops', 'weeks', 'closed_by'],
+    ['ops', 'weeks', 'briefing_closed_by'],
+    ['ops', 'task_types', 'created_by'],
+    ['ops', 'task_type_revisions', 'changed_by'],
+    ['ops', 'recurring_templates', 'created_by'],
+    ['ops', 'settings', 'updated_by'],
+  ]) {
+    await must(`${schema}.${table}.${column}`, svc.schema(schema).from(table).update({ [column]: null }).in(column, userIds));
+  }
+
+  await must('users', svc.schema('core').from('users').delete().in('id', userIds));
+
+  /*
+    The weeks themselves. This script created them, so "the database as it
+    was before this script ran" includes removing them -- and leaving them
+    actively breaks the next seed: a history week is built by creating
+    tasks, committing them, working them and then CLOSING the week, and
+    there is deliberately no reopen path. So a purge that deletes the tasks
+    but leaves the closed weeks produces three closed, empty weeks that the
+    seed then skips with "its history is built" (which was true when that
+    guard was written, and is a lie in this state). Observed exactly that:
+    a reseed that reported success and left the scoreboard with no history.
+
+    Ledger and tasks are already gone above, which is what makes this safe.
+  */
+  await must('weeks', svc.schema('ops').from('weeks').delete().neq('id', '00000000-0000-0000-0000-000000000000'));
 
   // 5. The auth logins. core.audit_logs rows naming these actors are
   //    left in place on purpose: it is append-only by design, and a
@@ -836,6 +929,21 @@ async function seedHistory(clients) {
     //
     // An already-closed history week IS the finished artifact. Skip it.
     if (week.state === 'closed') {
+      // "Closed" normally means the history IS built. It does not when a
+      // purge removed the tasks and left the week -- and silently claiming
+      // otherwise is how a reseed reported success while leaving the
+      // scoreboard empty. Purge now deletes weeks so this should not
+      // happen; say so loudly if it ever does again.
+      const { count: builtCount } = await svc
+        .schema('ops').from('tasks').select('id', { count: 'exact', head: true }).eq('week_id', week.id);
+      if (!builtCount) {
+        console.warn(
+          `  [WARNING] ${plan.label} is closed but holds NO tasks. Its history cannot be\n` +
+          '            rebuilt (a closed week cannot be re-committed, and there is no reopen\n' +
+          '            path). Run --purge first, which now removes weeks too, then re-seed.'
+        );
+        continue;
+      }
       console.log(`  [skip] ${plan.label} is already closed; its history is built. Nothing to do.`);
       continue;
     }
