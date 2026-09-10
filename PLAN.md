@@ -1040,7 +1040,7 @@ refused with "commitments are locked for this week." RLS attacks 12, 19.
 
 ### Phase 7 — Blockers, staleness, Now
 
-**Status: mostly done.** `ops.task_blocks` + cycle guard shipped in `ops_catalog_tasks`; the Blocked dialog is on `/board`. `POST /api/jobs/flag-stale` is built (idempotent per task per calendar day by checking the outbox for today's `ops.task.stale` row, which needs no schema change and also behaves correctly for a task still stale tomorrow) and `GET /api/now` is built and live-verified. Remaining: cron to actually call `flag-stale` daily, which belongs to Phase 9.
+**Status: done.** `ops.task_blocks` + cycle guard, the Blocked dialog on `/board`, `POST /api/jobs/flag-stale` (idempotent per task per calendar day via the outbox, which needs no schema change and behaves correctly for a task still stale tomorrow), and `GET /api/now` — with `/` rebuilt on it as the real Now screen, polling every 20s. The only thing outstanding is a scheduler to *call* `flag-stale`, which needs a deployed URL and therefore belongs to Phase 9.
 
 `ops.task_blocks` + cycle guard + blocked-time views; outbox events for
 `ops.block.opened` / `.resolved`; `POST /api/jobs/flag-stale` daily and idempotent per task
@@ -1052,7 +1052,9 @@ RLS attack 18.
 
 ### Phase 8 — Scoreboard, reliability, leaderboard
 
-**Status: not started.** `packages/ops-scoring/src` holds only `weeks.ts`; no `/api/scoreboard`, no `/scoreboard`, no `/people/:id`.
+**Status: done, 2026-09-10.** `packages/ops-scoring` completed tests-first: `fib.ts`, `recurring-cap.ts`, `cycle-time.ts`, `reliability.ts`. `/api/scoreboard` and `/api/scoreboard/:userId` enforce `leaderboard_visibility` server-side; `/scoreboard` and `/people/:id` show the capped score beside the raw cleared total and a week-by-week table so reliability can be recomputed by hand. **Median cycle time** is included, stamped from `ops.tasks.first_in_progress_at` (first entry to `in_progress` only, so a bounced task keeps its original start) with the sample size always shown and no backfill — neither the ledger nor the audit log records a plain `todo -> in_progress`, so historical rows stay NULL rather than being derived from a proxy.
+
+Reliability, hit-rate and cycle time are **founder/admin only and stripped from the JSON**, per §10 #4. Three real weeks of history are seeded through the real ladder so these numbers are demonstrable rather than a column of "Unrated". The hand-computed cross-check §7 demands was done for reliability and for the median, and both matched the API.
 
 `packages/ops-scoring` completed — **tests first**, because these formulas have no visible
 failure mode. `/api/scoreboard*`; `/scoreboard` and `/people/:id`; capped score shown next to
@@ -1123,11 +1125,11 @@ for now."
 
 | # | Ask | Status |
 |---|---|---|
-| 1 | A read-only visitor's refusals must be obvious, not silent failures | in flight |
-| 2 | Task cards get **quick submit + block** via right-click, and a 3-dot button opening the *same* menu | queued |
-| 3 | Task modal: when it grows tall, the **comment list** scrolls, not the whole modal | queued |
-| 4 | Hide **reliability and hit-rate** from non-founder members | queued |
-| 5 | The Monday lock, and the GM's edit-request path | in flight |
+| 1 | A read-only visitor's refusals must be obvious, not silent failures | **done** |
+| 2 | Task cards get **quick submit + block** via right-click, and a 3-dot button opening the *same* menu | **done** — one menu definition feeds both |
+| 3 | Task modal: when it grows tall, the **comment list** scrolls, not the whole modal | **done** |
+| 4 | Hide **reliability and hit-rate** from non-founder members | **done** — and cycle time; stripped from the payload, not hidden. Also closed a leak on the briefing, which computes its own hit-rate |
+| 5 | The Monday lock, and the GM's edit-request path | **done** — enforced, UI built, and attacked directly at PostgREST |
 | 6 | Keep testing; everything must actually work | standing |
 
 ### 10.1 The Monday flow, in his words
