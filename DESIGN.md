@@ -1,6 +1,10 @@
 # LRA Ops Monitoring System — Design System
 
 **Status:** binding on the `coder` agent. Written 2026-09-08 by `designer`.
+**Extended 2026-09-10** with **Part II (§16–§26)** — responsive/mobile, the shared label
+layer, duration formatting, the activity heatmap, the tooltip and "know more" system, the
+guided briefing, the `/points` date register, scoreboard card geometry, and the "keep it
+light" rules. Part I (§0–§15) is unchanged and Part II never overrides it.
 **Companions:** `PRD.md` (what it is), `PLAN.md` (how it gets built), `design/tokens.css`
 (the same `:root` block as a real file you can copy).
 
@@ -1200,3 +1204,920 @@ Reject in review if you see any of these:
    looking, documented WCAG 1.4.11 gap on unfocused inputs. B) `#8A94A6` (3.06:1) — strictly
    compliant, visibly heavier and greyer forms. → **I'd pick A** for an internal tool with four known
    users, but this is Chan's call to make knowingly, not mine to make quietly.
+
+---
+---
+
+# Part II — Mobile, plain language, and guidance
+
+**Added 2026-09-10 by `designer`, from Chan's brief.** Part I (§0–§15) is unchanged and
+still binding. Nothing below overrides a token, a hue, a radius or a curve from Part I; it
+extends the system to cover four things Part I did not specify — **the phone**, **the words
+on the screen**, **the explanations**, and **a person's own velocity**.
+
+> **Chan's brief, in his words, and where each ask is answered:**
+>
+> | His words | Section |
+> |---|---|
+> | "make sure its mobile responsive… go over all the tabs" | **§16** |
+> | "things like in_progress should be In Progress" | **§17** |
+> | durations "should automatically transition from hours to days to weeks… 371 hours old" | **§18** |
+> | "like git commits… the greener it is but instead of green use a blue" | **§19** |
+> | "i also want general tooltips incase the users forget how they work" | **§20** |
+> | "they should be guided… especially the briefing feature… input placeholders" | **§21** |
+> | "the date displays are pretty bland on the my points page" | **§22** |
+> | "scoreboard cards should be taller" | **§23** |
+> | "i dont want this webapp to be too daunting… something light" | **§24** |
+> | new colour, light and dark | **§25** |
+
+**Reference, restated.** Still Linear (structure) + Stripe (numeric grammar) from §0. Part II
+adds one borrowed pattern and names it: the **GitHub contribution calendar** (§19) — taken
+for its *grid and its legend*, not its palette; the green is replaced by the LRA brand blue
+ramp, and the bucket thresholds are re-derived for a three-person team (§19.3). Linear's
+mobile behaviour is also the model for §16: Linear does **not** shrink its board onto a
+phone, it changes what the board *is* — one lane at a time, and a menu where the drag was.
+That is the call this section makes too.
+
+---
+
+## 16. Responsive — every tab, at three widths
+
+### 16.1 Breakpoints and the design widths
+
+Tailwind v3 defaults, already in use. Do not add custom breakpoints.
+
+| Token | px | Meaning in this app |
+|---|---|---|
+| *(base)* | 0–639 | **Phone.** Design target **375**. One column, always. |
+| `sm:` | ≥640 | Large phone / small tablet portrait. Two-up allowed. |
+| `md:` | ≥768 | **The shell switch.** Sidebar returns as a persistent column (already built, `app-shell.tsx`). Design target **768**. |
+| `lg:` | ≥1024 | Desktop. Presentation density (§11) turns on here, not before. |
+| `xl:` | ≥1280 | Wide desktop. Page gutter reaches `px-8`. Design target **1440**. |
+
+**Check at 375 / 768 / 1440.** Those three, every screen, every time.
+
+### 16.2 Five rules that apply to every screen
+
+1. **The page body never scrolls horizontally.** `<main>` is already
+   `overflow-y-auto overflow-x-hidden` and that stays. Any surface wider than the column owns
+   its **own** scroller: a `div` with `overflow-x-auto`, `role="region"`, `tabIndex={0}` and
+   an `aria-label`. `CardRail` (`scoreboard/card-rail.tsx`) is the reference implementation —
+   copy its contract, do not re-invent it.
+2. **Gutters.** `app-shell.tsx` becomes `px-4 py-4 sm:px-6 sm:py-6 lg:px-8`. A 375px phone
+   loses 32px to gutters, so **343px is the real content width** — every fixed width below
+   that number must be checked against it.
+3. **Touch targets.** Below `md`, and on any coarse pointer at any width, every button, menu
+   item, tab and row-action is **≥44×44**. Implement once, in `index.css`, not per component:
+
+   ```css
+   @media (pointer: coarse) {
+     button, [role='button'], [role='tab'], a.tap, summary {
+       min-height: 44px;
+     }
+     button.icon-only, [role='button'].icon-only { min-width: 44px; }
+   }
+   ```
+   Controls stay 34px tall on a fine pointer (§5.1 unchanged). `card-rail.tsx`'s 40px
+   `RailButton` is brought up by this rule and its documented shortfall closes.
+4. **`100dvh`, never `100vh`.** iOS Safari's collapsing toolbar makes `100vh` taller than the
+   screen; `app-shell.tsx`'s `h-screen` becomes `h-[100dvh]`. Sticky footers get
+   `padding-bottom: max(12px, env(safe-area-inset-bottom))` and `index.html` gets
+   `viewport-fit=cover`.
+5. **A fixed pixel width below `sm` is a bug.** `min-w-[300px]`, `w-32`, `w-10` and friends
+   either become `min-w-0` + `flex-1`, or move behind a `sm:` prefix.
+
+### 16.3 The Board — the hard one
+
+Today: five lanes, `w-column` (288px), `snap-x`, horizontal scroll, `@dnd-kit` drag. Five
+lanes at 288 + 12 gap = **1488px**, so a phone shows one lane and a fifth of the next.
+
+**Below `md`, the board becomes a one-lane-at-a-time view.** Three changes, no new state:
+
+- **Lane width** `w-column` → `w-[calc(100vw-2rem)] md:w-column`, and the scroller's snap goes
+  `snap-x` → `snap-x snap-mandatory md:snap-proximity`. A swipe now lands on exactly one lane
+  instead of between two. The DOM, the lanes, the tabs and the sticky lane headers are
+  unchanged.
+- **A lane pager**, sticky above the scroller, below `md` only: a horizontally scrollable
+  `role="tablist"` of the five lane names with their counts —
+  `Plan 6 · In Progress 3 · Blocked 2 · Submitted 1 · Settled 9`. `text-eyebrow`, active tab
+  `--ink` with a 2px `--brand-600` underline, idle `--ink-3`. Tapping scrolls the rail to that
+  lane; scrolling the rail updates the tab (`IntersectionObserver` on the lanes, threshold
+  0.6). It is navigation, not a second source of truth — it never stores which lane is
+  showing, it reads the scroller.
+- **Drag-and-drop is OFF below `md`.** This is the important decision. A drag cannot cross a
+  lane boundary when only one lane is on screen, and a 180ms-delay touch drag on a scrolling
+  surface is the single most frustrating interaction on a phone. Replace it with a
+  **`Move to…` submenu on the card's existing menu.** `task-card-menu.tsx` and
+  `task-menu-items.ts` already exist and already own the legality logic:
+
+  - Add one entry, `Move to…`, opening a submenu of **every** `BoardColumn`.
+  - A target the actor may not use renders **disabled, with `moveRefusal()`'s sentence as its
+    own label line** in `text-micro --ink-3`. Nothing is hidden; the refusal is the teaching.
+  - `blocked` as a target opens the block dialog first, exactly as the drop does (§7.3).
+  - Reuses `moveRefusal` verbatim. **No new permission logic may be written for this.**
+
+  Gate the sensors, not the render: `useSensors(...)` takes the pointer/keyboard sensors only
+  when `matchMedia('(pointer: fine)').matches`. Keyboard drag (§7.3) survives on every width.
+  On a fine pointer nothing changes at all, and `Move to…` is a welcome second path.
+- Tap a card = open the detail (already). Long-press = the Radix `ContextMenu` (already —
+  Radix handles long-press on touch natively).
+- The lane's sticky header stays; its 28px height stays.
+
+**At 768** the board is unchanged from today: 288px lanes, horizontal scroll, drag on.
+
+### 16.4 The Briefing — the other hard one
+
+The commit grid is already `grid-cols-1 md:grid-cols-2 lg:grid-cols-3`, which is correct.
+What is missing is that a phone gets **four full-height person cards stacked**, and the reader
+has to scroll past two colleagues to find themselves.
+
+- Below `md`, each person's commit card becomes a **collapsible**. Header row always visible:
+  avatar, name, committed total in `num-md`, and a chevron. Body (committed list + candidates)
+  collapses. **The reader's own card is first in the list and open by default**; everyone
+  else's is closed. Above `md` nothing collapses — the whole grid is open, because that is the
+  meeting-room view.
+- Use a Radix `Collapsible` with the §7.1 accordion motion. Below `md` only; above `md` render
+  the body unconditionally, do not just leave it "open" (a collapsible with a dead trigger is
+  worse than no collapsible).
+- **Last week's scorecard** is a real `<table>` with 4–5 columns. Below `sm` it becomes a
+  stacked list, not a scroller — 4 columns is few enough to stack and a scroller here hides
+  the hit-rate off the right edge. Per person: one card, name in `text-strong`, then a
+  `grid-cols-3` of `text-eyebrow` label over `num-sm` value (Committed / Cleared / Hit-rate).
+  Above `sm`, the table returns exactly as it is.
+- **Presentation density (§11) is `lg:` and up only.** Below 1024 the briefing uses normal
+  density. A 32px section header on a 375px screen wraps to three lines and reads as a poster,
+  not a tool. `text-display` → `text-title-lg lg:text-display` on this screen.
+- The close bar (§21.4) is `sticky bottom-0` below `md`, with the safe-area padding from
+  §16.2.
+
+### 16.5 Every other tab, one line each
+
+| Route | At 375 |
+|---|---|
+| `/now` | Already `grid-cols-1 lg:grid-cols-2`. Rows get the §16.6 two-line treatment. Nothing else. |
+| `/queue` (Approvals) | Rows are `flex items-center gap-4` with a fixed age column — apply §16.6. The `Approve` / `Return` buttons stay on line 1, right-aligned, and are the 44px targets. |
+| `/digest` (founder) | Four sections of the same row shape → §16.6. The `grid-cols-2 sm:grid-cols-4` stat strip stays 2-up at 375 (four 24px numbers in a row do not fit 343px). |
+| `/points` | Balance panel already stacks at `sm`. Below `sm` the three `num-hero` 40px figures drop to `num-lg` 24px (§13 already says so — it is not implemented; implement it). Ledger → §22. |
+| `/scoreboard` | The rail becomes a **vertical stack** below `sm`: `flex-col`, cards `w-full min-w-0`, `RailControls` hidden, `role="region"` dropped (nothing scrolls). Horizontal scroll on a phone rail is a swipe fight with the page. Above `sm` the rail is exactly as built. |
+| `/people/:id` | The `grid-cols-[auto_1fr_1fr_1fr_1fr_1fr_auto]` week table is 7 columns → its own `overflow-x-auto` scroller with the **first column sticky** (`sticky left-0 z-[1] bg-surface`, and `bg-surface-2` in the header). This is the one place a horizontal scroller is correct: the rows are genuinely a matrix. |
+| `/catalog` | Already uses the `lg:contents` card→row trick. Keep. Verify the action buttons fit 343px — this screen has broken at 768 before (`app-shell.tsx` comment). |
+| `/inbox` | Single column already. Rows → §16.6. Unread dot stays at the left. |
+| `/admin/everything`, `/admin/audit` | Dense forensic lists nobody reads on a phone. Rows → §16.6, and that is enough. Do not build a mobile table for an audit log. |
+| `/admin-users` | The only `<table>` outside the briefing, 6+ columns → own scroller, sticky first column, same as `/people/:id`. |
+| `/admin-settings` | `grid-cols-2` → `grid-cols-1 sm:grid-cols-2`. |
+| `/login`, `/set-password` | Already single-column. Inputs go `h-11` below `md` (typing on a 34px field on a phone is unpleasant), and the submit button is full width. |
+| **Task detail dialog** | Below `md` it is **not a dialog** — it is a full-screen sheet: `inset-0 h-[100dvh] max-w-none rounded-none translate-x-0 translate-y-0`. Header sticky top with a `X` close at 44px, footer sticky bottom holding the actions, body the only scroller. It is 1338 lines of content; a centred 600px modal on a phone is a scroll trap. |
+
+### 16.6 The row pattern — write it once
+
+Eight screens render "a list of things with meta on the right" as
+`flex items-center gap-4` with fixed-width columns. Below `sm` they all squeeze. One shared
+component, `components/ui/list-row.tsx`, and every one of them uses it:
+
+```
+≥640:   [ icon ] [ title ......................... ] [ meta ] [ meta ] [ actions ]
+<640:   [ icon ] [ title ..................... ] [ actions ]
+                 [ meta · meta · meta ]
+```
+
+- Line 1: the identifying text, `text-body-sm`, `truncate`, plus the actions, right-aligned,
+  never wrapped, never collapsed into a menu (a hidden approve button is a slower approval).
+- Line 2: every meta value, `flex flex-wrap gap-x-3 gap-y-1`, `text-micro`/`num-xs`, separated
+  by a `·` in `--ink-3`. Each keeps its own tone (`ageTone`, `.num-pending`, etc.).
+- **Numeric right-alignment is abandoned below `sm`.** `tnum` buys column alignment; at one
+  column there are no columns. Keep the mono family, drop `.num-col`.
+- Fixed meta widths (`w-10`, `w-32`) live behind `sm:` only.
+
+---
+
+## 17. The label layer — one module, no string literals
+
+Chan: *"things like in_progress should be In Progress."* He is describing a symptom. The
+cause is that display strings are scattered across seven modules and, in
+`routes/points.tsx`, absent entirely — the ledger prints
+`row.from_status → row.to_status`, so a member auditing their own points reads
+`in_progress → submitted`.
+
+### 17.1 The rule
+
+> **`apps/web/src/lib/labels.ts` is the only file in the web app that may contain a display
+> string for a database enum.** A component that needs a word calls `label(kind, key)`. A
+> component that contains `'In Progress'` as a literal is a defect.
+
+Consolidate into it, and delete from their current homes:
+
+| Currently in | What moves |
+|---|---|
+| `lib/task-types.ts` | `STATUS_LABEL` |
+| `lib/task-permissions.ts` | `COLUMN_LABEL` |
+| `components/tasks/edit-request-diff.tsx` | its private `STATUS_LABEL` |
+| `lib/reliability-ui.ts` | `BAND_LABEL` |
+| `lib/edit-suggestions.ts` | `SUGGESTION_FIELD_LABEL` |
+| `components/scoreboard/scoreboard-model.ts` | `PERIOD_TAB_LABEL` |
+| `components/scoreboard/points-bar.tsx` | `SEGMENT_WORD` |
+| `lib/task-types.ts` | `blockRelationLabel` (wording unchanged — it was written from Chan's own words) |
+
+Re-export from the old paths for one commit so the change is mechanical, then delete the
+re-exports in the same PR. `statusTone()` stays where it is: it is a **colour** decision and
+belongs with the design layer, not the language layer.
+
+### 17.2 Tone
+
+These are read by three people who do customs brokerage, not software. Binding:
+
+- **Title Case for the name of a state** (it is the state's proper name: *In Progress*).
+  Sentence case for everything else.
+- **A label is ≤ 2 words.** If it needs a sentence, the sentence is the `hint` (§20), not the
+  label. `pending_cancellation`'s current label — `Awaiting cancellation decision` — is a
+  sentence wearing a chip; it changes.
+- **Never auto-prettify.** `key.replace(/_/g, ' ')` produces *Pending cancellation*, which is
+  both wrong and plausible. Banned.
+- **Unknown key** renders the raw key in `--ink-3` and `console.warn`s in dev. Never blank,
+  never a crash, never a guess.
+
+### 17.3 The strings — exact
+
+**Task status** (`ops.task_status`). `hint` is the tooltip copy from §20; both live here.
+
+| key | label | hint |
+|---|---|---|
+| `todo` | Backlog | Agreed, not started yet. |
+| `in_progress` | In Progress | Someone is working on this right now. |
+| `submitted` | Submitted | Sent to the GM to check. |
+| `verified` | Verified | The GM checked it. Waiting on the founder to release the points. |
+| `cleared` | Cleared | Done. The points are yours. |
+| `rejected` | Returned | Sent back with a reason. Fix it and submit again. |
+| `cancelled` | Cancelled | Called off. No points for it. |
+| `pending_cancellation` | Cancellation Requested | Someone asked to call this off. Waiting on a decision. |
+
+**Board columns / lanes.** `Backlog` · `This Week` · `In Progress` · `Blocked` ·
+`Submitted` · `Verified` · `Cleared`. Lane names join with ` / `: `Backlog / This Week`,
+`Verified / Cleared`. (`This week` → `This Week`; it is a column name.)
+
+**Ledger state** — same table as task status. The ledger's transition line reads
+`Backlog → In Progress`, never the raw keys. The `→` is `U+2192` with a hairspace either side.
+
+**Authority.** `staff` → Staff · `gm` → GM · `founder` → Founder · `admin` → Admin ·
+read-only oversight → **Read-only**. Never `oversight_only` on screen.
+**Position.** `broker` → Broker · `sales` → Sales · `other` → Other. Never `capitalize` on a
+raw column (`person-card.tsx` does this today — it renders `Oversight_only`).
+
+**Reliability band.** Excellent · Solid · Watch · At risk · Unrated. (Unchanged.)
+
+**Block target.** Unchanged wording, moved file.
+
+**Edit-request / suggestion state.** Pending · Approved · Rejected · Withdrawn.
+
+**Week state.** `planning` → **Planning** (hint: *Monday's meeting hasn't been closed yet.*)
+· `open` → **Open** (hint: *Commitments are locked. Work is in flight.*) · `closed` →
+**Closed** (hint: *The week is finished and scored.*)
+
+---
+
+## 18. Durations — hours to days to weeks
+
+Chan: *"371 hours old… which is annoying."* He is right, and it is real: `queue.tsx:146,171`,
+`founder-digest.tsx:232,666,705` all render `{n}h` with no ceiling.
+
+### 18.1 The function
+
+`apps/web/src/lib/duration.ts`. One function, one rule:
+
+> **At most two units. The larger unit first. The smaller unit is dropped when it is zero.**
+
+`formatDuration(ms: number): string`
+
+| Input | Output | Why |
+|---|---|---|
+| ≤ 0, or in the future | `now` | Never a negative age. |
+| < 1 hour | `<1h` | **Never `0h`.** A zero-hour age is not zero — it is young. |
+| < 24 hours | `7h` | Floor. |
+| < 7 days | `2d 4h`, or `2d` when the hour remainder is 0 | |
+| < 8 weeks | `2w 1d`, or `3w` when the day remainder is 0 | |
+| ≥ 8 weeks | `12w` | **No months.** The unit of this product is the week; `1mo 2w` is ambiguous and nobody can act on it. |
+
+**371h → `2w 1d`.** (371h = 15d 11h = 2w 1d 11h; the third unit is dropped.)
+
+Also export:
+
+- `formatDurationLong(ms)` → `2 weeks, 1 day` — for `aria-label` and tooltip bodies. A screen
+  reader saying "two double-u one dee" is not an age.
+- `ageTone(ms)` → the existing thresholds, moved here and now measured in ms rather than
+  hours: `--ink-3` under 8h, `--pending` 8h–24h, `--danger` over 24h. `founder-digest.tsx`'s
+  local `ageTone(hours)` is deleted, not duplicated.
+
+### 18.2 Where it applies — all of them
+
+`/queue` row age · `/digest` task age, oldest-in-group, blocked hours · `/people/:id`
+`hoursBlockedByThem` · board card staleness `Clock` badge and carry-over `RotateCcw` badge
+(§5.4) · task detail dialog block age · `/points` "oldest item waiting" · anywhere a `{n}h`
+or `{n}d` string is being built today.
+
+**`/points` has a second bug this fixes.** It computes
+`Math.floor((Date.now() - oldest) / 864e5)` and renders `oldest item waiting 0d` for anything
+under 24 hours. Pass the raw timestamp to `formatDuration` and delete the arithmetic.
+
+### 18.3 Rendering
+
+- Mono, `tnum`, per §3.2 — unchanged.
+- **Reserve `w-14` (56px), not `w-10`.** `2w 1d` is five glyphs plus a space; today's `w-10`
+  columns will clip. Below `sm` the width goes away entirely (§16.6).
+- Always pair with the exact timestamp in a `<Hint>` (§20): the badge says `2w 1d`, the
+  tooltip says `Since Mon 25 Aug 2026, 09:14 (Asia/Manila) — 2 weeks, 1 day`.
+- `formatDuration` never returns an empty string, so a duration slot never collapses. If the
+  source timestamp is `null`, render `—` (§8's absence rule), not `formatDuration(0)`.
+
+---
+
+## 19. The activity heatmap — "git commits, but blue"
+
+Chan: *"like git commits, the greens on how many tasks they complete on those days, the
+greener it is — but instead of green use a blue."*
+
+Component: `apps/web/src/components/scoreboard/activity-heatmap.tsx`.
+Lives on **`/points`** (the reader's own, full size) and **`/people/:id`** (full size), and in
+`variant="mini"` inside the scoreboard person card (§23).
+
+This is the only piece of the app that speaks to Chan's second requirement from PLAN.md
+§10.2 — *"points… for the staff to track their progress and stay accountable on their own"* —
+as a picture rather than a number. It belongs to the person, not to management. That is why
+it renders for every viewer including staff, unlike reliability.
+
+### 19.1 What one cell counts
+
+**Tasks that reached `cleared` on that calendar day, for that person, in `Asia/Manila`** —
+read from the points ledger (`state = 'cleared'`), the same source as the balance figures. It
+must be the same source, so the picture can never disagree with the number above it.
+
+Count of **tasks**, not points — Chan said "how many tasks they complete". Points are the
+tooltip's second line.
+
+### 19.2 Geometry
+
+| | Full (`/points`, `/people/:id`) | Mini (scoreboard card) |
+|---|---|---|
+| Cell | 12×12, `13×13` on `(pointer: coarse)` | 8×8 |
+| Gap | 3px | 2px |
+| Radius | `--radius-cell` **2px** | 2px |
+| Day labels | Left column, 24px, `text-micro --ink-3`, **Mon / Wed / Fri only** | none |
+| Month labels | Above, `text-micro --ink-3`, only where the month changes and ≥3 columns since the last | none |
+| Legend | yes (§19.5) | no |
+| Total line | yes | no |
+
+- **Rows are 7 days, Monday at the top.** GitHub starts on Sunday; this product's unit is the
+  Monday-to-Sunday week (§5.8's week strip), so it starts on Monday. Columns are weeks, oldest
+  at the left, **this week at the right edge**.
+- **How many weeks: measured, not guessed.** A `ResizeObserver` on the container computes
+  `weeks = clamp(floor((width - labelCol - 8) / (cell + gap)), 8, 26)`. No width media query,
+  no JS breakpoint constant, and it can never overflow its container — which is the actual
+  requirement (§16.2 rule 1). In practice that lands on **26 weeks at ≥1024**, **~17 at 768**,
+  **~13 at 375**, and 13 fixed for the mini variant.
+- Full variant height: `7 × 12 + 6 × 3 = 102px` grid + 14px month row + 8px legend row.
+
+### 19.3 The buckets — fixed, not relative
+
+A relative scale (quartiles of this person's own history) is what GitHub does and it is wrong
+here: on a three-person team a quiet week would paint "1 task" as dark, and a person could
+look busiest in their worst month. Fixed thresholds, so two people's grids are comparable and
+a person's own year is comparable to itself:
+
+| Cleared that day | Step | Token |
+|---|---|---|
+| 0 | L0 | `--heat-0` |
+| 1 | L1 | `--heat-1` |
+| 2 | L2 | `--heat-2` |
+| 3–4 | L3 | `--heat-3` |
+| 5+ | L4 | `--heat-4` |
+
+### 19.4 The blue ramp — light and dark from one set of hexes
+
+Values, and why (all four are the existing brand ramp; `--brand-400` is one new interpolated
+step between the existing `--brand-300` and `--brand-500`, not a new brand colour):
+
+| | Light | Dark |
+|---|---|---|
+| `--heat-0` (zero) | `#F1F3F7` `--surface-2`, + `inset 0 0 0 1px var(--heat-ring)` | `#182031` |
+| `--heat-1` | `#C9DDFB` `--brand-200` | `#0C3FA3` |
+| `--heat-2` | `#6D9CF3` `--brand-400` **(new)** | `#1662E8` |
+| `--heat-3` | `#1662E8` `--brand-600` | `#6D9CF3` |
+| `--heat-4` | `#0C3FA3` `--brand-800` | `#C9DDFB` |
+
+**The same four hexes, assigned in reverse.** On white, more work = darker; on navy, more
+work = brighter. One ramp, one direction flip, nothing new to maintain.
+
+Measured on 2026-09-10 (WCAG relative luminance), light ramp:
+
+| Pair | Ratio |
+|---|---|
+| `heat-0` → `heat-1` | 1.24 — weak, which is **why L0 carries a 1px `--hairline` inset ring**. A zero cell must read as a cell. |
+| `heat-1` → `heat-2` | **1.98** |
+| `heat-2` → `heat-3` | **1.95** |
+| `heat-3` → `heat-4` | **1.75** |
+| `heat-4` on `--canvas` | 8.76 |
+
+Monotonic in luminance (0.895 → 0.711 → 0.335 → 0.147 → 0.063) with ~2:1 between adjacent
+steps — roughly 40% more separation than GitHub's own ramp, which is the point: three people
+generate a sparse grid and the steps have to survive being read across a meeting room.
+
+Dark ramp steps: 1.68 / 1.75 / 1.95 / 1.95. Also monotonic.
+
+`--heat-2` `#6D9CF3` is the **only new hex in Part II.**
+
+### 19.5 States — all of them
+
+- **A zero day.** L0 with the inset ring. It is a real zero (§8's zero-vs-nothing rule) and it
+  gets a tooltip: `No tasks cleared · Tue 16 Sep 2026`.
+- **A day before this person's account existed**, or before the app went live. `--heat-0` at
+  `opacity: .4`, **no tooltip**, `aria-hidden`. That is an absence, not a zero, and the
+  difference is exactly the difference between "you did nothing" and "we weren't watching".
+- **No history at all** (nobody has cleared anything yet). **Render the full empty grid
+  anyway**, plus one line under it in `text-body-sm --ink-3`:
+  `No cleared work yet. Squares fill in as you clear tasks.` Hiding the grid hides the
+  feature; the shape is what teaches it.
+- **Loading.** The exact grid geometry in `skeleton-pulse` `--surface-2`, one pulse for the
+  whole block (not per cell — 182 staggered pulses is a strobe).
+- **Error.** The `--danger-wash` panel band from §8 with the server's message and a `Retry`;
+  the rest of the page keeps working. A failed heatmap never blanks `/points`.
+- **Partial data** (the window starts mid-history): normal. The grid is a window, not a claim
+  about all time — the total line says `in the last 26 weeks` so it can't be misread.
+
+### 19.6 Tooltip, legend, and not-colour-alone
+
+- **Cell tooltip** (`<Hint>`, §20 — so it works on tap too):
+  line 1 `4 tasks cleared · 21 points`, line 2 `Mon 15 Sep 2026`. Zero days: `No tasks
+  cleared`. Never "0 tasks".
+- **Legend**, right-aligned under the grid: `Less` · five swatches · `More`, `text-micro
+  --ink-3`. **Under the swatches, the thresholds in `num-xs`: `0 1 2 3–4 5+`.** That numeric
+  row is the non-colour channel and it is not optional — it is what makes the chart legible to
+  a colour-blind reader, in greyscale, and on the printed briefing.
+- **Total line**, left of the legend, `text-body-sm --ink-2`:
+  `<span class="num">37</span> tasks cleared in the last <span class="num">26</span> weeks`.
+- **Semantics.** Container `role="grid"` + `aria-label="Tasks cleared per day"`; each week a
+  `role="row"`; each cell `role="gridcell"` with
+  `aria-label="Monday 15 September 2026: 4 tasks cleared, 21 points"`. Cells are not focus
+  stops (182 tab stops is hostile) — the grid is one tab stop and arrow keys move a roving
+  `tabindex`, which is also how a keyboard user reaches a tooltip.
+- **Forced colors.** `@media (forced-colors: active)` flattens every background; the ramp
+  becomes a border-width ramp instead: `0 / 1 / 2 / 3 / 4px` of `CanvasText` inset.
+- **Motion: none.** No entrance, no stagger, no per-cell transition — §7.2 bans staggers past
+  four items and this is 182. Hover is a `1px solid var(--ink-3)` outline at 0ms.
+
+### 19.7 What it is not
+
+Not a chart with axes. No y-axis, no tick labels, no title inside the plot, no gradient, no
+second series, no "compare with last quarter" toggle. It is a texture that answers one
+question — *did I do work that day* — and the moment it needs a legend beyond five swatches it
+has stopped being that.
+
+---
+
+## 20. Tooltips and "know more"
+
+Chan: *"i also want general tooltips incase the users forget how they work… when they forget
+something, they have the option to know more instead of me having back to back meetings with
+them on how to use it."*
+
+The deliverable is therefore **not a tooltip component**. It is a place where the
+explanations live, so Chan can rewrite how the app explains itself without opening a
+component — and so a person can answer their own question at 11pm without messaging him.
+
+**A dependency must be added: `@radix-ui/react-tooltip` and `@radix-ui/react-popover`.**
+Neither is currently in `apps/web/package.json`. Everything below is built on them.
+
+### 20.1 Three tiers, and which is which
+
+| Tier | Component | Answers | Lives on |
+|---|---|---|---|
+| **(a)** short hint | `<Hint>` | *What does this control do / what is this number?* | a control, a badge, a figure |
+| **(b)** screen help | `<WhatIsThis>` | *What is this screen for, and what do I do here?* | every page header, always |
+| **(c)** first run | auto-opened `<WhatIsThis>` | *I've never seen this before* | `/briefing` only |
+
+### 20.2 (a) `<Hint>` — and how it works on touch
+
+```tsx
+<Hint text="Sent to the GM to check.">
+  <Chip tone="pending">Submitted</Chip>
+</Hint>
+```
+
+- Radix `Tooltip`. Open delay **350ms**, `skipDelayDuration` 300 within a `TooltipProvider`
+  group, `side="top"`, `sideOffset={6}`, collision-aware.
+- Content: `bg --navy-900`, `text --on-dark`, `text-label` (12/500), `px-2.5 py-1.5`,
+  `radius 6`, `max-w-[240px]`, `--shadow-pop`, 6px arrow. Motion per §7.1 (popover row):
+  `opacity 0→1` + `scale .97→1`, `--dur-pop`, `--ease-out`, Radix's transform origin.
+- **Touch has no hover, so `<Hint>` swaps itself.** On `matchMedia('(pointer: coarse)')` the
+  same component renders a Radix **`Popover`** instead, opened by tap, dismissed by tap
+  outside or `Esc`, with identical content and identical styling. Consumers never branch —
+  the branch is inside `<Hint>`, once. A trigger that is otherwise not interactive gets
+  `tabIndex={0}` and `role="button"` so keyboard and screen-reader users reach it too.
+- **`title=` is banned.** It is invisible on touch, unstyled, slow, and unreadable to some
+  screen readers. Three live uses must be replaced: `person-card.tsx:157` (the Capped chip),
+  `board.tsx:788` (`title={laneDim}`), and the block-relation markers.
+- `<Hint>` never carries information that exists nowhere else. If losing the tooltip would
+  lose the meaning, the meaning belongs on the screen.
+
+### 20.3 (b) `<WhatIsThis>` — one per screen, permanent
+
+- A 20px lucide `HelpCircle`, `--ink-3`, hover `--ink-2`, sitting immediately right of the
+  `PageHeader` title on the same baseline, `ml-2`. `aria-label="What is this screen for?"`.
+- Opens a Radix **`Popover`** (never a Dialog): `320px`, `radius 12`, `--surface`,
+  `1px --hairline`, `--shadow-pop`, `p-4`, `align="start"`. It **does not trap focus and does
+  not dim the page** — people read it while working. `Esc` and outside-click close it.
+- Content shape, fixed:
+  - `text-subtitle` title,
+  - 1–3 paragraphs of `text-body-sm --ink-2`, `max-w-prose`,
+  - optionally `text-eyebrow --ink-3` **WHAT TO DO HERE** over a 2–3 item list, each item
+    `text-body-sm`, marker a 12px `ArrowRight` in `--brand-600`.
+  - No images, no video, no external link.
+- **`PageHeader` gains a required `help: HelpTopicId` prop.** Required, not optional — a
+  screen cannot silently ship without an explanation, and TypeScript enforces it across all
+  fifteen routes. That single type change is what makes this real rather than aspirational.
+
+### 20.4 Where the copy lives
+
+`apps/web/src/lib/help.ts`, and nowhere else:
+
+```ts
+export interface HelpTopic {
+  title: string;
+  body: string[];      // paragraphs
+  todo?: string[];     // "what to do here"
+}
+export const HELP = { … } satisfies Record<HelpTopicId, HelpTopic>;
+```
+
+`labels.ts` (§17) holds the one-sentence `hint` per enum value; `help.ts` holds the per-screen
+explanation. Two files, and between them **every word the app uses to explain itself**. Chan
+can reword the entire product's guidance by editing two files.
+
+### 20.5 Copy rules — binding, and they matter more than the component
+
+1. Second person, present tense. *"Send it to the GM."* Not *"The task is transitioned."*
+2. **Name the LRA thing, not the UI thing.** *"The GM checks it"*, not *"the record moves to
+   the verified state."*
+3. A hint answers **what happens if I press this**, not what it is called.
+4. **State the consequence** when there is one: *"Every 8 hours a block stays open costs one
+   reliability point, up to 10."*
+5. Word budgets: `hint` ≤ 20 words · a `body` paragraph ≤ 2 sentences · a `todo` item ≤ 12
+   words · a page description ≤ 12 words.
+6. Banned: `simply`, `just`, `easily`, `please`, `oops`, exclamation marks, emoji, and any
+   sentence that begins *"This screen allows you to…"*.
+7. Never explain something the screen could have said plainly instead. A hint that exists to
+   apologise for a confusing label means the label is wrong (§17).
+
+### 20.6 Where hints are mandatory
+
+Not "nice to have" — the tester checks for these:
+
+The three balance figures · the dashed-underline pending treatment (§6.1) · the
+chain-of-custody dots (§6.3) · every board lane header · the `Capped` chip · reliability score
+and hit-rate · the carry-over and staleness badges · every duration badge (with its exact
+timestamp, §18.3) · the heatmap legend and every cell · `Submit` / `Return` / `Clear` /
+`Block` / `Uncommit` · the Monday lock banner · the edit-suggestion batch flow · every
+disabled control, where the hint is the refusal reason (`moveRefusal`'s sentence — a disabled
+button with no explanation is the single most common cause of "how does this work?").
+
+---
+
+## 21. The Briefing as a guided flow
+
+Chan: *"they should be guided with how to do it with the input placeholders etc."* This is
+the ritual the whole product exists around, and it is the screen a new person meets first.
+Target: **someone who has never used it gets through it unaided.**
+
+### 21.1 Four steps, stated on the screen
+
+The existing four sections are already the right steps; they just don't say so. Above each
+`text-title-lg` heading add a `text-eyebrow --ink-3` step marker, and below it a one-line
+purpose in `text-body-sm --ink-3`:
+
+| | Marker | Heading (unchanged) | Purpose line |
+|---|---|---|---|
+| 1 | `STEP 1 OF 4` | Last week's scorecard | What we said we'd do last week, and what actually cleared. |
+| 2 | `STEP 2 OF 4` | Carry-overs | Work that didn't finish. Decide if it's still worth doing. |
+| 3 | `STEP 3 OF 4` | Blocks | What stopped people, and who is clearing each one. |
+| 4 | `STEP 4 OF 4` | Commit | Each person picks this week's work. This is the record. |
+
+A **progress rail** sits under the page header: four segments in the chain-of-custody dot
+language from §6.3 — filled `--cleared` for a step scrolled past, `--pending` with its ring
+for the current one, outlined for not-reached. Reusing that language rather than inventing a
+stepper is the point: the whole app already means "left to right, collecting endorsements".
+Driven by an `IntersectionObserver` on the four `<section>`s. Below `md` it is sticky under
+the header; above `md` it is static.
+
+### 21.2 Placeholders — a placeholder is an example answer
+
+> **A placeholder models an answer. It never restates the label, and it is never a required
+> marker** (§5.2 already handles required with the word `Required`).
+
+Exact strings — the four marked **change** are currently restatements of their own label:
+
+| Field | Placeholder |
+|---|---|
+| Block reason | `e.g. Waiting on BOC for the release order` **(change)** |
+| Cancellation reason | `e.g. Client withdrew the shipment` **(change)** |
+| Edit-suggestion reason | `e.g. Points were set before we knew the container count` **(change)** |
+| Batch rejection reason | `e.g. Keep the original points — we agreed these on Monday` **(change)** |
+| New task title | `What needs doing?` (keep) |
+| Progress note / comment | `What did you do? What's next?` (keep) |
+| Description | `Anything the person needs to know before starting` |
+| Client ref | `e.g. SHPT-2026-0412` |
+| Catalog type (select) | `No catalog type (price it later)` (keep) |
+| Person (select) | `Choose a person` (keep) |
+| Outside party | `e.g. Bureau of Customs` (keep) |
+
+Placeholder colour stays `--ink-3` (§5.2). Below `md` inputs are `h-11` (§16.5).
+
+### 21.3 Empty states — every one, in plain words
+
+| Where | Now | Should be |
+|---|---|---|
+| No previous week | "There is no previous week yet — this is the first one." | Keep, and add a `ghost` link: `Skip to Commit ↓`. |
+| Nobody committed last week | "Nobody committed to anything last week." | Keep. |
+| No carry-overs | *(unspecified)* | `Nothing carried over. Everything committed last week finished.` — a **good** empty state, so it gets a 16px `CheckCircle2` in `--cleared`, the only place an empty state is allowed a semantic colour. |
+| No blocks | *(unspecified)* | `No blocks were raised last week.` |
+| Person has committed nothing | "Nothing yet." | `Nothing committed yet. Pick from the candidates below.` |
+| Person has no candidates | "No uncommitted board/backlog tasks." | `No backlog work to pick from.` + a `secondary` **New task** button opening `create-task-dialog` with that person pre-selected. **This is the single biggest unaided-usage fix on the screen** — today it is a dead end phrased in schema. |
+| Week is locked | a bare amber sentence | A `--pending-wash` band at the top of Commit with a 12px `Lock`: **`Commitments are locked for this week.`** then `text-body-sm`: `Monday's record can't be changed. A GM can suggest edits below; the founder or admin approves them.` |
+| Loading | `BriefingSkeleton` | Already correct — it mirrors all four sections. Add the step markers to it so the shape is right from the first paint. |
+| Permission denied (read-only oversight) | affordances absent | A `--blocked-wash` band under the header: `You have read-only access. You can see everything and change nothing.` Absence with no explanation reads as a bug. |
+
+### 21.4 What "done" looks like
+
+- The close control is a **sticky bar** at the bottom of the screen (`bottom-0`, `--surface`,
+  `border-top 1px --hairline`, `py-3`, safe-area padding), holding on the left a `text-body-sm`
+  readout — `3 of 3 people have committed · 34 points` — and on the right the one `primary`
+  button, `Close the briefing`.
+- **Disabled while anyone has zero committed tasks**, with the `<Hint>`:
+  `Everyone needs at least one committed task before the week can be locked.` A disabled
+  button with a reason teaches; a disabled button without one is the thing people call Chan
+  about.
+- The confirm dialog states the consequence in LRA's words:
+  `Closing locks Monday's record. Nobody can change what was committed after this — a GM can
+  only suggest edits, and you or the admin approve them.`
+- **After closing**, the screen's completion signal is a `--cleared-wash` band under the
+  header with a 16px `CheckCircle2`: `Week 38 is open. Committed work is locked.` plus
+  `Closed 15 Sep 2026, 09:41 by Chan` in `num-xs --ink-3`. That band is what makes "done" a
+  visible state rather than an absence of buttons.
+
+### 21.5 First run
+
+- On first visit to `/briefing` with no `localStorage['lra.seen.briefing.v1']`, the
+  `<WhatIsThis>` popover **opens automatically**, anchored to the title, with a `primary`
+  `Got it` button that writes the key.
+- **This is the only auto-opening help in the app.** Everywhere else the icon waits.
+- It never re-opens on its own; the icon stays for later.
+- Honest limitation, state it in the code comment: this is per-browser, not per-user. Clearing
+  site data re-shows it. That is acceptable for four users and does not justify a
+  `core.person` column.
+
+---
+
+## 22. `/points` — the date display
+
+Chan: *"the date displays are pretty bland on the my points page."* They are worse than
+bland. `points.tsx` renders `new Date(row.created_at).toLocaleString()` into a `w-32` mono
+block: browser-locale-dependent, seconds included, and the widest thing on the row — the
+timestamp currently outweighs the transition it timestamps.
+
+### 22.1 The ledger becomes the register §6.4 already specified
+
+§6.4 said "grouped by day under `text-eyebrow` day headings". That was never built. Build it.
+
+- **Day heading row**: `bg --surface-2`, height 28, `px-3`, `text-eyebrow --ink-2`, sticky
+  `top-0` inside the panel (`z-1`). Left side:
+  - today → `TODAY · MON 15 SEP`
+  - yesterday → `YESTERDAY · SUN 14 SEP`
+  - this year → `MON 15 SEP`
+  - otherwise → `MON 15 SEP 2025`
+
+  Right side: the day's net in `num-sm` — `+21` in `--cleared`, or `—` in `--ink-3` when
+  nothing cleared that day. A day's total is the thing a person actually wants from a ledger,
+  and it costs one `reduce`.
+- **Row**: `[time w-12] [chain dots] [transition] [reason] [Δ]`.
+  - Time: `num-xs --ink-3`, **`14:05`** — 24-hour, `Asia/Manila`, no seconds, no date. 12px of
+    information instead of 128px.
+  - `<Hint>` on the time: `Mon 15 Sep 2026, 14:05 (Asia/Manila)`.
+  - Transition: `Backlog → In Progress` via §17, not raw enums.
+  - Δ unchanged (`+8` `--cleared` / `—`).
+- Below `sm`: the time joins line 2 per §16.6; the day heading stays (it is the structure).
+
+### 22.2 One date module, and a grep-able ban
+
+`apps/web/src/lib/dates.ts`, built on a single memoised
+`Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', … })` per format:
+
+| Export | Output |
+|---|---|
+| `fmtTime(iso)` | `14:05` |
+| `fmtDayHeading(iso)` | `TODAY · MON 15 SEP` / `MON 15 SEP 2025` |
+| `fmtDate(iso)` | `15 Sep 2026` |
+| `fmtDateTime(iso)` | `Mon 15 Sep 2026, 14:05 (Asia/Manila)` |
+| `fmtWeekRange(a, b)` | `15–21 Sep 2026` (en dash) |
+| `weekLabel(iso)` | `W38 · 2026` |
+
+> **`toLocaleString` / `toLocaleDateString` / `toLocaleTimeString` are banned outside
+> `lib/dates.ts`.** The server clock is Manila; a browser set to another locale currently
+> renders a different date than the one the approval was recorded against, and this is a
+> system whose purpose is a record that cannot be quietly rewritten. The tester greps for it.
+
+All of it mono + `tnum` per §3.2. `weekNumber()` in `briefing.tsx:534` moves here too — it is
+date logic living in a route.
+
+### 22.3 Three more defects on this screen, while it is open
+
+1. **`bg-[#FCF3E3]`** on the pending cell is a literal hex outside `:root` — anti-goal #3.
+   → `bg-pending-wash`.
+2. **`oldest item waiting {n}d`** → §18, and sentence-cased: `Oldest item waiting 3d 4h`.
+3. **The three `num-hero` figures do not step down below `sm`** — §13 says they drop to
+   `num-lg`; they are hard-coded `text-[40px]`. → `text-num-lg sm:text-num-hero`.
+
+### 22.4 And the heatmap goes here
+
+The full-size `<ActivityHeatmap>` (§19) sits **between the balance panel and the ledger**, in
+its own `--surface` panel with a `text-subtitle` header **Activity** and a `<WhatIsThis>`-style
+`<Hint>`: `One square per day. The darker it is, the more you cleared that day.`
+
+That ordering is deliberate: *what I have now* (balance) → *how I've been going* (heatmap) →
+*exactly what happened* (ledger). Three questions, in the order a person asks them.
+
+---
+
+## 23. Scoreboard card geometry — taller, with something in it
+
+Chan: *"scoreboard cards should be taller."* Padding is not the answer; §4.1 fixes the
+spacing scale and §11 says whitespace comes from rhythm, not from large paddings. The card
+gets taller because **it gains the thing that was missing from it**.
+
+### 23.1 What fills the height
+
+`min-h-[268px]` (from ~200), and the new content, in order:
+
+1. Person row — unchanged.
+2. Hairline.
+3. **NEW — the 13-week mini heatmap** (§19, `variant="mini"`): 8px cells, 2px gaps, no
+   labels, no legend, **68px tall**. This is the honest filler, and the reason is the product's
+   reason: PLAN.md §10.2 — points exist so *"staff track their own progress… velocity and
+   accountability."* A per-person velocity texture is exactly what the scoreboard was missing,
+   it is per-person data the card already has the identity for, and it is the same component
+   as §19, so it costs one import.
+4. Completed / `of N possible` + `PointsBar` — unchanged.
+5. The three bucket cells — unchanged.
+6. **Founder/admin:** the hit-rate + reliability row — unchanged.
+   **Everyone else:** in that row's place, `text-eyebrow` **Velocity** over
+   `<span class="num">37</span> tasks cleared in 13 weeks` in `text-body-sm --ink-2`.
+   Every viewer's card is therefore the same height, which is why the rail doesn't go ragged
+   when a GM looks at it — and it honours PLAN.md §10 #4 (judgement of a person is
+   founder-only; a person's own output is not).
+
+§11's "never more than one 24px+ number per panel" still holds: the heatmap has no numbers.
+
+### 23.2 Geometry changes
+
+- `flex-[1_1_300px]` → `flex-[1_1_320px]`; `max-w-[420px]` → `max-w-[460px]`;
+  `min-w-[300px]` unchanged, so three-up still fills 1440 and the rail still starts scrolling
+  past four.
+- Below `sm`, per §16.5, the rail stacks vertically and cards go `w-full min-w-0`; the mini
+  heatmap's `ResizeObserver` handles the width with no extra rule.
+- `PersonCardSkeleton` gains a 68px `skeleton-pulse` block in the strip's place. A skeleton
+  that is the wrong height is a layout shift with extra steps.
+- Card hover, radius, border, and the `no lift, no shadow` rule (§5.3) are unchanged.
+
+---
+
+## 24. Light, not daunting — rules the coder can follow
+
+Chan: *"i dont want this webapp to be too daunting. something easy and gets the job done.
+something light."*
+
+"Light" here does not mean sparse or pale — this is a dense instrument and §11 stays. It
+means **a person always knows what they are looking at and what to do next.** Eleven rules:
+
+1. **One idea per screen**, stated in the `PageHeader` description in ≤ 12 words. If the
+   description needs an "and", the screen is doing two jobs.
+2. **Answer "what do I do now?" above the fold.** Exactly one `primary` button per screen
+   (§11), and when there is nothing to do, an empty state that says so in plain words.
+3. **Progressive disclosure.** Reliability arithmetic, cap arithmetic, audit rows and ledger
+   internals live behind `<WhatIsThis>` or a row expansion — never a permanent column.
+4. **Never show a person a number they cannot act on.** (Which is *why* hit-rate is
+   founder-only — restated here as a design rule, not just a permission.)
+5. **No screen presents more than five distinct kinds of interactive control.** Counting
+   kinds, not instances. A screen with buttons, tabs, a select, a search box, a date range, a
+   multi-select and a drag surface is a control panel, not a tool.
+6. **Word budgets** from §20.5, everywhere.
+7. **Prefer a sentence to a chart, a chart to a table, a table to a form.** `/digest`'s
+   "oldest item waiting 3d" line is the model: one sentence that does a chart's job.
+8. **Every irreversible action states its consequence in the confirm**, in LRA's words
+   (§21.4's close dialog is the model), and destructive confirms name the thing:
+   `Cancel "Clear BOC entry for Cebu shipment"?`
+9. **Default to the reader.** `/points`, `/now` and `/board` open on *me*, already filtered.
+   Nobody should have to operate a picker before seeing their own work.
+10. **Nothing blinks, pulses or wears a badge unless a human must act on it today.** A count
+    badge that is always non-zero is decoration and people stop seeing it.
+11. **New colour is not how you add meaning.** The five semantic hues (§2.3) plus the blue
+    ramp (§19.4) are the entire set. A sixth hue means the information architecture failed.
+
+---
+
+## 25. New tokens — and the honest state of dark mode
+
+### 25.1 Dark mode is NOT currently implemented — flagging this plainly
+
+The brief for Part II said the existing palette is theme-aware. **It is not.**
+`apps/web/src/index.css:22` declares `color-scheme: light` and there is **no `.dark` block
+anywhere in the app.** §2.7 recommended light-only for the MVP, Chan did not overturn it, and
+the code matches the recommendation. `tailwind.config.ts` does carry `darkMode: ['class']`, so
+the door §2.7 left open is still open — it has simply never been walked through.
+
+So Part II does two things and claims nothing more:
+
+1. Every new token below is given a **light and a dark value**, both measured. The `.dark`
+   block is added to `index.css` now. Until a theme toggle exists it is **inert but correct**,
+   and it costs nothing.
+2. Full dark mode remains **out of scope and unbuilt**. It needs the whole neutral ladder,
+   the five semantic hue triplets and the on-navy set re-derived and re-measured — a day of
+   work, its own task, and Chan's decision (§26 Q1). Do not half-build it by adding `dark:`
+   classes to components; §2.7's rule that no component contains a literal colour is what
+   makes it a one-file change later, and it must hold.
+
+### 25.2 Add to `:root` in `index.css` (and mirror into `design/tokens.css`)
+
+```css
+:root {
+  /* ── brand ramp: one new interpolated step ─────────── */
+  --brand-400: #6D9CF3;   /* between --brand-300 and --brand-500 */
+
+  /* ── activity heatmap (§19) — light: more = darker ─── */
+  --heat-0: var(--surface-2);
+  --heat-1: #C9DDFB;      /* = --brand-200 */
+  --heat-2: #6D9CF3;      /* = --brand-400 */
+  --heat-3: #1662E8;      /* = --brand-600 */
+  --heat-4: #0C3FA3;      /* = --brand-800 */
+  --heat-ring: var(--hairline);
+
+  --radius-cell: 2px;     /* heatmap cells only — 4px is too round at 12px */
+}
+
+/* Inert until a theme toggle exists (§25.1), but correct when it does.
+   Same four hexes as light, assigned in reverse: on navy, more = brighter. */
+.dark {
+  --heat-0: #182031;
+  --heat-1: #0C3FA3;
+  --heat-2: #1662E8;
+  --heat-3: #6D9CF3;
+  --heat-4: #C9DDFB;
+  --heat-ring: #232C42;
+}
+```
+
+`tailwind.config.ts` → `theme.extend.colors`:
+
+```ts
+brand: { …, 400: 'var(--brand-400)' },
+heat:  { 0: 'var(--heat-0)', 1: 'var(--heat-1)', 2: 'var(--heat-2)',
+         3: 'var(--heat-3)', 4: 'var(--heat-4)', ring: 'var(--heat-ring)' },
+```
+and `theme.extend.borderRadius.cell: 'var(--radius-cell)'`.
+
+### 25.3 Measured — 2026-09-10, WCAG relative luminance
+
+Light ramp relative luminance: `0.895 → 0.711 → 0.335 → 0.147 → 0.063` (monotonic).
+Adjacent-step contrast: `1.24` (mitigated by the L0 ring) · `1.98` · `1.95` · `1.75`.
+`--heat-4` on `--canvas` = **8.76**. `--heat-1` on `--canvas` = 1.30 — which is correct for a
+low-magnitude cell and is why the numeric legend (§19.6) carries the meaning.
+
+Dark ramp relative luminance: `0.017 → 0.063 → 0.147 → 0.335 → 0.711` (monotonic).
+Adjacent-step contrast: `1.68` · `1.75` · `1.95` · `1.95`.
+
+`--brand-400 #6D9CF3` on white = **2.31** — **non-text only.** It is a heatmap fill and a
+chart tint; it may never carry text, and it is not added to the chart set in §2.4.
+
+### 25.4 New dependencies
+
+`@radix-ui/react-tooltip`, `@radix-ui/react-popover`, `@radix-ui/react-collapsible`,
+`@radix-ui/react-tabs` *(only if the §16.3 lane pager is not hand-rolled; `board.tsx` already
+hand-rolls a `role="tablist"` and copying that is also fine)*. Nothing else. No new motion
+library, no charting library — the heatmap is `div`s, and `recharts` is already present for
+the sparkline.
+
+---
+
+## 26. New open questions for Chan
+
+1. **Dark mode.** A) Stay light-only; the `.dark` heatmap tokens sit inert until you ask.
+   B) Schedule a full dark pass as its own task now. → **I'd pick A** — nothing in the brief
+   asked for a toggle, the briefing display runs in a lit room, and a half-built dark mode is
+   worse than none. But say the word and it becomes a scoped task.
+2. **Drag-and-drop on phones.** A) Off below 768; a `Move to…` menu replaces it (my spec).
+   B) Keep touch drag with the existing 180ms delay. → **I'd pick A** — with one lane visible
+   you cannot drag a card to another lane, so B is a gesture that mostly fails. A also reuses
+   `moveRefusal` and teaches the rules instead of just refusing.
+3. **The heatmap counts tasks, not points.** You said "how many tasks they complete", so a
+   day with one 13-point job looks the same as a day with one 2-point job. A) Tasks (my
+   spec; points in the tooltip). B) Points, bucketed 0/1–4/5–9/10–19/20+. → **I'd pick A** —
+   it is what you asked for, and it rewards finishing things, which is the behaviour the
+   system is trying to produce.
+4. **`pending_cancellation` reads `Cancellation Requested`** on a chip, with
+   *"Someone asked to call this off. Waiting on a decision."* as the tooltip. Today it reads
+   `Awaiting cancellation decision`, which is a sentence in a 20px chip. → Confirm the
+   shorter label; it is one line in `labels.ts` either way.

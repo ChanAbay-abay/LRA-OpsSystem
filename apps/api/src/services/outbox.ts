@@ -1,70 +1,49 @@
 /**
  * LRA Global Ops :: the outbox drainer
  *
- * In-app only in the MVP (PLAN.md §2.3): reads `pending` + `in_app` rows
- * from `core.notification_outbox` and inserts them into
- * `core.notifications`. Email/WhatsApp later is a second drainer against
- * this same table with no call site touched. Runs on `serviceClient`
- * because the outbox has no INSERT/UPDATE policy for `authenticated` at
- * all — it is drained and written only here.
+ * In-app only in the MVP (PLAN.md §2.3): `pending` + `in_app` rows from
+ * `core.notification_outbox` become rows in `core.notifications`.
+ * Email/WhatsApp later is a second drainer against this same table with
+ * no call site touched.
+ *
+ * THE LOGIC LIVES IN THE DATABASE NOW, in
+ * `core.drain_notification_outbox(int)` (migration 20260910230000). It
+ * moved there so pg_cron can run it: pg_cron runs inside Postgres and
+ * cannot reach a Fastify server on a laptop, and this job is a pure
+ * table-to-table set operation, so SQL is its natural home. This file is
+ * deliberately a thin adapter and NOT a second implementation -- two
+ * copies of the same loop would drift, and the one that drifted would be
+ * the one nobody was watching.
+ *
+ * Everything the TypeScript used to guarantee is guaranteed there
+ * instead, including carrying the outbox row's `created_at` onto the
+ * notification rather than letting it default to the drain time. See
+ * that migration's header for why that matters.
+ *
+ * Still `serviceClient`: the outbox has no INSERT/UPDATE policy for
+ * `authenticated` at all, and the SQL function is granted to
+ * `service_role` only.
  */
 
 import { serviceClient } from '../lib/supabase.js';
 
+// Unchanged from the TypeScript drainer this replaced. The SQL function
+// defaults to 500; passing 50 explicitly keeps the batch size the route
+// has always had rather than silently widening it.
 const BATCH_SIZE = 50;
 
 export async function drainOutbox(): Promise<{ drained: number; failed: number }> {
   const db = serviceClient();
 
-  const { data: rows, error } = await db
+  const { data, error } = await db
     .schema('core')
-    .from('notification_outbox')
-    .select('*')
-    .eq('channel', 'in_app')
-    .eq('state', 'pending')
-    .lte('available_at', new Date().toISOString())
-    .order('created_at', { ascending: true })
-    .limit(BATCH_SIZE);
+    .rpc('drain_notification_outbox', { p_limit: BATCH_SIZE });
   if (error) throw error;
 
-  let drained = 0;
-  let failed = 0;
+  // A `returns table (...)` function comes back as a one-row array.
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { drained: number; failed: number }
+    | undefined;
 
-  for (const row of rows ?? []) {
-    const { error: insertError } = await db.schema('core').from('notifications').insert({
-      user_id: row.recipient_id,
-      title: row.title,
-      message: row.body,
-      entity_type: row.entity_type,
-      entity_id: row.entity_id,
-      link: row.link,
-      // The moment the THING happened, not the moment we got around to
-      // delivering it. `core.notifications.created_at` defaults to now(),
-      // and leaving it to that default dates every notification to the
-      // drain -- which was invisible while the drainer ran often, and
-      // obvious the first time a backlog was drained: 744 notifications
-      // spanning two days all arrived reading the same minute, so the
-      // inbox could not be ordered or read.
-      created_at: row.created_at,
-    });
-
-    if (insertError) {
-      failed += 1;
-      await db
-        .schema('core')
-        .from('notification_outbox')
-        .update({ state: 'failed', attempts: row.attempts + 1, last_error: insertError.message })
-        .eq('id', row.id);
-      continue;
-    }
-
-    drained += 1;
-    await db
-      .schema('core')
-      .from('notification_outbox')
-      .update({ state: 'sent', sent_at: new Date().toISOString(), attempts: row.attempts + 1 })
-      .eq('id', row.id);
-  }
-
-  return { drained, failed };
+  return { drained: row?.drained ?? 0, failed: row?.failed ?? 0 };
 }

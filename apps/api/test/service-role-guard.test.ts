@@ -49,7 +49,9 @@ const DECLARED_SERVICE_ROLE_WRITES: Record<string, string> = {
   'routes/admin.ts':
     'The provisioning surface (invite/patch/delete/restore/purge) inherently needs the service role — it creates the very rows RLS would scope. Guarded: the router registers refuseReadOnlyWrites.',
   'services/outbox.ts':
-    'The notification drain is a system job with no human caller of its own. Reachable only via routes/jobs.ts, which is guarded.',
+    'The notification drain is a system job with no human caller of its own. Reachable only via routes/jobs.ts, which is guarded. Since 20260910230000 the write is `.rpc(core.drain_notification_outbox)` rather than a direct insert — same classification, and `.rpc` is in WRITE_VERBS, so the detector still sees it.',
+  'services/stale.ts':
+    'NEW IN 20260910230000, and a genuine change of classification rather than a rubber stamp. It always wrote as the service role, but it did so THROUGH enqueueNotification in lib/supabase.ts — declared infrastructure — so the module never appeared here. Moving the logic into ops.flag_stale_tasks() made the write a direct `.rpc` on this module\'s own serviceClient, and the detector correctly went red. It is classified with outbox.ts and not with the infrastructure: the write IS the primary effect of POST /api/jobs/flag-stale, not a consequence recorded downstream of an already-authorised action. Reachable only via routes/jobs.ts, which registers refuseReadOnlyWrites.',
   'lib/supabase.ts':
     'INFRASTRUCTURE, two of them: writeAudit() inserts core.audit_logs and enqueueNotification() inserts core.notification_outbox. Both run as the service role BY DESIGN, regardless of caller, and both only ever run downstream of an action RLS has already authorised — an audit row must be written even for a caller with no right to write the audit table, which is the entire point of an audit table. They record a consequence; they are not the caller performing their own write through a bypass, which is what refuseReadOnlyWrites exists to stop. Excluded from PRIMARY below: including them would drag in every router that logs an audit row (12 of them, since userClient lives in this module too) and a check that flags everything is exactly as useless as one that flags nothing.',
 };
@@ -59,7 +61,7 @@ const DECLARED_SERVICE_ROLE_WRITES: Record<string, string> = {
  * therefore obliges any router that can reach it to register the hook.
  * `lib/supabase.ts` is deliberately excluded — see its entry above.
  */
-const PRIMARY: string[] = ['routes/admin.ts', 'services/outbox.ts'];
+const PRIMARY: string[] = ['routes/admin.ts', 'services/outbox.ts', 'services/stale.ts'];
 
 /** Direct local imports of one module, as source-relative paths. */
 function localImports(rel: string): string[] {
@@ -86,10 +88,14 @@ function localImports(rel: string): string[] {
  *
  * Not capped at one hop, deliberately. A fixed depth is arbitrary and the shape
  * that defeats it is already in this tree: `routes/jobs.ts` reaches
- * `services/stale.ts` in one hop, and `stale.ts` itself imports
- * `enqueueNotification` from `lib/supabase.ts`. Full closure is free here and
- * cannot over-report, because what it is matched against (`PRIMARY`) is a
- * reviewed list of two, not "any module containing a service-role write".
+ * `services/stale.ts` in one hop, and until 20260910230000 `stale.ts` itself
+ * imported `enqueueNotification` from `lib/supabase.ts` -- a two-hop path to a
+ * service-role write that a one-hop check would have missed entirely. That
+ * particular edge is gone (stale.ts now calls its own SQL function directly and
+ * is declared in its own right), but the shape it demonstrated is why the
+ * closure stays uncapped. Full closure is free here and cannot over-report,
+ * because what it is matched against (`PRIMARY`) is a short reviewed list, not
+ * "any module containing a service-role write".
  */
 function reachableFrom(rel: string): Set<string> {
   const seen = new Set<string>([rel]);
