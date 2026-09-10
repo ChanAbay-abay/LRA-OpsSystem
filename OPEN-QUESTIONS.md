@@ -265,6 +265,39 @@ turns the read-only sweep from "correct on paper" into "enforced by the database
 
 ---
 
+## 15. The migration ledger had drifted from the repo — **fixed, but worth knowing**
+
+Found 2026-09-10 while checking whether CI would catch tonight's defects.
+
+`supabase_migrations.schema_migrations` and `supabase/migrations/` had disagreed since Phase 0.
+The seven Phase 0/1 migrations were recorded under the timestamp they were **applied**
+(`202609081701xx`) rather than the version in their **filename** (`202609081200xx`), because
+they went in by hand through the SQL editor.
+
+**Why that mattered:** Supabase therefore considered those seven files unapplied, and
+`npm run db:push` — a documented command in this repo's own `package.json` — would have run
+them again. The first is `20260908120000_000_drop_legacy_hr.sql`, whose opening statement is
+`drop schema public cascade`. It would have aborted on the next file (`core.people` already
+exists), so it fails loudly rather than silently destroying data — but it drops a schema on the
+way there, and nobody should discover that by running a documented command.
+
+The seven ledger rows were renamed to match their filenames; nothing was re-run. `db push` is
+now a no-op against this project.
+
+Three ledger rows remain with no matching repo file
+(`ops_view_security_invoker_and_rpc_lockdown`, and early duplicates of
+`ops_restore_week_rpc_to_authenticated` / `ops_recurring_created_by_is_the_caller`). Those are
+harmless — an extra recorded row means "already applied", which is true — and they are left
+alone deliberately rather than deleted, since deleting ledger rows is the direction that causes
+re-runs.
+
+**Standing rule this produces:** any migration applied outside the tooling must be recorded
+with the version in its filename. `apply_migration` stamps the current time, which sorted
+**before** a dependency three times in one night — always check the recorded version and
+correct it. See `docs/AGENT-LESSONS.md` §3.
+
+---
+
 ## 13. HIBP leaked-password protection is off — a paid upgrade, not an oversight
 
 Chan tightened the project's password policy tonight (min length 10, requires lower +

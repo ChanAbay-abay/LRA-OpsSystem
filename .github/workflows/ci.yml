@@ -35,7 +35,7 @@ jobs:
       - run: npm run lint -w @lra/ops-web
 
   rls:
-    name: RLS regression suite (27 attacks, canary must fail)
+    name: RLS regression suite (canary must fail)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
