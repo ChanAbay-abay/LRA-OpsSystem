@@ -58,16 +58,27 @@ export function PendingBatchesSection({
   tasksById,
   resolve,
   onDecided,
+  reloadToken,
 }: {
   actor: Actor | null;
   tasksById: Map<string, BriefingTask>;
   resolve: DiffResolvers;
   /** The tasks on this screen changed — reload them. */
   onDecided: () => void;
+  /**
+   * Bumped by the screen when a batch is raised somewhere else on it.
+   * This section owns its own fetch, so its own actions can call
+   * `resource.reload()` -- but a submit happens up in the committed-work
+   * section, which has no handle on this resource. Without this the list
+   * still said "Nothing waiting" straight after a successful submit, and
+   * only a manual reload showed the batch the GM had just sent (driven
+   * and reproduced twice, 2026-09-10).
+   */
+  reloadToken: number;
 }) {
   const resource = useResource(
     (signal) => api.get<unknown[]>('/api/task-edit-batches?status=pending', { signal }),
-    []
+    [reloadToken]
   );
   const [rejecting, setRejecting] = React.useState<TaskEditBatch | null>(null);
   const [withdrawing, setWithdrawing] = React.useState<TaskEditBatch | null>(null);
@@ -171,7 +182,14 @@ export function PendingBatchesSection({
                               onClick={() => approve(batch)}
                             >
                               <CheckCircle2 className="size-3.5" aria-hidden />
-                              Approve all {rows.reduce((n, r) => n + r.diffs.length, 0)} changes
+                              {(() => {
+                                // The header above this button already says
+                                // "1 change across 1 task" (edit-request-diff.tsx);
+                                // this one read "Approve all 1 changes" until
+                                // a single-item batch was actually driven.
+                                const n = rows.reduce((sum, r) => sum + r.diffs.length, 0);
+                                return n === 1 ? 'Approve this change' : `Approve all ${n} changes`;
+                              })()}
                             </Button>
                             <Button
                               variant="secondary"

@@ -172,6 +172,12 @@ export function BriefingPage() {
   );
 
   const [confirmingClose, setConfirmingClose] = React.useState(false);
+  /*
+    The pending-batch list fetches for itself, and a submit happens in
+    the committed-work section above it, which holds no handle on that
+    fetch. Bumping this is how the two are told about each other.
+  */
+  const [batchesToken, setBatchesToken] = React.useState(0);
 
   // The editable Monday record. A separate read from `/api/briefing/:id`
   // on purpose: that endpoint answers "what does the meeting need to
@@ -406,6 +412,7 @@ export function BriefingPage() {
                 onChanged={() => {
                   committedResource.reload();
                   briefingResource.reload();
+                  setBatchesToken((n) => n + 1);
                 }}
               />
             )}
@@ -427,6 +434,7 @@ export function BriefingPage() {
                 committedResource.reload();
                 briefingResource.reload();
               }}
+              reloadToken={batchesToken}
             />
           ) : null}
         </div>

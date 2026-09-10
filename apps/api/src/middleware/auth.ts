@@ -16,7 +16,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { ApiError, type AuthUser, type Authority, type Module } from '../lib/domain.js';
 import { loadAuthUser } from '../lib/supabase.js';
 import { env } from '../lib/env.js';
@@ -26,6 +26,38 @@ declare module 'fastify' {
     user: AuthUser;
     accessToken: string;
   }
+}
+
+/**
+ * Why a token check failed, as a status the client can act on.
+ *
+ * "The token is bad" and "I could not ask" are different answers and must
+ * not share a status. `getUser` is a network call to Supabase Auth, so a
+ * blip on the way there used to surface as a 401 with a sentence blaming
+ * the caller's token -- and because `auth-context.tsx` signs out after two
+ * consecutive 401s, a few seconds of unreachable auth logged a working
+ * session out and sent a GM back to the sign-in screen mid-batch. Driven
+ * and reproduced 2026-09-10: the Supabase auth logs showed no `/user`
+ * request at all across the window the browser was being told its token
+ * was invalid, which is what proved the 401 was never Auth's verdict.
+ *
+ * A retryable fetch error is the transport failing, never a verdict on the
+ * token, so it becomes a 503 the client may retry. Only an actual answer
+ * from Auth -- or a valid response carrying no user -- may say the token
+ * is bad.
+ *
+ * Exported so the distinction is pinned by a test rather than by this
+ * comment (test/auth-failure.test.ts).
+ */
+export function tokenCheckFailure(error: unknown): ApiError {
+  if (error && isAuthRetryableFetchError(error)) {
+    return new ApiError(
+      503,
+      'Could not reach the authentication service. Your session is fine — try again.',
+      'AUTH_UNREACHABLE'
+    );
+  }
+  return new ApiError(401, 'Invalid or expired token', 'BAD_TOKEN');
 }
 
 /**
@@ -47,7 +79,7 @@ export async function authenticate(
 
   const { data: authData, error: authError } = await auth.auth.getUser(token);
   if (authError || !authData?.user) {
-    throw new ApiError(401, 'Invalid or expired token', 'BAD_TOKEN');
+    throw tokenCheckFailure(authError);
   }
 
   // Service client, deliberately: a brand-new user has no core.users row
