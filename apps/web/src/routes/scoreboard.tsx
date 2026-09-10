@@ -1,64 +1,86 @@
 /**
  * LRA Global Ops :: /scoreboard — the team scoreboard
  *
- * PRD.md §6.5, PLAN.md Phase 8: this week's capped score shown next to
- * the raw cleared total — labelled, per PLAN.md's explicit instruction,
- * so nobody discovers the recurring cap as a silent haircut — plus this
- * week's hit-rate and each person's reliability band. Rows link to
- * `/people/:id` for the full, hand-verifiable breakdown.
+ * PRD.md §6.5, PLAN.md Phase 8 and §11.3.
+ *
+ * Chan, 2026-09-10: "make the scoreboard UI better and closer so the
+ * data on the left is not too far from the right. also i dont see a
+ * point in seeing the raw points. can we have a display as well of
+ * points that are yet to be done, points pending and waiting approval,
+ * and completed. then another one to have the points with total points
+ * that they could have. should have record of this week, month, 3 month,
+ * and overall. make each user a card that displays from left to right
+ * making it a horizontal scroll."
+ *
+ * What that changed, and why:
+ *
+ * - The screen was a `grid-cols-[1fr_auto_auto_auto]` table: a name at
+ *   the far left of a 1440px row, its numbers pinned to the far right,
+ *   nothing in between. Every label now sits directly above its own
+ *   value inside a 300–420px card (`components/scoreboard/person-card`),
+ *   which is the actual answer to "not too far from the right" — a
+ *   narrower gap on the same table would only have shortened the lake.
+ * - `cappedScore / rawClearedPoints raw` on every row is gone. The
+ *   recurring cap is NOT gone: PLAN.md §2.6 requires that it never land
+ *   as a silent haircut, so it is disclosed per card, on the completed
+ *   figure, in the one window where a weekly cap can honestly be applied
+ *   — see `scoreboard-model.ts#capDisclosure`.
+ * - The four buckets (to do / pending / completed / at risk against
+ *   possible) come from one payload for all four windows, so the period
+ *   control is instant and local. No refetch, no skeleton, no spinner.
  *
  * `ops.settings.leaderboard_visibility` (OPEN-QUESTIONS.md #6) is
  * enforced server-side (`routes/scoreboard.ts`): a `staff` caller under
  * `oversight_only` gets back only their own row. This screen renders
- * whatever it receives and adds one banner explaining why the table is
- * short, rather than re-deriving the rule client-side.
+ * whatever it receives and adds one banner explaining why the rail is
+ * short, rather than re-deriving the rule client-side — and one card in
+ * the rail is a single ordinary panel, not a broken row.
  */
-import { Link } from 'react-router-dom';
+import * as React from 'react';
 import { Lock } from 'lucide-react';
 import { PageHeader } from '@/components/layout/app-shell';
-import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { ResourceView } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
-import { cn } from '@/lib/utils';
-import { bandChipClass, BAND_LABEL, type ReliabilityBand } from '@/lib/reliability-ui';
-
-interface ScoreboardRow {
-  userId: string;
-  name: string | null;
-  position: string;
-  currentWeek: {
-    rawClearedPoints: number;
-    cappedScore: number;
-    cappedRecurringPoints: number;
-    rawRecurringPoints: number;
-  };
-  // PLAN.md §10 #4: absent, not just falsy, for anyone who isn't
-  // founder/admin — `apps/api/src/routes/scoreboard.ts` strips both
-  // fields from the JSON before it leaves the server. Points, cleared
-  // totals and velocity (`currentWeek` above) are unaffected — Chan's
-  // explicit "staff keep those" instruction.
-  lastClosedWeek?: { hitRate: number | null } | null;
-  reliability?: { score: number | null; band: ReliabilityBand; ratedWeeks: number };
-}
-
-interface ScoreboardSummary {
-  visibility: 'all' | 'oversight_only';
-  weekId: string;
-  weekStart: string;
-  rows: ScoreboardRow[];
-}
+import { CardRail, RailControls } from '@/components/scoreboard/card-rail';
+import { useRail } from '@/components/scoreboard/use-rail';
+import { PeriodTabs } from '@/components/scoreboard/period-tabs';
+import { PersonCard, PersonCardSkeleton } from '@/components/scoreboard/person-card';
+import {
+  PERIOD_STORAGE_KEY,
+  periodCaption,
+  readStoredPeriod,
+  type PeriodKey,
+  type ScoreboardSummary,
+} from '@/components/scoreboard/scoreboard-model';
 
 export function ScoreboardPage() {
   const { me } = useAuth();
   const resource = useResource((signal) => api.get<ScoreboardSummary>('/api/scoreboard', { signal }), []);
+
+  // Remembered for the session the same way the board remembers its
+  // owner filter (`OWNER_FILTER_KEY`, routes/board.tsx) — same idiom,
+  // same one-effect write, rather than a second persistence pattern.
+  // `readStoredPeriod` validates it: localStorage can hold anything, and
+  // an unrecognised key would index `periods` with `undefined`.
+  const [period, setPeriod] = React.useState<PeriodKey>(() =>
+    readStoredPeriod(localStorage.getItem(PERIOD_STORAGE_KEY))
+  );
+  React.useEffect(() => {
+    localStorage.setItem(PERIOD_STORAGE_KEY, period);
+  }, [period]);
+
+  const rows = resource.data?.rows ?? [];
+  const rail = useRail(`${resource.status}:${rows.length}`);
+
   const restricted = resource.data?.visibility === 'oversight_only' && me?.authority === 'staff';
   // PLAN.md §10 #4: founder + admin only, restated client-side purely to
-  // pick a layout — the server has already dropped the fields for
-  // everyone else, so this is never the thing standing between a GM/
-  // staff caller and the numbers.
+  // pick a layout — the server has already dropped `reliability` and
+  // `lastClosedWeek.hitRate` from the JSON for everyone else, so this is
+  // never the thing standing between a GM/staff caller and the numbers.
+  // Points and the four buckets are gated for nobody (PLAN.md §10.2).
   const canSeeReliability = me?.authority === 'founder' || me?.authority === 'admin';
-  const gridCols = canSeeReliability ? 'grid-cols-[1fr_auto_auto_auto]' : 'grid-cols-[1fr_auto]';
 
   return (
     <div>
@@ -66,8 +88,8 @@ export function ScoreboardPage() {
         title="Scoreboard"
         description={
           canSeeReliability
-            ? "This week's cleared points and each person's reliability."
-            : "This week's cleared points."
+            ? 'Points completed, waiting to clear and still to do — and each person’s reliability.'
+            : 'Points completed, waiting to clear and still to do.'
         }
       />
 
@@ -80,64 +102,46 @@ export function ScoreboardPage() {
 
       <ResourceView
         resource={resource}
-        skeleton={<SkeletonRows rows={4} height={52} />}
-        empty={<p className="rounded-xl border border-hairline bg-surface p-4 text-body-sm text-ink-3">No one on the roster yet.</p>}
+        skeleton={
+          <>
+            <div className="mb-3 flex items-center justify-between gap-3" aria-hidden>
+              <div className="skeleton-pulse h-4 w-40 rounded-xs bg-surface-2" />
+              <div className="skeleton-pulse h-[32px] w-[260px] rounded-md bg-surface-2" />
+            </div>
+            <div className="flex gap-4 overflow-hidden pb-3">
+              {[0, 1, 2].map((i) => (
+                <PersonCardSkeleton key={i} index={i} />
+              ))}
+            </div>
+          </>
+        }
+        empty={
+          <p className="rounded-xl border border-hairline bg-surface p-4 text-body-sm text-ink-3">
+            No one on the roster yet.
+          </p>
+        }
         isEmpty={(s) => s.rows.length === 0}
       >
         {(summary) => (
-          <div className="overflow-hidden rounded-xl border border-hairline bg-surface">
-            <div className={cn('grid items-center gap-4 border-b border-hairline bg-surface-2 px-4 py-2 text-eyebrow text-ink-2', gridCols)}>
-              <span>Person</span>
-              <span className={cn('num-col', canSeeReliability ? 'w-32' : 'w-40')}>This week</span>
-              {canSeeReliability ? (
-                <>
-                  <span className="num-col w-24">Hit-rate</span>
-                  <span className="num-col w-28">Reliability</span>
-                </>
-              ) : null}
+          <>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              {/* The window is the same for every row, so the caption
+                  reads it off the first one rather than being restated
+                  per card. It uses the API's own label and says when
+                  there is less history than the window claims. */}
+              <p className="text-body-sm text-ink-3">{periodCaption(period, summary.rows[0].periods[period], summary.weekStart)}</p>
+              <div className="flex items-center gap-2">
+                <PeriodTabs value={period} onChange={setPeriod} />
+                <RailControls state={rail.state} page={rail.page} />
+              </div>
             </div>
-            {summary.rows.map((row) => (
-              <Link
-                key={row.userId}
-                to={`/people/${row.userId}`}
-                className={cn('grid items-center gap-4 border-b border-hairline px-4 py-3 last:border-0 hover:bg-[#FCFDFF] focus-visible:bg-[#FCFDFF]', gridCols)}
-              >
-                <span className="flex flex-col">
-                  <span className="text-strong text-ink">{row.name ?? 'Unnamed'}</span>
-                  <span className="text-body-sm capitalize text-ink-3">{row.position}</span>
-                </span>
 
-                {/* Points and velocity stay for everyone — Chan's own
-                    reasoning (PLAN.md §10.2) is that the point system is
-                    a self-tracking instrument, not only a management
-                    readout. When reliability/hit-rate are hidden this
-                    column just gets the room they would have used. */}
-                <span className={cn('num-col', canSeeReliability ? 'w-32' : 'w-40')}>
-                  <span className="num num-md text-ink">{row.currentWeek.cappedScore}</span>
-                  <span className="num num-xs ml-1.5 text-ink-3">/ {row.currentWeek.rawClearedPoints} raw</span>
-                </span>
-
-                {canSeeReliability ? (
-                  <>
-                    <span className="num-col w-24 num num-sm text-ink-2">
-                      {row.lastClosedWeek?.hitRate != null ? `${Math.round(row.lastClosedWeek.hitRate * 100)}%` : '—'}
-                    </span>
-
-                    <span className="num-col w-28">
-                      {row.reliability?.score != null ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className="num num-sm text-ink">{row.reliability.score}</span>
-                          <span className={bandChipClass(row.reliability.band)}>{BAND_LABEL[row.reliability.band]}</span>
-                        </span>
-                      ) : (
-                        <span className={cn(bandChipClass('unrated'))}>Unrated</span>
-                      )}
-                    </span>
-                  </>
-                ) : null}
-              </Link>
-            ))}
-          </div>
+            <CardRail railRef={rail.ref} label="Team scoreboard, one card per person">
+              {summary.rows.map((row) => (
+                <PersonCard key={row.userId} row={row} period={period} canSeeReliability={canSeeReliability} />
+              ))}
+            </CardRail>
+          </>
         )}
       </ResourceView>
     </div>

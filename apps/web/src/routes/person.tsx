@@ -282,12 +282,12 @@ export function PersonPage() {
                       key={w.weekId}
                       className="grid grid-cols-[auto_1fr_1fr_1fr_1fr_1fr_auto] items-center gap-4 border-b border-hairline px-5 py-2 text-body-sm last:border-0"
                     >
-                      <span className="num num-xs text-ink-3">{w.weekStart}</span>
-                      <span className="num-col num num-sm text-ink-2">{w.weight.toFixed(3)}</span>
-                      <span className="num-col num num-sm text-ink">{w.committedPoints}</span>
-                      <span className="num-col num num-sm text-ink">{w.clearedCommittedPoints}</span>
-                      <span className="num-col num num-sm text-ink-3">{w.exoneratedPoints || '—'}</span>
-                      <span className="num-col num num-sm text-ink">{w.effectiveDenominator}</span>
+                      <span className="num text-num-xs text-ink-3">{w.weekStart}</span>
+                      <span className="num-col num text-num-sm text-ink-2">{w.weight.toFixed(3)}</span>
+                      <span className="num-col num text-num-sm text-ink">{w.committedPoints}</span>
+                      <span className="num-col num text-num-sm text-ink">{w.clearedCommittedPoints}</span>
+                      <span className="num-col num text-num-sm text-ink-3">{w.exoneratedPoints || '—'}</span>
+                      <span className="num-col num text-num-sm text-ink">{w.effectiveDenominator}</span>
                       <span className={cn('num-col text-label', w.includedInRating ? 'text-cleared' : 'text-ink-3')}>
                         {w.includedInRating ? 'yes' : 'no'}
                       </span>
