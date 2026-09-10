@@ -67,6 +67,23 @@ const DEMO_DOMAIN = 'ops-demo.invalid';
 const PURGE = process.argv.includes('--purge');
 /** Opt-in. Without it, an existing account's password is never touched. */
 const ROTATE = process.argv.includes('--rotate-passwords');
+/*
+  Opt-in, and deliberately so. `admin` is the most privileged authority in
+  this platform -- it bypasses `ops.enforce_task_transition` at statement 1
+  and holds the whole provisioning surface -- and a DEMO admin means a known
+  password on a live project with a public auth endpoint. So it is never
+  provisioned as a side effect of an ordinary seed; somebody has to ask for
+  it by name, use it, and then hand it back with `--deactivate=admin`.
+  PLAN.md §13.3 records the judgement in full.
+*/
+const WITH_ADMIN = process.argv.includes('--with-admin');
+/**
+ * `--deactivate=<key>` flips `core.users.is_active` to false for one demo
+ * persona and changes nothing else -- no password, no rows, no membership.
+ * It is how the admin coverage pass ends: the account stops being usable
+ * without being deleted, and one flag brings it back for the next pass.
+ */
+const DEACTIVATE = (process.argv.find((a) => a.startsWith('--deactivate=')) ?? '').split('=')[1] || null;
 
 // Chan, 2026-09-09: three founder accounts, not one. LRA clears points;
 // ERC and DCA are the other two brokerages and are strictly READ-ONLY —
@@ -74,14 +91,30 @@ const ROTATE = process.argv.includes('--rotate-passwords');
 // nothing. `readOnly` maps to `core.users.read_only`, which the database
 // guards on every write policy, trigger and security-definer RPC.
 // See OPEN-QUESTIONS.md #5.
-const PERSONAS = [
+const ALL_PERSONAS = [
   { key: 'founder', firstName: 'Founder', lastName: 'Demo', authority: 'founder', position: 'founder', isClearingFounder: true },
   { key: 'gm', firstName: 'GM', lastName: 'Demo', authority: 'gm', position: 'gm' },
   { key: 'sales', firstName: 'Sales', lastName: 'Demo', authority: 'staff', position: 'sales' },
   { key: 'broker', firstName: 'Broker', lastName: 'Demo', authority: 'staff', position: 'broker' },
   { key: 'erc', firstName: 'ERC', lastName: 'Demo', authority: 'founder', position: 'founder', readOnly: true },
   { key: 'dca', firstName: 'DCA', lastName: 'Demo', authority: 'founder', position: 'founder', readOnly: true },
+  // Behind `--with-admin` only. `/admin/everything` and `/admin/audit` have
+  // never had UI coverage because no demo login holds `admin` and Chan's own
+  // account is the only one that does. `position: 'other'` because admin is
+  // an authority, not a job on this brokerage's org chart.
+  { key: 'admin', firstName: 'Admin', lastName: 'Demo', authority: 'admin', position: 'other', adminOnly: true },
 ].map((p) => ({ ...p, email: `${p.key}-demo@${DEMO_DOMAIN}` }));
+
+/**
+ * What a seed run provisions. `--with-admin` is opt-in, so an ordinary run
+ * creates the six and never the admin.
+ *
+ * PURGE DELIBERATELY DOES NOT USE THIS LIST. It uses `ALL_PERSONAS`: a purge
+ * that walked the same filtered list would silently leave the most privileged
+ * demo credential in the system standing, which is the one account that must
+ * never survive a teardown by accident.
+ */
+const PERSONAS = ALL_PERSONAS.filter((p) => !p.adminOnly || WITH_ADMIN);
 
 /**
  * True once we have learned that `core.users.read_only` does not exist
@@ -120,7 +153,7 @@ async function purge() {
   console.log(`=== LRA Ops :: purging demo accounts (@${DEMO_DOMAIN}) ===\n`);
 
   const authUsers = [];
-  for (const persona of PERSONAS) {
+  for (const persona of ALL_PERSONAS) {
     const existing = await findAuthUserByEmail(persona.email);
     if (existing) authUsers.push(existing);
   }
@@ -160,7 +193,7 @@ async function purge() {
 
   // 4. People (memberships/notifications/outbox cascade from core.users
   //    itself; people does not, so it needs an explicit delete).
-  await svc.schema('core').from('people').delete().in('email', PERSONAS.map((p) => p.email));
+  await svc.schema('core').from('people').delete().in('email', ALL_PERSONAS.map((p) => p.email));
 
   // 4b. Notes, memberships, notifications and outbox rows, then the
   //     core.users rows themselves.
@@ -285,12 +318,29 @@ async function seed() {
       if (error) throw error;
       authUser = data.user;
       console.log(`  created ${persona.email}`);
-    } else if (ROTATE) {
+    } else if (ROTATE || persona.adminOnly) {
+      /*
+        The six keep their passwords unless `--rotate-passwords` asks --
+        rotating them silently invalidates whatever is in
+        `apps/web/.env`'s VITE_DEMO_LOGINS.
+
+        The admin account is the deliberate exception, and it rotates on
+        every `--with-admin` run. It exists only for the length of a
+        coverage pass and is handed back with `--deactivate=admin`
+        afterwards, so there is no standing credential to invalidate --
+        and a run that reactivates it but cannot tell you the password is
+        a run that did nothing useful. Rotating only this one persona
+        cannot disturb the other six.
+      */
       password = generatePassword();
       const { error } = await svc.auth.admin.updateUserById(authUser.id, { password });
       if (error) throw error;
-      anyRotated = true;
-      console.log(`  found ${persona.email}, password ROTATED (--rotate-passwords)`);
+      if (!persona.adminOnly) anyRotated = true;
+      console.log(
+        persona.adminOnly
+          ? `  found ${persona.email}, password freshly minted for this pass`
+          : `  found ${persona.email}, password ROTATED (--rotate-passwords)`
+      );
     } else {
       console.log(`  found ${persona.email}, password left alone`);
     }
@@ -1094,8 +1144,32 @@ async function seedWeek(clients) {
   );
 }
 
+/**
+ * Stop one demo account being usable, without deleting anything.
+ *
+ * `core.users.is_active = false` is checked by `middleware/auth.ts` on every
+ * request (403 INACTIVE), so the credential stops working immediately while
+ * the person, the memberships and everything the account touched stay put --
+ * which is what makes the admin coverage pass repeatable rather than
+ * destructive.
+ */
+async function deactivate(key) {
+  const email = `${key}-demo@${DEMO_DOMAIN}`;
+  const authUser = await findAuthUserByEmail(email);
+  if (!authUser) {
+    console.error(`[fatal] no demo account for ${email} — nothing to deactivate.`);
+    process.exit(1);
+  }
+  const { error } = await svc.schema('core').from('users').update({ is_active: false }).eq('id', authUser.id);
+  if (error) throw error;
+  console.log(`=== LRA Ops :: ${email} is now INACTIVE ===\n`);
+  console.log('  The credential no longer works (403 INACTIVE at the API).');
+  console.log('  Nothing was deleted. Re-run the seed with --with-admin to bring it back.');
+}
+
 try {
-  if (PURGE) await purge();
+  if (DEACTIVATE) await deactivate(DEACTIVATE);
+  else if (PURGE) await purge();
   else await seed();
   if (readOnlyColumnMissing) {
     console.warn(

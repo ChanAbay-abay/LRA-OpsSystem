@@ -11,7 +11,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppShell } from '@/components/layout/app-shell';
-import { SkeletonRows, UnreachablePanel } from '@/components/ui/resource-state';
+import { RefusedPanel, SkeletonRows, UnreachablePanel } from '@/components/ui/resource-state';
 import { routeGate } from '@/lib/route-gate';
 import { LoginPage } from '@/routes/login';
 import { SetPasswordPage } from '@/routes/set-password';
@@ -96,7 +96,7 @@ function ProtectedRoute({
    */
   requireFounder?: boolean;
 }) {
-  const { session, me, loading, meError, retryMe } = useAuth();
+  const { session, me, loading, meError, meErrorStatus, retryMe, signOut } = useAuth();
 
   // The decision lives in `lib/route-gate.ts` as a pure function, so it
   // can be tested. This gate has now been the site of two different
@@ -112,6 +112,7 @@ function ProtectedRoute({
       hasSession: Boolean(session),
       authority: me?.authority ?? null,
       meError,
+      meErrorStatus,
     },
     { requireAdmin, requireOversight, requireFounder }
   );
@@ -127,6 +128,12 @@ function ProtectedRoute({
       return (
         <AppShell>
           <UnreachablePanel message={decision.message} onRetry={retryMe} />
+        </AppShell>
+      );
+    case 'refused':
+      return (
+        <AppShell>
+          <RefusedPanel message={decision.message} onSignOut={signOut} />
         </AppShell>
       );
     case 'render':

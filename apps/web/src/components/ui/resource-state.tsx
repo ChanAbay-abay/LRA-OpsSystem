@@ -51,6 +51,46 @@ export function UnreachablePanel({ message, onRetry }: { message: string; onRetr
   );
 }
 
+/**
+ * The server answered, and the answer is no.
+ *
+ * Deliberately NOT `UnreachablePanel`. That one says the connection is
+ * the problem and the app will start working again on its own; for a
+ * 403 both halves are false. Driven 2026-09-10 against a deactivated
+ * account, which was shown "The LRA Ops server can't be reached" while
+ * the server was answering `403 Account is deactivated` in 600ms.
+ *
+ * So: the server's own sentence, no Retry (there is nothing to retry --
+ * the account is the problem, and only somebody with admin can change
+ * that), and a way out of the dead session instead.
+ */
+export function RefusedPanel({ message, onSignOut }: { message: string; onSignOut: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex flex-col items-center gap-3 rounded-lg border border-danger-border bg-danger-wash px-6 py-12 text-center"
+    >
+      <AlertTriangle className="size-6 text-danger" aria-hidden />
+      <p className="text-strong text-ink">{message}</p>
+      <p className="max-w-md text-body-sm text-ink-2">
+        The server answered — this is not a connection problem, and waiting will not change it.
+        Ask a GM, founder or admin at LRA to check your account.
+      </p>
+      <div className="mt-1 flex items-center gap-3">
+        <Button variant="secondary" size="sm" onClick={onSignOut}>
+          Sign out
+        </Button>
+        <a
+          href={`mailto:${DEV_CONTACT_EMAIL}?subject=${encodeURIComponent('LRA Ops account access')}`}
+          className="text-label text-brand-700 underline underline-offset-2"
+        >
+          Contact the developer
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export function ErrorPanel({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div role="alert" className="rounded-lg border border-danger-border bg-danger-wash px-4 py-3">

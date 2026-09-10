@@ -115,3 +115,50 @@ test('an ungated route renders for everyone signed in', () => {
     assert.equal(routeGate(state({ authority: a })).kind, 'render', a);
   }
 });
+
+// ---------------------------------------------------------------------
+// "Reached and refused" is not "could not reach"
+//
+// Driven 2026-09-10 against a deactivated account: the API answered
+// `403 Account is deactivated` in ~600ms and the screen said "The LRA Ops
+// server can't be reached ... the app will keep working as soon as the
+// connection is back." Both halves were false, and the only action
+// offered was a Retry that could never succeed.
+// ---------------------------------------------------------------------
+
+test('a 403 is refused, not an outage — the server answered', () => {
+  const d = routeGate(
+    state({ authority: null, meError: 'Account is deactivated', meErrorStatus: 403 }),
+    GATED
+  );
+  assert.equal(d.kind, 'refused');
+  // The server's own sentence reaches the screen; nothing is invented.
+  assert.equal(d.kind === 'refused' && d.message, 'Account is deactivated');
+});
+
+test('no status at all is still an outage — nothing answered', () => {
+  // A transport failure has no response to read a status from, and that
+  // absence IS the unreachable case. It must not fall into `refused`.
+  const d = routeGate(
+    state({ authority: null, meError: 'Could not reach the server.', meErrorStatus: null }),
+    GATED
+  );
+  assert.equal(d.kind, 'error');
+});
+
+test('a 503 stays an outage — it is the server saying it cannot answer YET', () => {
+  const d = routeGate(
+    state({ authority: null, meError: 'Could not reach the authentication service.', meErrorStatus: 503 }),
+    GATED
+  );
+  assert.equal(d.kind, 'error');
+});
+
+test('an ungated route is still not taken over by a 403', () => {
+  // Same rule as the outage case: a route that never needed the profile
+  // renders, and its own panels speak for whatever it fetches.
+  assert.equal(
+    routeGate(state({ authority: null, meError: 'Account is deactivated', meErrorStatus: 403 })).kind,
+    'render'
+  );
+});

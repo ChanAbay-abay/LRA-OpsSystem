@@ -37,6 +37,16 @@ export interface GateState {
   authority: Authority | null;
   /** Why `/api/me` failed, or null. Distinct from "not yet arrived". */
   meError: string | null;
+  /**
+   * The HTTP status behind `meError`, or null when nothing answered.
+   *
+   * Without it every failure looked like an outage. A 403 is the server
+   * answering clearly and permanently -- a deactivated account, a
+   * revoked membership -- and telling that person "the app will keep
+   * working as soon as the connection is back" is false twice over: the
+   * connection is fine, and waiting will not fix it.
+   */
+  meErrorStatus?: number | null;
 }
 
 export type GateDecision =
@@ -48,6 +58,11 @@ export type GateDecision =
   | { kind: 'home' }
   /** The profile could not be loaded and this route cannot proceed without it. */
   | { kind: 'error'; message: string }
+  /**
+   * The server answered, and the answer is no. Not a retryable outage:
+   * the account itself cannot use this app until somebody changes that.
+   */
+  | { kind: 'refused'; message: string }
   /** Render the route. */
   | { kind: 'render' };
 
@@ -70,7 +85,14 @@ export function routeGate(state: GateState, req: RouteRequirement = {}): GateDec
   // Order matters: "never arriving" is checked BEFORE "not yet arrived".
   // Reversed, a permanent failure looks like a slow load forever — the
   // exact defect, since `loading` goes false while `authority` stays null.
-  if (state.meError) return { kind: 'error', message: state.meError };
+  if (state.meError) {
+    // A 403 is a verdict on the account, not a failure to reach the
+    // server, and the two get different panels. Everything else --
+    // including a null status, which means nothing answered at all --
+    // stays the outage case.
+    if (state.meErrorStatus === 403) return { kind: 'refused', message: state.meError };
+    return { kind: 'error', message: state.meError };
+  }
 
   // Genuinely still in flight for a beat after the session settles. The
   // skeleton is the honest answer, not a redirect on a role not yet read.

@@ -72,6 +72,20 @@ interface AuthContextValue {
    * session — that path signs out and the login redirect is the answer.
    */
   meError: string | null;
+  /**
+   * The HTTP status behind `meError`, or null when there was no response
+   * to read one from (a genuine transport failure).
+   *
+   * The message alone cannot tell those apart, and the gate rendered
+   * every `/api/me` failure as "The LRA Ops server can't be reached …
+   * the app will keep working as soon as the connection is back."
+   * Driven 2026-09-10 with a deactivated account: the server answered
+   * `403 Account is deactivated` — reached, unambiguous, and permanent —
+   * and the screen told the user it was a connection problem that would
+   * fix itself. They would click Retry forever instead of asking their
+   * GM why they were switched off.
+   */
+  meErrorStatus: number | null;
   /** Re-run the profile load, for the Retry on that failure panel. */
   retryMe: () => void;
   signIn: (email: string, password: string) => Promise<void>;
@@ -85,12 +99,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [me, setMe] = React.useState<Me | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [meError, setMeError] = React.useState<string | null>(null);
+  const [meErrorStatus, setMeErrorStatus] = React.useState<number | null>(null);
 
   const fetchMe = React.useCallback(async () => {
     try {
       const profile = await api.get<Me>('/api/me');
       setMe(profile);
       setMeError(null);
+      setMeErrorStatus(null);
       return;
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -131,6 +147,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           ? err.message
           : 'Could not reach the server to load your profile.'
       );
+      // Null when there was no response at all — that IS the unreachable
+      // case, and the only one the unreachable panel may claim.
+      setMeErrorStatus(err instanceof ApiClientError ? err.status : null);
     }
   }, []);
 
@@ -209,7 +228,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ session, me, loading, meError, retryMe, signIn, signOut }}>
+    <AuthContext.Provider value={{ session, me, loading, meError, meErrorStatus, retryMe, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   );
