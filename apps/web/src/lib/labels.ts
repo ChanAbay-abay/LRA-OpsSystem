@@ -480,3 +480,26 @@ const AUDIT_FIELD = {
 } satisfies Record<AuditFieldKey, EnumEntry>;
 
 export const auditFieldLabel = makeLookup<AuditFieldKey>('audit field', AUDIT_FIELD).label;
+
+// ---------------------------------------------------------------------
+// Feedback kind/status — core.feedback_kind / core.feedback_status
+// (20260911130000_core_feedback_channel.sql)
+// ---------------------------------------------------------------------
+
+export type FeedbackKind = 'suggestion' | 'bug';
+
+const FEEDBACK_KIND = {
+  suggestion: { label: 'Suggestion' },
+  bug: { label: 'Bug' },
+} satisfies Record<FeedbackKind, EnumEntry>;
+
+export const feedbackKindLabel = makeLookup<FeedbackKind>('feedback kind', FEEDBACK_KIND).label;
+
+export type FeedbackStatus = 'open' | 'archived';
+
+const FEEDBACK_STATUS = {
+  open: { label: 'Open' },
+  archived: { label: 'Archived' },
+} satisfies Record<FeedbackStatus, EnumEntry>;
+
+export const feedbackStatusLabel = makeLookup<FeedbackStatus>('feedback status', FEEDBACK_STATUS).label;

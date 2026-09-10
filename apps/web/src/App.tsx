@@ -29,6 +29,7 @@ import { AdminUsersPage } from '@/routes/admin-users';
 import { AdminSettingsPage } from '@/routes/admin-settings';
 import { AdminAuditPage } from '@/routes/admin-audit';
 import { AdminEverythingPage } from '@/routes/admin-everything';
+import { AdminFeedbackPage } from '@/routes/admin-feedback';
 
 /**
  * The app's own boot placeholder. It used to be a bare centred
@@ -255,6 +256,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute requireAdmin>
             <AdminEverythingPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/feedback"
+        element={
+          <ProtectedRoute requireAdmin>
+            <AdminFeedbackPage />
           </ProtectedRoute>
         }
       />

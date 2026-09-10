@@ -2810,6 +2810,138 @@ select pg_temp.expect_blocked('repricing',
 
 reset role;
 
+-- =======================================================================
+-- core.feedback -- the suggestion/bug channel
+-- (20260911130000_core_feedback_channel.sql).
+--
+-- Point 2: admin-only read. Point 3: any active ops member may write,
+-- INCLUDING the read-only `readonly` persona -- the one deliberate
+-- exception to `not core.is_read_only()` in this whole test file.
+-- Point 4: status is the only mutable column, and admin-only; DELETE is
+-- real and admin-only. Reuses the `admin1` persona seeded by the
+-- soft-delete section above (still active there and everywhere after —
+-- `admin2`/`admin3` are NOT reusable, that same section soft-deletes
+-- them) rather than minting a fresh admin persona for one section.
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+set local role authenticated;
+
+-- === Point 3: write is open to an ordinary ops member... ===
+--
+-- No `returning` on either insert below, ON PURPOSE, not an oversight:
+-- Postgres RLS subjects a RETURNING clause to the table's SELECT
+-- policy, same as a plain SELECT would be -- and point 2 makes that
+-- policy admin-only. A submitter who is not an admin can insert their
+-- own report but is correctly refused the row back in the same
+-- statement; `expect_allowed` (row-count only, no capture) is the
+-- right assertion shape here, and the real API route
+-- (`routes/feedback.ts`) does not chain `.select()` after `.insert()`
+-- for exactly this reason -- confirmed live in this same coder pass,
+-- not just here.
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('feedback',
+  'an ordinary staff member CAN submit a bug report',
+  $sql$insert into core.feedback (kind, body, page)
+       values ('bug', 'TEST-feedback: the board freezes when I drag a card on Safari.', '/board')$sql$);
+
+-- === ...and, deliberately, to the read-only founder too (point 3's
+--     named exception) -- this is the one insert in the whole suite
+--     that must succeed FOR a read-only persona. ===
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_allowed('feedback',
+  'a READ-ONLY founder CAN submit feedback -- the deliberate exception to not core.is_read_only()',
+  $sql$insert into core.feedback (kind, body, page)
+       values ('suggestion', 'TEST-feedback: a weekly export of the scoreboard would help our reporting.', '/scoreboard')$sql$);
+
+-- === Rate/abuse floor, in the database: a body under 10 characters is refused outright. ===
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('feedback',
+  'a body under the 10-character floor is refused by the CHECK constraint',
+  $sql$insert into core.feedback (kind, body, page) values ('bug', 'too short', '/board')$sql$);
+
+-- === Point 2: nobody but admin can read Chan's inbox -- not even
+--     oversight (founder/gm), which is the whole point of using
+--     core.is_admin() instead of core.is_oversight() here. ===
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_rows('feedback',
+  'a staff member cannot read core.feedback at all, not even their own submission',
+  $sql$select count(*) from core.feedback where body like 'TEST-feedback:%'$sql$, 0);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_rows('feedback',
+  'a plain founder (oversight, but not admin) cannot read core.feedback either',
+  $sql$select count(*) from core.feedback where body like 'TEST-feedback:%'$sql$, 0);
+
+-- Only admin can read the two rows just inserted -- so the ids are
+-- captured here, admin-scoped, rather than via `returning` above.
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_rows('feedback',
+  'admin reads both TEST feedback rows',
+  $sql$select count(*) from core.feedback where body like 'TEST-feedback:%'$sql$, 2);
+
+insert into t_meta (k, v)
+select 'feedback_sales', id from core.feedback where body like 'TEST-feedback: the board freezes%';
+insert into t_meta (k, v)
+select 'feedback_readonly', id from core.feedback where body like 'TEST-feedback: a weekly export%';
+
+-- === Forgery: the submitted_by/email/authority stamp is server-derived,
+--     never whatever the client sent (still admin, who can read it to check). ===
+select pg_temp.expect_rows('feedback',
+  'the stamped submitter is the real caller (sales), not a forged identity',
+  $sql$select count(*) from core.feedback
+       where id = (select v from t_meta where k='feedback_sales')
+         and submitted_by = (select uid from p where k='sales')
+         and submitted_by_email = 'test-sales@lra.invalid'$sql$, 1);
+
+-- === The outbox actually fired, to every active admin (admin1, plus
+--     whatever admin the seed/bootstrap migration created). ===
+select pg_temp.expect_rows('feedback',
+  'the AFTER INSERT trigger queued an outbox row for admin1, linking to /admin/feedback',
+  $sql$select count(*) from core.notification_outbox
+       where entity_id = (select v from t_meta where k='feedback_sales')
+         and entity_type = 'core.feedback' and recipient_id = (select uid from p where k='admin1')
+         and link = '/admin/feedback'$sql$, 1);
+
+-- === Point 4: content is immutable, even for admin -- only status may change. ===
+select pg_temp.expect_blocked('feedback',
+  'even admin cannot rewrite the body of a submitted report',
+  $sql$update core.feedback set body = 'TAMPERED' where id = (select v from t_meta where k='feedback_sales')$sql$);
+
+-- === Point 4: archiving is an admin-only write, and read-only-admin still cannot. ===
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('feedback',
+  'staff cannot archive a feedback item',
+  $sql$update core.feedback set status = 'archived' where id = (select v from t_meta where k='feedback_sales')$sql$);
+
+select pg_temp.become((select uid from p where k='readonly_admin'));
+select pg_temp.expect_blocked('feedback',
+  'a read-only ADMIN cannot archive a feedback item -- point 4 is NOT the same exception as point 3',
+  $sql$update core.feedback set status = 'archived' where id = (select v from t_meta where k='feedback_sales')$sql$);
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_allowed('feedback',
+  'admin CAN archive a feedback item',
+  $sql$update core.feedback set status = 'archived', archived_by = (select uid from p where k='admin1'), archived_at = now()
+       where id = (select v from t_meta where k='feedback_sales')$sql$);
+
+-- === Point 4: delete is real, and admin-only. ===
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('feedback',
+  'staff cannot delete a feedback item',
+  $sql$delete from core.feedback where id = (select v from t_meta where k='feedback_readonly')$sql$);
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_allowed('feedback',
+  'admin CAN hard-delete a feedback item',
+  $sql$delete from core.feedback where id = (select v from t_meta where k='feedback_readonly')$sql$);
+select pg_temp.expect_rows('feedback',
+  'the deleted row is genuinely gone, not soft-deleted',
+  $sql$select count(*) from core.feedback where id = (select v from t_meta where k='feedback_readonly')$sql$, 0);
+
+reset role;
+
 -- ---------------------------------------------------------------------
 -- Report
 -- ---------------------------------------------------------------------

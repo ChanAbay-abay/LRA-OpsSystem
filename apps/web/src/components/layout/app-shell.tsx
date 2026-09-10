@@ -33,6 +33,7 @@ import type { ReactNode } from 'react';
 import { MobileSidebarTrigger, Sidebar } from './sidebar';
 import { HintProvider } from '@/components/ui/hint';
 import { WhatIsThis } from '@/components/ui/what-is-this';
+import { FeedbackWidget } from '@/components/feedback/feedback-widget';
 import type { HelpTopicId } from '@/lib/help';
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -74,6 +75,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           */}
           <div className="mx-auto h-full max-w-app px-6 py-6 lg:px-8">{children}</div>
         </main>
+
+        {/* Persistent on every authenticated screen (Chan's ask) — mounted
+            once here, not per-route, so it survives navigation without
+            re-registering. */}
+        <FeedbackWidget />
       </div>
     </HintProvider>
   );

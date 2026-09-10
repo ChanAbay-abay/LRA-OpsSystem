@@ -51,7 +51,8 @@ export type HelpTopicId =
   | 'admin-everything'
   | 'admin-audit'
   | 'admin-users'
-  | 'admin-settings';
+  | 'admin-settings'
+  | 'admin-feedback';
 
 export const HELP = {
   board: {
@@ -170,6 +171,13 @@ export const HELP = {
     body: [
       'The numbers that drive the points system: the recurring-task cap, staleness thresholds, the reliability window, and who can see the scoreboard.',
       'Changing one of these changes it for everyone, immediately.',
+    ],
+  },
+  'admin-feedback': {
+    title: 'Feedback',
+    body: [
+      'Suggestions and bug reports the team sent from the feedback button on every screen, admin only.',
+      'Archive one once you have acted on it, or delete it for good — deleting cannot be undone.',
     ],
   },
 } satisfies Record<HelpTopicId, HelpTopic>;

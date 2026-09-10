@@ -27,6 +27,7 @@ import {
   Home,
   Inbox,
   KanbanSquare,
+  MessageSquare,
   Menu,
   ShieldCheck,
   SlidersHorizontal,
@@ -84,6 +85,7 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
     { to: '/admin/users', label: 'People & access', icon: UserCog },
     { to: '/admin/everything', label: 'Everything', icon: FileClock },
     { to: '/admin/audit', label: 'Audit', icon: ShieldCheck },
+    { to: '/admin/feedback', label: 'Feedback', icon: MessageSquare },
   ];
   const settingsItem: NavItem = { to: '/admin/settings', label: 'Settings', icon: SlidersHorizontal };
   const adminItems: NavItem[] =
