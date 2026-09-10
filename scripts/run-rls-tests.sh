@@ -23,8 +23,26 @@ if [ -z "${DATABASE_URL:-}" ]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="$("$PSQL" "$DATABASE_URL" -q -f "$HERE/supabase/tests/rls_test.sql" 2>&1)"
+# `set -e` (line 13) aborts on a failed command substitution in an
+# assignment, and it does so BEFORE the `echo "$OUT"` below ever runs --
+# verified by `sh -c 'set -e; OUT="$(false 2>&1)"; echo REACHED'`, which
+# prints nothing and exits 1. So a psql that could not connect killed
+# this script silently: no host, no auth error, no hint, just a non-zero
+# status and an empty terminal, which reads as a hang rather than a
+# failure. `|| rc=$?` keeps psql's own diagnostics and prints them.
+rc=0
+OUT="$("$PSQL" "$DATABASE_URL" -q -f "$HERE/supabase/tests/rls_test.sql" 2>&1)" || rc=$?
 echo "$OUT"
+
+# A suite that ran and failed says so below, and its own message is the
+# better one -- so only speak up here when psql died before producing a
+# verdict at all.
+if [ "$rc" -ne 0 ] && ! echo "$OUT" | grep -q "verdict"; then
+  echo >&2
+  echo "FAIL: psql exited $rc without running the suite -- the output above is its own error." >&2
+  echo "Usually the connection string: check the host, the port, and that the password is URL-encoded." >&2
+  exit "$rc"
+fi
 
 if echo "$OUT" | grep -q "BROKEN: canary passed"; then
   echo >&2
