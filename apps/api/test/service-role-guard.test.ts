@@ -203,11 +203,26 @@ describe('service-role write guard', () => {
 
   test('the detector does NOT flag routers whose writes run on userClient', () => {
     const found = serviceRoleWriteModules();
-    // These three use `serviceClient()` for name/roster joins and write only
+    // These four use `serviceClient()` for name/roster joins and write only
     // through the caller's own client, so `not core.is_read_only()` already
     // covers them. If one shows up here, either it gained a service-role write
     // or the detector has become name-blind; both need a human.
-    for (const rel of ['routes/tasks.ts', 'routes/task-edit-requests.ts', 'routes/points.ts']) {
+    //
+    // `routes/task-edit-batches.ts` is the newest of them and the one most
+    // worth pinning (20260910200000): its writes are RPCs into
+    // `ops.create_edit_batch` / `ops.decide_edit_batch`, whose entire
+    // authority ladder is `core.is_founder() and not core.is_read_only()`
+    // evaluated against `core.auth_user_id()`. Moved onto a service-role
+    // connection that ladder does not fail closed — it evaluates as nobody,
+    // because `auth_user_id()` is null there — so a read-only founder would
+    // be approving edits to the locked Monday record. `.rpc(` is in
+    // WRITE_VERBS above, so this assertion is live, not decorative.
+    for (const rel of [
+      'routes/tasks.ts',
+      'routes/task-edit-requests.ts',
+      'routes/task-edit-batches.ts',
+      'routes/points.ts',
+    ]) {
       assert.ok(!found.includes(rel), `${rel} was flagged as a service-role writer — check whether it gained one`);
     }
   });

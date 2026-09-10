@@ -1215,12 +1215,36 @@ select pg_temp.expect_blocked('edit-requests',
   'a read-only ADMIN cannot approve a task edit request -- the guard stands ahead of the clearing-founder/admin bypass',
   $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req1')$sql$);
 
--- A non-clearing founder cannot approve one either (mirrors the
--- cancellation ladder's founder2 precedent exactly).
+-- SUPERSEDED, DELIBERATELY, 2026-09-10 (20260910200000). This assertion
+-- used to read "a non-clearing founder cannot approve a task edit
+-- request", mirroring the cancellation ladder's founder2 precedent. Chan
+-- widened the decider: "then approve by admin or founder" -- no clearing
+-- qualifier -- so the predicate became `core.is_founder() and not
+-- core.is_read_only()` and founder2 may now decide. It is INVERTED here
+-- rather than deleted, so the change is visible as a change: the old
+-- rule is not merely untested now, the new one is asserted in its place.
+-- A separate request is used so `edit_req1` stays pending for the
+-- clearing-founder and self-approval assertions further down, which are
+-- unchanged.
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed_capture('edit-requests',
+  'GM CAN raise a second edit request (fixture for the widened-approver check)',
+  $sql$insert into ops.task_edit_requests (task_id, requested_by, reason, change_client_ref, proposed_client_ref)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='gm'),
+               'the client gave us the real BL number this morning', true, 'TEST-BL-99')
+       returning id$sql$,
+  'edit_req_f2');
+
 select pg_temp.become((select uid from p where k='founder2'));
-select pg_temp.expect_blocked('edit-requests',
-  'a non-clearing founder cannot approve a task edit request',
-  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req1')$sql$);
+select pg_temp.expect_allowed('edit-requests',
+  'a NON-CLEARING founder CAN now approve a task edit request -- Chan: "then approve by '
+  'admin or founder" (20260910200000 supersedes the clearing-founder rule)',
+  $sql$update ops.task_edit_requests set status = 'approved' where id = (select v from t_meta where k='edit_req_f2')$sql$);
+
+select pg_temp.expect_rows('edit-requests',
+  'that widened approval actually applied the proposed client_ref to ops.tasks',
+  $sql$select count(*) from ops.tasks where id = (select v from t_meta where k='taskA')
+       and client_ref = 'TEST-BL-99'$sql$, 1);
 
 -- GM (the requester, and not the clearing founder either) cannot
 -- approve its own request.
@@ -1669,6 +1693,392 @@ select pg_temp.expect_rows('blocks',
        where id in ((select v from t_meta where k='blk_for_bystander'),
                     (select v from t_meta where k='blk_for_readonly_owner'))
          and resolved_at is null$sql$, 2);
+
+-- =======================================================================
+-- Bulk edit suggestions -- ops.task_edit_batches
+-- (20260910200000_ops_task_edit_batches.sql)
+--
+-- Chan, 2026-09-10: "GM can send a request to edit (should be done by
+-- bulk like an edit feature on google docs), then approve by admin or
+-- founder showing what changed like before and after".
+--
+-- Three properties are asserted here, and the middle one is the reason
+-- this section is long:
+--
+--   1. AUTHORITY, widened. A founder OR an admin may decide -- including
+--      a NON-CLEARING founder, which is the supersession recorded above.
+--      A read-only founder may not, a read-only ADMIN may not, staff may
+--      not, and the requester may not decide their own.
+--   2. ATOMICITY. A batch whose one item cannot apply must apply NONE of
+--      them. Three of this project's worst defects were "correct
+--      response, broken side effect" (PLAN.md §12.7); a half-applied
+--      batch of edits to the locked Monday record would be the worst
+--      instance of that pattern yet. So the failing batch below is
+--      followed by assertions on the SIBLING task's row and on the
+--      batch's own status -- the refusal itself proves nothing about
+--      what was left behind.
+--   3. INDIVISIBILITY. All-or-nothing is worth nothing if an approver
+--      can still pick one item off through PostgREST, or mark the batch
+--      approved without touching its items. Both are refused.
+--
+-- Fixtures: eight fresh committed tasks in the now-`open` week, created
+-- as the system caller so they arrive already committed (a staff commit
+-- after the briefing closes is refused, correctly, by the commitments
+-- section above). Committed + non-planning week is exactly the state the
+-- definition lock binds, so these are the real subject of the feature,
+-- not a convenient stand-in.
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+
+-- A founder who is NOT an ops member. The three batch functions are
+-- SECURITY DEFINER, so they run as the table owner and RLS's
+-- `core.is_member('ops')` clause never fires for their writes -- each
+-- one therefore asks the question itself, and this persona is what makes
+-- that answerable. `core.is_founder()` reads authority alone, so without
+-- the explicit check a founder with no business in the ops module could
+-- decide edits to its committed week.
+insert into t_ids (k, v) values ('founder_outsider', gen_random_uuid());
+insert into auth.users (id, email, instance_id, aud, role)
+select v, 'test-founder-outsider@lra.invalid', '00000000-0000-0000-0000-000000000000',
+       'authenticated', 'authenticated'
+from t_ids where k = 'founder_outsider';
+insert into core.people (person_code, first_name, last_name, email)
+select 'TEST-FOUNDER-OUTSIDER', 'Outsider', 'Persona', 'test-founder-outsider@lra.invalid';
+insert into core.users (id, email, authority, person_id)
+select t.v, 'test-founder-outsider@lra.invalid', 'founder',
+       (select id from core.people where person_code = 'TEST-FOUNDER-OUTSIDER')
+from t_ids t where t.k = 'founder_outsider';
+-- Deliberately NO core.memberships row.
+
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, description, status, created_by,
+                         is_committed, committed_week_id, committed_points)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-btask' || g, 'TEST-btask' || g || ' original description',
+         'todo', (select uid from p where k='sales'),
+         true, w.id, 8
+  from ops.weeks w cross join generate_series(1, 8) g
+  where w.week_start = ops.week_start_for(now())
+  returning id, title
+)
+insert into t_meta (k, v) select replace(title, 'TEST-', ''), id from ins;
+
+set local role authenticated;
+
+-- === Who may raise one ==============================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('edit-batches',
+  'staff cannot raise a bulk edit suggestion at all',
+  $sql$select ops.create_edit_batch('trying to route around the lock in bulk',
+       jsonb_build_array(jsonb_build_object('task_id', (select v from t_meta where k='btask1'),
+                                            'title', 'TEST-btask1 (staff-forged)')))$sql$);
+
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_blocked('edit-batches',
+  'a read-only founder cannot raise a bulk edit suggestion',
+  $sql$select ops.create_edit_batch('read-only trying to suggest edits anyway',
+       jsonb_build_array(jsonb_build_object('task_id', (select v from t_meta where k='btask1'),
+                                            'title', 'TEST-btask1 (RO-forged)')))$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('edit-batches',
+  'an EMPTY bulk edit suggestion is refused at creation -- a pending batch with nothing '
+  'in it would sit in an approver''s queue forever',
+  $sql$select ops.create_edit_batch('a suggestion with no suggestions in it', '[]'::jsonb)$sql$);
+
+-- The typed-proposal guarantee, in bulk: the five defining fields are
+-- the only proposable ones, and an item carrying anything else is
+-- REFUSED rather than silently stripped. `points_override` is the
+-- specific thing that must stay inexpressible -- it is how a suggestion
+-- would become a way to re-price someone's committed week.
+select pg_temp.expect_blocked('edit-batches',
+  'a bulk edit suggestion cannot propose a change to points_override (or any field outside the five)',
+  $sql$select ops.create_edit_batch('trying to re-price a committed task via a suggestion',
+       jsonb_build_array(jsonb_build_object('task_id', (select v from t_meta where k='btask1'),
+                                            'points_override', 99)))$sql$);
+
+select pg_temp.expect_blocked('edit-batches',
+  'an item that proposes no change at all is refused',
+  $sql$select ops.create_edit_batch('an item that changes nothing whatsoever',
+       jsonb_build_array(jsonb_build_object('task_id', (select v from t_meta where k='btask1'))))$sql$);
+
+-- === batch1: GM raises two items; a NON-CLEARING founder approves ====
+
+select pg_temp.expect_allowed_capture('edit-batches',
+  'GM CAN raise a bulk edit suggestion over two locked committed tasks in one call',
+  $sql$select id from ops.create_edit_batch(
+         'the client renamed two shipments and moved one to a new broker',
+         jsonb_build_array(
+           jsonb_build_object('task_id', (select v from t_meta where k='btask1'),
+                              'title', 'TEST-btask1 (renamed in bulk)'),
+           jsonb_build_object('task_id', (select v from t_meta where k='btask2'),
+                              'client_ref', 'TEST-BULK-REF-2')))$sql$,
+  'batch1');
+
+select pg_temp.expect_rows('edit-batches',
+  'both items were created as ordinary ops.task_edit_requests children, pending',
+  $sql$select count(*) from ops.task_edit_requests
+       where batch_id = (select v from t_meta where k='batch1') and status = 'pending'$sql$, 2);
+
+select pg_temp.expect_rows('edit-batches',
+  'each child snapshotted before_values SERVER-SIDE from the task''s own row, never from the caller',
+  $sql$select count(*) from ops.task_edit_requests r join ops.tasks t on t.id = r.task_id
+       where r.batch_id = (select v from t_meta where k='batch1')
+         and ((r.change_title and r.before_values ->> 'title' = t.title)
+              or (r.change_client_ref and r.before_values ? 'client_ref'))$sql$, 2);
+
+select pg_temp.expect_blocked('edit-batches',
+  'the GM requester cannot decide their own bulk edit suggestion',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('edit-batches',
+  'staff cannot decide a bulk edit suggestion',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_blocked('edit-batches',
+  'a READ-ONLY FOUNDER cannot decide a bulk edit suggestion -- is_founder() admits their '
+  'authority, so the `and not core.is_read_only()` wrapper is the only thing standing '
+  'between ERC/DCA and the locked Monday record',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+select pg_temp.become((select uid from p where k='readonly_admin'));
+select pg_temp.expect_blocked('edit-batches',
+  'a read-only ADMIN cannot decide a bulk edit suggestion either -- the guard stands ahead '
+  'of the admin bypass',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+select pg_temp.become((select uid from p where k='founder_outsider'));
+select pg_temp.expect_blocked('edit-batches',
+  'a FOUNDER who is not an ops member cannot decide a bulk edit suggestion -- SECURITY '
+  'DEFINER bypasses the policy''s is_member(''ops'') clause, so the function asks it itself',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+-- Indivisibility: an approver with real authority still cannot pick one
+-- item off, nor stamp the batch without moving its items.
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('edit-batches',
+  'even a legitimate approver cannot approve ONE ITEM of a bulk suggestion directly',
+  $sql$update ops.task_edit_requests set status = 'approved'
+       where batch_id = (select v from t_meta where k='batch1')
+         and change_title$sql$);
+
+select pg_temp.expect_blocked('edit-batches',
+  'even a legitimate approver cannot mark the BATCH approved directly, which would leave '
+  'its items pending behind a decided batch',
+  $sql$update ops.task_edit_batches set status = 'approved'
+       where id = (select v from t_meta where k='batch1')$sql$);
+
+select pg_temp.expect_rows('edit-batches',
+  'neither refusal changed anything: batch still pending, both items still pending',
+  $sql$select count(*) from ops.task_edit_requests
+       where batch_id = (select v from t_meta where k='batch1') and status = 'pending'
+         and (select status from ops.task_edit_batches
+              where id = (select v from t_meta where k='batch1')) = 'pending'$sql$, 2);
+
+select pg_temp.become((select uid from p where k='founder2'));
+select pg_temp.expect_allowed('edit-batches',
+  'a NON-CLEARING founder CAN approve a bulk edit suggestion -- Chan: "then approve by '
+  'admin or founder" (20260910200000 supersedes the clearing-founder rule)',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+select pg_temp.expect_rows('edit-batches',
+  'the approval applied BOTH items to ops.tasks -- the bulk apply is not a one-item apply',
+  $sql$select count(*) from ops.tasks
+       where (id = (select v from t_meta where k='btask1') and title = 'TEST-btask1 (renamed in bulk)')
+          or (id = (select v from t_meta where k='btask2') and client_ref = 'TEST-BULK-REF-2')$sql$, 2);
+
+select pg_temp.expect_rows('edit-batches',
+  'every child recorded after_values from the value actually applied, and the batch is approved',
+  $sql$select count(*) from ops.task_edit_requests
+       where batch_id = (select v from t_meta where k='batch1')
+         and status = 'approved' and after_values is not null
+         and (select status from ops.task_edit_batches
+              where id = (select v from t_meta where k='batch1')) = 'approved'$sql$, 2);
+
+select pg_temp.expect_blocked('edit-batches',
+  'an already-decided bulk edit suggestion cannot be decided again',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch1'), true, null)$sql$);
+
+-- === batch2: ADMIN decides -- the half of Chan's sentence that the
+--     clearing-founder rule already allowed, asserted explicitly ======
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed_capture('edit-batches',
+  'GM raises a second bulk edit suggestion (fixture for the admin decider)',
+  $sql$select id from ops.create_edit_batch(
+         'reassigning two shipments to the broker who actually filed them',
+         jsonb_build_array(
+           jsonb_build_object('task_id', (select v from t_meta where k='btask3'),
+                              'owner_user_id', (select uid from p where k='broker')),
+           jsonb_build_object('task_id', (select v from t_meta where k='btask4'),
+                              'description', null::text)))$sql$,
+  'batch2');
+
+select pg_temp.become((select uid from p where k='admin1'));
+select pg_temp.expect_allowed('edit-batches',
+  'an ADMIN CAN approve a bulk edit suggestion -- Chan: "approve by admin or founder"',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch2'), true, null)$sql$);
+
+select pg_temp.expect_rows('edit-batches',
+  'the admin approval reassigned the owner AND cleared the description -- a proposed NULL '
+  'is a real, intentional change, not an absence to be skipped',
+  $sql$select count(*) from ops.tasks
+       where (id = (select v from t_meta where k='btask3')
+              and owner_user_id = (select uid from p where k='broker'))
+          or (id = (select v from t_meta where k='btask4') and description is null)$sql$, 2);
+
+-- === batch3: rejection applies nothing ===============================
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed_capture('edit-batches',
+  'GM raises a third bulk edit suggestion (fixture for the rejection path)',
+  $sql$select id from ops.create_edit_batch(
+         'renaming this one to match the consignee spelling',
+         jsonb_build_array(jsonb_build_object('task_id', (select v from t_meta where k='btask5'),
+                                              'title', 'TEST-btask5 (SHOULD NOT LAND)')))$sql$,
+  'batch3');
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('edit-batches',
+  'rejecting a bulk edit suggestion without a written reason is refused',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch3'), false, 'no')$sql$);
+
+select pg_temp.expect_allowed('edit-batches',
+  'the clearing founder CAN reject a bulk edit suggestion with a written reason',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch3'), false,
+       'the consignee spelling in the BL is the one we invoice against')$sql$);
+
+select pg_temp.expect_rows('edit-batches',
+  'a REJECTED batch applied nothing: btask5 still carries its original title',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='btask5') and title = 'TEST-btask5'$sql$, 1);
+
+select pg_temp.expect_rows('edit-batches',
+  'and the rejected child carries no after_values, because nothing was applied',
+  $sql$select count(*) from ops.task_edit_requests
+       where batch_id = (select v from t_meta where k='batch3')
+         and status = 'rejected' and after_values is null$sql$, 1);
+
+-- === batch4: THE ATOMICITY ASSERTION =================================
+--
+-- Two items. Between raising and deciding, one item's task is cancelled
+-- out from under the batch (as the system caller -- the same thing a
+-- real cancellation ladder would do mid-week). The child trigger refuses
+-- to apply a change to a closed task, so the WHOLE decision must unwind,
+-- including the sibling item that would otherwise have applied cleanly.
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed_capture('edit-batches',
+  'GM raises a fourth bulk edit suggestion over two tasks (fixture for atomicity)',
+  $sql$select id from ops.create_edit_batch(
+         'two corrections from this morning''s call with the client',
+         jsonb_build_array(
+           jsonb_build_object('task_id', (select v from t_meta where k='btask6'),
+                              'title', 'TEST-btask6 (MUST NOT LAND ALONE)'),
+           jsonb_build_object('task_id', (select v from t_meta where k='btask7'),
+                              'title', 'TEST-btask7 (doomed sibling)')))$sql$,
+  'batch4');
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+update ops.tasks set status = 'cancelled'
+where id = (select v from t_meta where k='btask7');
+set local role authenticated;
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('edit-batches',
+  'approving a batch whose one item can no longer apply (its task was cancelled underneath '
+  'it) is refused outright',
+  $sql$select ops.decide_edit_batch((select v from t_meta where k='batch4'), true, null)$sql$);
+
+-- The refusal proves the response was correct. These three prove the
+-- side effect was too -- which is the half this project has got wrong
+-- three times (PLAN.md §12.7).
+select pg_temp.expect_rows('edit-batches',
+  'ATOMICITY: the sibling task was NOT half-applied -- btask6 still carries its original title',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='btask6') and title = 'TEST-btask6'$sql$, 1);
+
+select pg_temp.expect_rows('edit-batches',
+  'ATOMICITY: both children are still pending, so no child was left decided behind a failed batch',
+  $sql$select count(*) from ops.task_edit_requests
+       where batch_id = (select v from t_meta where k='batch4') and status = 'pending'$sql$, 2);
+
+select pg_temp.expect_rows('edit-batches',
+  'ATOMICITY: the batch itself is still pending, so it can be fixed and re-decided rather '
+  'than being stranded half-decided',
+  $sql$select count(*) from ops.task_edit_batches
+       where id = (select v from t_meta where k='batch4') and status = 'pending'
+         and decided_by is null and decided_at is null$sql$, 1);
+
+-- === batch5: the requester's own way out =============================
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed_capture('edit-batches',
+  'GM raises a fifth bulk edit suggestion (fixture for withdrawal)',
+  $sql$select id from ops.create_edit_batch(
+         'on second thought this rename is wrong, raising to withdraw it',
+         jsonb_build_array(jsonb_build_object('task_id', (select v from t_meta where k='btask8'),
+                                              'title', 'TEST-btask8 (SHOULD NOT LAND)')))$sql$,
+  'batch5');
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('edit-batches',
+  'somebody else cannot withdraw a GM''s bulk edit suggestion',
+  $sql$select ops.withdraw_edit_batch((select v from t_meta where k='batch5'))$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed('edit-batches',
+  'the REQUESTER can withdraw their own bulk edit suggestion -- refusing per-item decisions '
+  'must not strand a submitted suggestion with no way out',
+  $sql$select ops.withdraw_edit_batch((select v from t_meta where k='batch5'))$sql$);
+
+select pg_temp.expect_rows('edit-batches',
+  'withdrawal applied nothing and moved batch and item together',
+  $sql$select count(*) from ops.tasks t, ops.task_edit_batches b, ops.task_edit_requests r
+       where t.id = (select v from t_meta where k='btask8') and t.title = 'TEST-btask8'
+         and b.id = (select v from t_meta where k='batch5') and b.status = 'withdrawn'
+         and r.batch_id = b.id and r.status = 'withdrawn'$sql$, 1);
+
+-- === Reads: everyone in ops is in the loop; a non-member is not ======
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_rows('edit-batches',
+  'a staff ops member CAN read bulk edit suggestions -- PRD.md §6.1, everyone is in the loop',
+  $sql$select count(*) from ops.task_edit_batches
+       where id in ((select v from t_meta where k='batch1'), (select v from t_meta where k='batch4'))$sql$, 2);
+
+select pg_temp.become((select uid from p where k='other'));
+select pg_temp.expect_rows('edit-batches',
+  'a non-member of ops sees no bulk edit suggestions at all',
+  $sql$select count(*) from ops.task_edit_batches$sql$, 0);
+
+-- === The single-request path is untouched by any of this =============
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed_capture('edit-batches',
+  'a single (batch_id IS NULL) edit request still behaves exactly as before -- raise...',
+  $sql$insert into ops.task_edit_requests (task_id, requested_by, reason, change_title, proposed_title)
+       values ((select v from t_meta where k='btask6'), (select uid from p where k='gm'),
+               'one ordinary single request, no batch involved', true, 'TEST-btask6 (single path)')
+       returning id$sql$,
+  'edit_req_single_after_batches');
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('edit-batches',
+  '...and decide, one row at a time, with no batch function in sight',
+  $sql$update ops.task_edit_requests set status = 'approved'
+       where id = (select v from t_meta where k='edit_req_single_after_batches')$sql$);
+
+select pg_temp.expect_rows('edit-batches',
+  'that single approval applied, so the batch_id column did not change the old path',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='btask6') and title = 'TEST-btask6 (single path)'$sql$, 1);
 
 reset role;
 

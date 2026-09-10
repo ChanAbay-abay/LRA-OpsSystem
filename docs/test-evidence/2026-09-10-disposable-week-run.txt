@@ -1,0 +1,221 @@
+=== disposable week 2099-01-05  ===
+API http://localhost:3099
+
+--- pre-run teardown (so the second run costs what the first did) ---
+  teardown: nothing to remove.
+
+--- baseline snapshot of every downstream read ---
+  audit_logs=72 point_ledger=114
+  non-disposable fingerprint {"weeks":4,"tasks":49,"ledger":114,"blocks":10,"settingsUpdated":1}
+
+--- 1. create the week ---
+  ok   [week creation] week_start is the requested Monday
+  ok   [week creation] week_end is week_start + 6 (generated column)
+  ok   [week creation] a new week starts in planning
+  ok   [week creation] briefing_opened_at is null on a fresh week
+  ok   [week creation] briefing_closed_at is null on a fresh week
+  ok   [week creation] closed_at is null on a fresh week
+  ok   [week creation] rolled_over_at is null on a fresh week
+  ok   [week creation] creating the same week twice returns the same row
+  ok   [week creation] still exactly one row for that week_start
+
+--- 2. recurring generation ---
+  ok   [recurring generation] generate-recurring reports the number of rows it actually inserted
+  ok   [recurring generation] exactly one task per (active template x active member holding that position)
+  ok   [recurring generation] title copied from the template — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] description copied from the template — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] task_type_id copied from the template — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] status is todo — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] catalog_points snapshotted from the task type — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] created_by is the CALLER, not the owner (20260909140000) — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] first_week_id stamped to this week — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] carry_over_count starts at 0 — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] generation never pre-commits a task — broker-demo@ops-demo.invalid / "Daily shipment status update to clients"
+  ok   [recurring generation] title copied from the template — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] description copied from the template — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] task_type_id copied from the template — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] status is todo — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] catalog_points snapshotted from the task type — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] created_by is the CALLER, not the owner (20260909140000) — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] first_week_id stamped to this week — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] carry_over_count starts at 0 — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] generation never pre-commits a task — founder-demo@ops-demo.invalid / "Clear the approval queue"
+  ok   [recurring generation] title copied from the template — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] description copied from the template — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] task_type_id copied from the template — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] status is todo — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] catalog_points snapshotted from the task type — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] created_by is the CALLER, not the owner (20260909140000) — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] first_week_id stamped to this week — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] carry_over_count starts at 0 — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] generation never pre-commits a task — sales-demo@ops-demo.invalid / "Client follow-up round"
+  ok   [recurring generation] title copied from the template — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] description copied from the template — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] task_type_id copied from the template — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] status is todo — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] catalog_points snapshotted from the task type — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] created_by is the CALLER, not the owner (20260909140000) — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] first_week_id stamped to this week — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] carry_over_count starts at 0 — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] generation never pre-commits a task — gm-demo@ops-demo.invalid / "Run the Monday briefing"
+  ok   [recurring generation] generation writes no ledger rows
+  ok   [recurring generation] a retried generation creates nothing
+  ok   [recurring generation] and the task ids are unchanged after the retry
+  ok   [recurring generation] uq_ops_tasks_recurring genuinely refuses a duplicate (owner, week, template)
+
+--- 3. commit tasks to the week ---
+  ok   [commitments] a new task is owned by its creator
+  ok   [commitments] catalog_points is snapshotted at creation, not read live
+  ok   [commitments] first_week_id is stamped at creation
+  ok   [commitments] a new task is not committed
+  ok   [commitments] commit sets is_committed
+  ok   [commitments] commit derives committed_week_id from the task, not the client
+  ok   [commitments] commit derives committed_points from the catalog snapshot
+  ok   [commitments] commit does not move the status
+  ok   [commitments] a commitment writes NO ledger row (it is not a point-bearing transition)
+  ok   [commitments] GET /api/briefing/:weekId puts a committed task in `committed`, not `commitCandidates`
+  ok   [commitments] a week with no predecessor reports an empty scorecard rather than inventing one
+
+--- 4. open the briefing ---
+  ok   [briefing open/close] open stamps briefing_opened_at
+  ok   [briefing open/close] open leaves the week in planning (PRD §3.1 — the week opens when the briefing CLOSES)
+  ok   [briefing open/close] open does not stamp briefing_closed_at
+  ok   [briefing open/close] open does not stamp briefing_closed_by
+  ok   [briefing open/close] open writes no audit row (it is not the privileged act)
+  ok   [briefing open/close] a retried open does not move briefing_opened_at
+  ok   [briefing open/close] commitments still change while the briefing is open but the week is planning
+
+--- 5. close the briefing (the lock moment) ---
+  ok   [briefing open/close] close moves the week planning -> open
+  ok   [briefing open/close] close stamps briefing_closed_at
+  ok   [briefing open/close] close stamps briefing_closed_by with the acting founder
+  ok   [briefing open/close] close preserves the original briefing_opened_at rather than overwriting it
+  ok   [briefing open/close] close writes EXACTLY ONE audit row (§12.7: the settings audit row silently never wrote)
+  ok   [briefing open/close] audit action is ops.briefing.closed
+  ok   [briefing open/close] audit entity_type is ops.week
+  ok   [briefing open/close] audit actor_id is the acting founder
+  ok   [briefing open/close] audit carries the actor email, not just an id
+  ok   [briefing open/close] audit carries the actor authority
+  ok   [briefing open/close] audit new_values records which week was locked
+  ok   [briefing open/close] a retried close does not move briefing_closed_at
+  ok   [briefing open/close] a retried close writes no second audit row
+  ok   [briefing open/close] the commitment lock now refuses the OWNER (this is what closing is FOR)
+  ok   [briefing open/close] the commitment lock refuses OVERSIGHT too, not just staff
+  ok   [briefing open/close] a no-op re-commit on a locked week is allowed and changes nothing (guard 2a keys on a column changing)
+  ok   [briefing open/close] and the refused uncommit changed nothing
+
+--- 6. submit -> verify -> clear ---
+  ok   [submit / verify / clear] in_progress is reached
+  ok   [submit / verify / clear] first_in_progress_at is stamped on the first real move into in_progress (cycle time)
+  ok   [submit / verify / clear] todo -> in_progress writes no ledger row
+  ok   [submit / verify / clear] submit writes exactly one ledger row
+  ok   [submit / verify / clear] submit ledger: state
+  ok   [submit / verify / clear] submit ledger: from_status/to_status
+  ok   [submit / verify / clear] submit ledger: points is 0 (nothing is awarded before clearing)
+  ok   [submit / verify / clear] submit ledger: week_id
+  ok   [submit / verify / clear] submit ledger: user_id is the owner
+  ok   [submit / verify / clear] submit ledger: actor_id is who acted
+  ok   [submit / verify / clear] submit ledger: is_committed snapshotted
+  ok   [submit / verify / clear] submit enqueues one notification per active GM
+  ok   [submit / verify / clear] v_point_balances.pending_with_gm reflects the submission
+  ok   [submit / verify / clear] verify reaches verified
+  xfail[submit / verify / clear] verify stamps gm_id with the verifying GM (trigger-set, never client-set)
+         KNOWN DEFECT, still open — ops.tasks.gm_id/gm_acted_at are never written by anything; the verified branch of ops.enforce_task_transition stamps nothing. Reported 2026-09-10.
+         gm_id=null
+  xfail[submit / verify / clear] verify stamps gm_acted_at
+         KNOWN DEFECT, still open — ops.tasks.gm_id/gm_acted_at are never written by anything; the verified branch of ops.enforce_task_transition stamps nothing. Reported 2026-09-10.
+         gm_acted_at=null
+  ok   [submit / verify / clear] verify does NOT award points
+  ok   [submit / verify / clear] verify writes a second ledger row
+  ok   [submit / verify / clear] verify ledger: state/from/to
+  ok   [submit / verify / clear] verify ledger: actor is the GM
+  ok   [submit / verify / clear] verify ledger: still 0 points
+  ok   [submit / verify / clear] verify enqueues one notification per active founder
+  ok   [submit / verify / clear] the balance moves from pending_with_gm to pending_with_founder
+  ok   [submit / verify / clear] a GM cannot clear a verified task
+  ok   [submit / verify / clear] clear reaches cleared
+  ok   [submit / verify / clear] clear awards points_override ?? catalog_points, computed by the trigger
+  ok   [submit / verify / clear] clear stamps founder_id
+  ok   [submit / verify / clear] clear stamps founder_acted_at
+  ok   [submit / verify / clear] clear stamps cleared_at
+  ok   [submit / verify / clear] clear writes a third ledger row
+  ok   [submit / verify / clear] clear ledger: state/from/to
+  ok   [submit / verify / clear] clear ledger: points equals points_awarded — the ONLY row that carries value
+  ok   [submit / verify / clear] clear ledger: actor is the clearing founder
+  ok   [submit / verify / clear] clear notifies the owner, and only the owner
+  ok   [submit / verify / clear] v_point_balances credits cleared_points and empties both pending buckets
+  ok   [submit / verify / clear] a cleared task is frozen — even the clearing founder cannot re-title it
+  ok   [submit / verify / clear] a cleared task cannot be moved back to verified
+
+--- 7. isolation while the disposable week is live ---
+  ok   [isolation + teardown] the scoreboard reports the real current week, not the disposable one
+  ok   [isolation + teardown] no roster row's `this week` figure points at a disposable week
+  ok   [isolation + teardown] no roster row's `last closed week` is a disposable week
+  ok   [isolation + teardown] no reliability window contains a disposable week (it is closed AND scored, so this is the real test)
+  ok   [isolation + teardown] scoreboard `month` counts only real weeks at or before the current one
+  ok   [isolation + teardown] scoreboard `quarter` counts only real weeks at or before the current one
+  ok   [isolation + teardown] no task_block exists on any disposable task (blocked hours are windowed by created_at, not by week)
+  ok   [isolation + teardown] the week-anchored scoreboard (this week / 4 / 13, reliability, blocked hours) is unchanged while a disposable week is live and scored
+  ok   [isolation + teardown] the reads that are NOT week-anchored do see it: scoreboard `all` plus /points, /queue, /digest, /now — documented, not claimed away
+
+--- 8. close the week ---
+  ok   [week close + rollover] close_week reports the number of tasks it actually carried
+  ok   [week close + rollover] the week is closed
+  ok   [week close + rollover] closed_at is stamped
+  ok   [week close + rollover] closed_by is the acting founder
+  ok   [week close + rollover] rolled_over_at is stamped (the rollover half actually ran)
+  ok   [week close + rollover] close created the next week (2099-01-12) to receive the carry-over
+  ok   [week close + rollover] the next week is created in planning
+  ok   [week close + rollover] close_week returns the id of the week it created
+  ok   [week close + rollover] exactly the unfinished tasks moved to the next week
+  ok   [week close + rollover] carry_over_count incremented for the carried task f8c0be9e
+  ok   [week close + rollover] first_week_id PRESERVED on carry-over f8c0be9e (PRD §3.7)
+  ok   [week close + rollover] carry_over_count incremented for the carried task e5ceee63
+  ok   [week close + rollover] first_week_id PRESERVED on carry-over e5ceee63 (PRD §3.7)
+  ok   [week close + rollover] carry_over_count incremented for the carried task 234529f7
+  ok   [week close + rollover] first_week_id PRESERVED on carry-over 234529f7 (PRD §3.7)
+  ok   [week close + rollover] carry_over_count incremented for the carried task 227537cd
+  ok   [week close + rollover] first_week_id PRESERVED on carry-over 227537cd (PRD §3.7)
+  ok   [week close + rollover] carry_over_count incremented for the carried task 4f79c28f
+  ok   [week close + rollover] first_week_id PRESERVED on carry-over 4f79c28f (PRD §3.7)
+  ok   [week close + rollover] a cleared task does NOT roll over (8720a6d1)
+  ok   [week close + rollover] a carried task keeps the OLD week's commitment record
+  ok   [week close + rollover] a carried task now lives in the NEXT week
+  ok   [week close + rollover] a retried close carries nothing a second time
+  ok   [week close + rollover] a retried close returns the same next week
+  ok   [week close + rollover] a retried close does not re-stamp closed_at
+  ok   [week close + rollover] a retried close does not re-stamp rolled_over_at
+  ok   [week close + rollover] and no task was carried twice
+  ok   [week close + rollover] a closed week refuses an INSERT (20260910170000 part 2)
+  ok   [week close + rollover] ops.close_week writes no audit row of its own (only close_briefing does)
+  ok   [week close + rollover] closing writes no scoring rows: the score is DERIVED from tasks, never stored
+
+--- 10. teardown, then prove nothing downstream moved ---
+  teardown: removed 2 disposable week(s) (2099-01-12, 2099-01-05) and 6 task(s).
+  ok   [isolation + teardown] after teardown, scoreboard is identical to baseline
+  ok   [isolation + teardown] after teardown, points/me:founder is identical to baseline
+  ok   [isolation + teardown] after teardown, points/me:sales is identical to baseline
+  ok   [isolation + teardown] after teardown, points/me:broker is identical to baseline
+  ok   [isolation + teardown] after teardown, ledger is identical to baseline
+  ok   [isolation + teardown] after teardown, queue:gm is identical to baseline
+  ok   [isolation + teardown] after teardown, queue:founder is identical to baseline
+  ok   [isolation + teardown] after teardown, digest is identical to baseline
+  ok   [isolation + teardown] after teardown, now:sales is identical to baseline
+  ok   [isolation + teardown] ops.point_ledger is back at its baseline row count
+  ok   [isolation + teardown] no task this harness created survives teardown
+  ok   [isolation + teardown] core.audit_logs grew by at most one row — the ops.briefing.closed row, which is append-only BY DESIGN and survives teardown
+  ok   [isolation + teardown] no disposable week row is left behind
+
+=== summary ===
+  week creation              9 pass, 0 fail
+  recurring generation       42 pass, 0 fail
+  commitments                11 pass, 0 fail
+  briefing open/close        24 pass, 0 fail
+  submit / verify / clear    35 pass, 0 fail, 2 known-defect
+  isolation + teardown       22 pass, 0 fail
+  week close + rollover      30 pass, 0 fail
+  TOTAL                      173 pass, 0 fail, 0 inconclusive, 2 known-defect
+
+KNOWN DEFECTS still open (found by this harness, reported, not fixed here):
+  x [submit / verify / clear] verify stamps gm_id with the verifying GM (trigger-set, never client-set)
+  x [submit / verify / clear] verify stamps gm_acted_at

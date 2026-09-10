@@ -16,9 +16,26 @@
  * reliability number it has no formula for. Unpriced (`DRAFT`) catalog
  * types render `—`/0 throughout, never a guessed value, so this screen
  * works exactly as well before the founder prices the catalog as after.
+ *
+ * 2026-09-10, Chan: "make sure for the monday briefing one the admin and
+ * founder be able to edit stuff. GM can send a request to edit (should be
+ * done by bulk like an edit feature on google docs), then approve by
+ * admin or founder showing what changed like before and after." That is
+ * the two sections at the bottom of this screen —
+ * `components/briefing/committed-work-section.tsx` (the editable Monday
+ * record: a founder/admin edits inline, a GM builds a batch of
+ * suggestions nothing writes until submitted) and
+ * `components/briefing/pending-batches-section.tsx` (the before -> after
+ * decision surface). The definitions they edit come from
+ * `GET /api/tasks?weekId=…&committed=true`, which is the only read that
+ * returns a task's full definition; `/api/briefing/:id`'s own
+ * `commitCandidates`/`committed` carry titles and points, not
+ * description/type/owner/client-ref, and it is not this lane's endpoint
+ * to widen.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
+import { useSearchParams } from 'react-router-dom';
 import { CheckCircle2, RotateCcw } from 'lucide-react';
 import { PageHeader } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
@@ -28,6 +45,16 @@ import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import type { Actor } from '@/lib/task-permissions';
+import type { DiffResolvers } from '@/lib/task-edit-requests';
+import type { SuggestionResolvers } from '@/lib/edit-suggestions';
+import { CommittedWorkSection } from '@/components/briefing/committed-work-section';
+import { PendingBatchesSection } from '@/components/briefing/pending-batches-section';
+import type {
+  BriefingMember,
+  BriefingTask,
+  BriefingTaskType,
+} from '@/components/briefing/task-definition-row';
 
 interface Week {
   id: string;
@@ -95,8 +122,49 @@ export function BriefingPage() {
   const readOnly = me?.readOnly ?? false;
   const readOnlyReason = 'Your account is read-only.';
 
-  const weekResource = useResource((signal) => api.get<Week | null>('/api/weeks/current', { signal }), []);
+  // `?weekId=` — a READ selector, defaulting to the live current week.
+  //
+  // Why it exists: this screen could only ever show `/api/weeks/current`,
+  // and that is the structural reason the Monday ritual had never been
+  // driven through a browser (PLAN.md §12.9). Opening and closing a
+  // briefing are irreversible, so with no way to point the screen at a
+  // throwaway week the only thing to practise on was the real one — which
+  // is why the most important flow in this system was verified solely by
+  // API-level tests, the exact evidence §12.7 shows to be insufficient.
+  // It also gives a founder the only way to review a PAST briefing.
+  //
+  // Deliberately read-only in scope: `Open`/`Close` below act on
+  // `week.id`, i.e. whatever is actually on screen, so there is no path
+  // where someone closes a different week by editing a URL. The banner
+  // is the other half of that guarantee — a founder must never mistake
+  // another week's briefing for this week's.
+  const [searchParams] = useSearchParams();
+  const requestedWeekId = searchParams.get('weekId');
+  //
+  // `GET /api/weeks/:id` now exists (`routes/weeks.ts`, 2026-09-10) — one
+  // bounded read for the exact row, an honest 404 for an id that is not
+  // there or that RLS hides, and no ceiling on how far back a week can be.
+  //
+  // It replaced a list-scan workaround written when the route genuinely did
+  // not exist yet: `GET /api/weeks?limit=104` and find-by-id. That worked,
+  // but it fetched up to 104 rows to answer a question about one, and it
+  // silently could not see a week older than its own limit — a cap that
+  // would have surfaced as "no such week" for a week that plainly exists.
+  // The route's own shadowing hazard against the literal `/current` is
+  // pinned by a test against the real router
+  // (`apps/api/test/tasks-route.test.ts`), not by reading registration
+  // order, because that is how `/board` and `/:id` nearly collided.
+  const weekResource = useResource<Week | null>(
+    (signal) =>
+      requestedWeekId
+        ? api.get<Week | null>(`/api/weeks/${requestedWeekId}`, { signal })
+        : api.get<Week | null>('/api/weeks/current', { signal }),
+    [requestedWeekId]
+  );
   const week = weekResource.data;
+  // True only when an explicit week was asked for AND it is not the one
+  // `/api/weeks/current` would have returned anyway.
+  const viewingExplicitWeek = Boolean(requestedWeekId) && Boolean(week);
 
   const briefingResource = useResource(
     (signal) => (week ? api.get<BriefingData>(`/api/briefing/${week.id}`, { signal }) : Promise.resolve(null)),
@@ -104,6 +172,62 @@ export function BriefingPage() {
   );
 
   const [confirmingClose, setConfirmingClose] = React.useState(false);
+
+  // The editable Monday record. A separate read from `/api/briefing/:id`
+  // on purpose: that endpoint answers "what does the meeting need to
+  // see", and a task's DEFINITION (description, catalog type, owner,
+  // client reference) is not part of that answer. `GET /api/tasks` is the
+  // read that carries the whole row, and it is already RLS-scoped the
+  // same way.
+  const committedResource = useResource(
+    (signal) =>
+      week
+        ? api.get<BriefingTask[]>(`/api/tasks?weekId=${week.id}&committed=true`, { signal })
+        : Promise.resolve<BriefingTask[]>([]),
+    [week?.id]
+  );
+
+  // The catalog and roster the diff needs to render an id as a name.
+  // Loaded once for the screen rather than per row.
+  const [types, setTypes] = React.useState<BriefingTaskType[]>([]);
+  const [members, setMembers] = React.useState<BriefingMember[]>([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    Promise.all([api.get<BriefingTaskType[]>('/api/catalog'), api.get<BriefingMember[]>('/api/members')])
+      .then(([t, m]) => {
+        if (cancelled) return;
+        setTypes(t);
+        setMembers(m);
+      })
+      .catch(() => {
+        // Non-fatal: without these, an id renders as "Unknown type" /
+        // "Unknown" rather than the screen failing. Never a silent
+        // wrong-looking name.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const actor: Actor | null = me
+    ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder, readOnly: me.readOnly }
+    : null;
+
+  const resolve: DiffResolvers & SuggestionResolvers = React.useMemo(
+    () => ({
+      taskTypeName: (id) => types.find((t) => t.id === id)?.name ?? 'Unknown type',
+      memberName: (id) =>
+        members.find((m) => m.userId === id)?.name ?? members.find((m) => m.userId === id)?.email ?? 'Unknown',
+    }),
+    [types, members]
+  );
+
+  // Keyed off the resource's own data, not off a `?? []` fallback that is
+  // a fresh array on every render.
+  const tasksById = React.useMemo(
+    () => new Map((committedResource.data ?? []).map((t) => [t.id, t])),
+    [committedResource.data]
+  );
 
   async function openTheWeek() {
     try {
@@ -202,12 +326,36 @@ export function BriefingPage() {
         }
         isEmpty={(w) => !w}
       >
-        {(w) =>
-          w && w.state !== 'planning' ? (
-            <div className="mb-4 rounded-lg border border-info-border bg-info-wash px-4 py-3 text-body-sm text-ink-2">
-              This week's briefing is already closed. Commitments are locked; new tasks can still be created and worked mid-week.
-            </div>
-          ) : null
+        {(w) => (
+          <>
+            {/*
+              The other half of the `?weekId=` guarantee. Open and Close are
+              irreversible and they act on whatever week is on screen, so the
+              one real risk of a week selector is a founder acting on a week
+              they think is this one. This says which week they are looking
+              at, in the `--pending` semantic rather than a neutral one,
+              because "not this week" is a state to be careful in — and it
+              offers the way back rather than expecting a URL edit.
+            */}
+            {viewingExplicitWeek && w ? (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-pending-border bg-pending-wash px-4 py-3">
+                <p className="text-body-sm text-ink-2">
+                  You are viewing a <strong className="font-semibold">specific week</strong>, not necessarily the
+                  current one — W{weekNumber(w.week_start)}, {w.week_start} – {w.week_end}. Opening or closing a
+                  briefing here acts on <em>this</em> week.
+                </p>
+                <a href="/briefing" className="shrink-0 text-label text-brand-700 underline">
+                  Back to the current week
+                </a>
+              </div>
+            ) : null}
+            {w && w.state !== 'planning' ? (
+              <div className="mb-4 rounded-lg border border-info-border bg-info-wash px-4 py-3 text-body-sm text-ink-2">
+                This week's briefing is already closed. Commitments are locked; new tasks can still be created and worked mid-week.
+              </div>
+            ) : null}
+          </>
+        )
         }
       </ResourceView>
 
@@ -236,14 +384,71 @@ export function BriefingPage() {
         </ResourceView>
       ) : null}
 
+      {/*
+        The edit surfaces sit OUTSIDE the briefing payload's ResourceView
+        on purpose: they read a different endpoint, and a failure of the
+        standup payload must not take the record and its pending edit
+        decisions down with it (DESIGN.md §8 — never a full-page error for
+        a partial failure).
+      */}
+      {week ? (
+        <div className="mt-8 flex flex-col gap-8">
+          <ResourceView resource={committedResource} skeleton={<SkeletonRows rows={4} height={64} />}>
+            {(tasks) => (
+              <CommittedWorkSection
+                weekId={week.id}
+                weekState={week.state}
+                actor={actor}
+                tasks={tasks ?? []}
+                types={types}
+                members={members}
+                resolve={resolve}
+                onChanged={() => {
+                  committedResource.reload();
+                  briefingResource.reload();
+                }}
+              />
+            )}
+          </ResourceView>
+
+          {/*
+            Any ops member may READ a pending batch, but for staff this
+            whole surface is something they can neither raise nor decide,
+            so it is absent rather than rendered inert — the same rule the
+            commit controls above follow. A GM sees it because it is how
+            they find out what happened to what they sent.
+          */}
+          {isOversight ? (
+            <PendingBatchesSection
+              actor={actor}
+              tasksById={tasksById}
+              resolve={resolve}
+              onDecided={() => {
+                committedResource.reload();
+                briefingResource.reload();
+              }}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
       {confirmingClose ? (
         <Dialog open onOpenChange={(v) => !v && setConfirmingClose(false)}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Close the briefing?</DialogTitle>
+              {/*
+                The week is NAMED in the title, because `?weekId=` means
+                the week on screen is no longer necessarily this one and
+                this action is irreversible. The write already targets
+                `week.id` — what was missing was the reader being told
+                which week that is at the moment they confirm.
+              */}
+              <DialogTitle>
+                Close the briefing for {week ? `W${weekNumber(week.week_start)} · ${week.week_start} – ${week.week_end}` : 'this week'}?
+              </DialogTitle>
             </DialogHeader>
             <p className="text-body-sm text-ink-2">
-              This locks every commitment for this week. It cannot be undone from this screen — reopening requires the
+              This locks every commitment for that week. It cannot be undone from this screen — reopening requires the
               founder. Tasks can still be created and worked mid-week; they just won't count as commitments.
             </p>
             <DialogFooter>

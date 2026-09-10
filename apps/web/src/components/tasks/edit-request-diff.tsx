@@ -9,11 +9,22 @@
  * prevent"). `actions` is the only thing that differs between call sites;
  * the diff itself, the status, and the reason are read identically by
  * both, on purpose — a requester should see exactly what the approver saw.
+ *
+ * 2026-09-10, bulk edits: `EditBatchCard` at the bottom of this file is
+ * the same idea one level up — a whole batch of proposed changes decided
+ * as one act (Chan: "should be done by bulk like an edit feature on
+ * google docs, then approve by admin or founder showing what changed like
+ * before and after"). It renders through `EditRequestDiffList` too, and so
+ * does a GM's not-yet-submitted draft on the briefing screen
+ * (`lib/edit-suggestions.ts`'s `buildSuggestionDiffs` emits the same
+ * `FieldDiff[]`). Three surfaces, one before/after renderer — extending
+ * this file rather than writing a second one is the whole point.
  */
 import * as React from 'react';
-import { ArrowRight } from 'lucide-react';
+import { AlertTriangle, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { EditRequestStatus, FieldDiff, TaskEditRequest } from '@/lib/task-edit-requests';
+import type { TaskEditBatch } from '@/lib/edit-suggestions';
 
 const STATUS_TONE: Record<EditRequestStatus, string> = {
   pending: 'border-pending-border bg-pending-wash text-pending',
@@ -112,6 +123,119 @@ export function EditRequestCard({
         </p>
       ) : null}
 
+      {actions}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Bulk: a whole batch of proposed changes, decided as one thing
+// ---------------------------------------------------------------------
+
+/**
+ * One task's worth of a batch, prepared by the caller. The rows are
+ * computed outside this component (routes/briefing.tsx owns the catalog
+ * and roster lookups the diff needs) so this file stays a renderer —
+ * exactly why `EditRequestCard` above takes `diffs` rather than a
+ * request and a pile of resolvers.
+ */
+export interface BatchDiffRow {
+  requestId: string;
+  taskTitle: React.ReactNode;
+  diffs: FieldDiff[];
+  /**
+   * Why this row can no longer be applied (its task was cleared or
+   * cancelled underneath the batch, or has left the week). Rendered, never
+   * hidden: an approver deciding a batch has to know one of its items is
+   * dead, because `ops.decide_edit_batch` is all-or-nothing and will
+   * refuse the lot.
+   */
+  blockedReason?: string | null;
+  /** Fields whose current value moved since the batch was raised. */
+  staleNote?: string | null;
+}
+
+/**
+ * Chan: "then approve by admin or founder showing what changed like
+ * before and after". A batch is many tasks and many fields decided in
+ * one act, so it renders as one card carrying the provenance (who asked,
+ * when, and their one reason) over a before -> after list per task —
+ * reusing `EditRequestDiffList`, the same renderer a single request and a
+ * GM's unsubmitted draft both go through. There is exactly one
+ * before/after renderer in this app and this is it.
+ */
+export function EditBatchCard({
+  batch,
+  rows,
+  actions,
+  note,
+}: {
+  batch: TaskEditBatch;
+  rows: BatchDiffRow[];
+  actions?: React.ReactNode;
+  /** A refusal sentence for someone who may read this batch but not decide it. */
+  note?: React.ReactNode;
+}) {
+  const fieldCount = rows.reduce((n, r) => n + r.diffs.length, 0);
+  return (
+    <div className="flex flex-col gap-3 border-b border-hairline px-4 py-4 last:border-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-body font-medium text-ink">
+            {fieldCount} {fieldCount === 1 ? 'change' : 'changes'} across {rows.length}{' '}
+            {rows.length === 1 ? 'task' : 'tasks'}
+          </span>
+          <EditRequestStatusChip status={batch.status} />
+        </div>
+        <span className="shrink-0 text-body-sm text-ink-3">
+          {batch.requestedByName ?? 'unknown'} ·{' '}
+          {batch.requested_at ? new Date(batch.requested_at).toLocaleString() : 'unknown time'}
+        </span>
+      </div>
+
+      <p className="max-w-prose text-body text-ink-2">
+        <span className="text-eyebrow text-ink-3">Reason </span>
+        {batch.reason}
+      </p>
+
+      {rows.length === 0 ? (
+        // A batch with nothing in it is not an empty card. Lane A refuses
+        // to create one; if one ever renders, say so rather than offering
+        // an Approve button over blank space.
+        <p className="rounded-lg border border-danger-border bg-danger-wash px-3 py-2 text-body text-danger">
+          This batch carries no readable changes. Don't decide it — tell whoever raised it.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {rows.map((row) => (
+            <div key={row.requestId} className="rounded-lg border border-hairline bg-surface-2 p-3">
+              <p className="mb-2 min-w-0 truncate text-body font-medium text-ink">{row.taskTitle}</p>
+              <EditRequestDiffList diffs={row.diffs} />
+              {row.blockedReason ? (
+                <p className="mt-2 flex items-start gap-1.5 text-body-sm text-danger">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  {row.blockedReason}
+                </p>
+              ) : null}
+              {row.staleNote ? (
+                <p className="mt-2 flex items-start gap-1.5 text-body-sm text-pending">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  {row.staleNote}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {batch.status !== 'pending' && batch.decision_reason ? (
+        <p className="text-body text-ink-2">
+          <span className="text-eyebrow text-ink-3">Decision reason </span>
+          {batch.decision_reason}
+        </p>
+      ) : null}
+
+      {note}
       {actions}
     </div>
   );

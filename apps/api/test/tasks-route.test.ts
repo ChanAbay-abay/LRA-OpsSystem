@@ -82,3 +82,45 @@ describe('/api/tasks route resolution', () => {
     await control.close();
   });
 });
+
+/**
+ * The identical hazard on `/api/weeks`, added for the same reason.
+ *
+ * `GET /api/weeks/:id` (2026-09-10, so `/briefing?weekId=…` can point the
+ * Monday screen at a week that is not the current one) sits alongside the
+ * literal `GET /api/weeks/current`. If the parametric route ever won,
+ * `/current` would resolve with `{ id: 'current' }`, the uuid guard would
+ * answer 404, and the briefing screen would report "no such week" on the
+ * one week it is most often asked for — a failure that reads as a data
+ * problem, not a routing one.
+ */
+describe('/api/weeks route resolution', () => {
+  test('GET /api/weeks/current still resolves to the literal route, not to /:id', async () => {
+    const app = buildServer();
+    await app.ready();
+    const match = app.findRoute({ method: 'GET', url: '/api/weeks/current' });
+    await app.close();
+    assert.ok(match, 'GET /api/weeks/current did not resolve to any route at all');
+    // Spread first: `params` comes back with a null prototype, which
+    // `deepEqual` treats as unequal to a plain `{}` even when both are
+    // empty. The tasks assertions above already do this; mine did not, and
+    // the resulting red was my test being wrong rather than the router.
+    assert.deepEqual(
+      { ...match.params },
+      {},
+      'GET /api/weeks/current matched the parametric /:id route — the briefing screen would 404 on the current week'
+    );
+  });
+
+  test('GET /api/weeks/:id resolves parametrically for a real id', async () => {
+    const app = buildServer();
+    await app.ready();
+    const match = app.findRoute({
+      method: 'GET',
+      url: '/api/weeks/0e6a1c60-6a1f-4c5a-9a0f-2f6b1d3c4e5f',
+    });
+    await app.close();
+    assert.ok(match, 'GET /api/weeks/:id did not resolve');
+    assert.equal(match.params.id, '0e6a1c60-6a1f-4c5a-9a0f-2f6b1d3c4e5f');
+  });
+});

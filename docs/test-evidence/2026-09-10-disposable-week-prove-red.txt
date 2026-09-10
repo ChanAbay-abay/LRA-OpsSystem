@@ -1,0 +1,208 @@
+=== disposable week 2099-01-05 (RED CONTROL — transitions skipped on purpose) ===
+API http://localhost:3099
+
+--- pre-run teardown (so the second run costs what the first did) ---
+  teardown: nothing to remove.
+
+--- baseline snapshot of every downstream read ---
+  audit_logs=70 point_ledger=114
+  non-disposable fingerprint {"weeks":4,"tasks":49,"ledger":114,"blocks":10,"settingsUpdated":1}
+
+--- 1. create the week ---
+  ok   [week creation] week_start is the requested Monday
+  ok   [week creation] week_end is week_start + 6 (generated column)
+  ok   [week creation] a new week starts in planning
+  ok   [week creation] briefing_opened_at is null on a fresh week
+  ok   [week creation] briefing_closed_at is null on a fresh week
+  ok   [week creation] closed_at is null on a fresh week
+  ok   [week creation] rolled_over_at is null on a fresh week
+  ok   [week creation] creating the same week twice returns the same row
+  ok   [week creation] still exactly one row for that week_start
+
+--- 2. recurring generation ---
+  FAIL [recurring generation] generate-recurring reports the number of rows it actually inserted
+         expected 4
+         actual   null
+  FAIL [recurring generation] exactly one task per (active template x active member holding that position)
+         differing paths (expected -> actual):
+         <root>.length: 4 -> 0
+         0: "1a196c47-1dd8-4c3e-93c4-f984bfcc364a|737ac487-fe31-4a08-9fd3-03e8649fcfa8" -> undefined
+         1: "46f462f2-ed6d-4644-8877-1ebc319073bb|a0c6c01d-0d93-4975-91d9-eee2b502ef64" -> undefined
+         2: "966d6ce4-8650-4051-a6c5-66781ffb3851|239d83e2-3fe6-4c33-a7f7-38836b930675" -> undefined
+         3: "eb1796fc-0c63-4efb-9240-d771f06e6626|08acd2eb-336b-4d28-a918-b862acce9b06" -> undefined
+         MISSING: broker-demo@ops-demo.invalid / "Daily shipment status update to clients" (read_only=false); sales-demo@ops-demo.invalid / "Client follow-up round" (read_only=false); gm-demo@ops-demo.invalid / "Run the Monday briefing" (read_only=false); founder-demo@ops-demo.invalid / "Clear the approval queue" (read_only=false)
+         UNEXPECTED: none
+  ok   [recurring generation] generation writes no ledger rows
+
+--- 3. commit tasks to the week ---
+  ok   [commitments] a new task is owned by its creator
+  ok   [commitments] catalog_points is snapshotted at creation, not read live
+  ok   [commitments] first_week_id is stamped at creation
+  ok   [commitments] a new task is not committed
+  ok   [commitments] commit sets is_committed
+  FAIL [commitments] commit derives committed_week_id from the task, not the client
+         expected "7483c7b0-ab6b-4910-9d31-ea9afccc1769"
+         actual   null
+  FAIL [commitments] commit derives committed_points from the catalog snapshot
+         expected 3
+         actual   null
+  ok   [commitments] commit does not move the status
+  ok   [commitments] a commitment writes NO ledger row (it is not a point-bearing transition)
+  FAIL [commitments] GET /api/briefing/:weekId puts a committed task in `committed`, not `commitCandidates`
+         committed=[]
+         candidates=["210fdd8f-d0e0-4fe9-a689-a2686273e648","c8c809f5-ec1d-42bc-be05-079a4d11bedf"]
+  ok   [commitments] a week with no predecessor reports an empty scorecard rather than inventing one
+
+--- 4. open the briefing ---
+  FAIL [briefing open/close] open stamps briefing_opened_at
+         expected a value, got null
+  ok   [briefing open/close] open leaves the week in planning (PRD §3.1 — the week opens when the briefing CLOSES)
+  ok   [briefing open/close] open does not stamp briefing_closed_at
+  ok   [briefing open/close] open does not stamp briefing_closed_by
+  ok   [briefing open/close] open writes no audit row (it is not the privileged act)
+
+--- 5. close the briefing (the lock moment) ---
+  FAIL [briefing open/close] close moves the week planning -> open
+         expected "open"
+         actual   "planning"
+  FAIL [briefing open/close] close stamps briefing_closed_at
+         expected a value, got null
+  FAIL [briefing open/close] close stamps briefing_closed_by with the acting founder
+         expected "966d6ce4-8650-4051-a6c5-66781ffb3851"
+         actual   null
+  ok   [briefing open/close] close preserves the original briefing_opened_at rather than overwriting it
+  FAIL [briefing open/close] close writes EXACTLY ONE audit row (§12.7: the settings audit row silently never wrote)
+         expected 1
+         actual   0
+
+--- 6. submit -> verify -> clear ---
+  FAIL [submit / verify / clear] in_progress is reached
+         expected "in_progress"
+         actual   "todo"
+  FAIL [submit / verify / clear] first_in_progress_at is stamped on the first real move into in_progress (cycle time)
+         expected a value, got null
+  ok   [submit / verify / clear] todo -> in_progress writes no ledger row
+  FAIL [submit / verify / clear] submit writes exactly one ledger row
+         expected 1
+         actual   0
+  FAIL [submit / verify / clear] submit enqueues one notification per active GM
+         expected 1
+         actual   0
+  FAIL [submit / verify / clear] v_point_balances.pending_with_gm reflects the submission
+         expected 3
+         actual   0
+  FAIL [submit / verify / clear] verify reaches verified
+         expected "verified"
+         actual   "todo"
+  ok   [submit / verify / clear] no verify happened, so gm_id is null
+  ok   [submit / verify / clear] no verify happened, so gm_acted_at is null
+  ok   [submit / verify / clear] verify does NOT award points
+  FAIL [submit / verify / clear] verify writes a second ledger row
+         expected 2
+         actual   0
+  FAIL [submit / verify / clear] verify enqueues one notification per active founder
+         expected 3
+         actual   0
+  FAIL [submit / verify / clear] the balance moves from pending_with_gm to pending_with_founder
+         expected [0,3]
+         actual   [0,0]
+  FAIL [submit / verify / clear] clear reaches cleared
+         expected "cleared"
+         actual   "todo"
+  FAIL [submit / verify / clear] clear awards points_override ?? catalog_points, computed by the trigger
+         expected 3
+         actual   null
+  FAIL [submit / verify / clear] clear stamps founder_id
+         expected "966d6ce4-8650-4051-a6c5-66781ffb3851"
+         actual   null
+  FAIL [submit / verify / clear] clear stamps founder_acted_at
+         expected a value, got null
+  FAIL [submit / verify / clear] clear stamps cleared_at
+         expected a value, got null
+  FAIL [submit / verify / clear] clear writes a third ledger row
+         expected 3
+         actual   0
+  FAIL [submit / verify / clear] clear notifies the owner, and only the owner
+         expected ["1a196c47-1dd8-4c3e-93c4-f984bfcc364a"]
+         actual   []
+  FAIL [submit / verify / clear] v_point_balances credits cleared_points and empties both pending buckets
+         expected [3,0,0]
+         actual   [0,0,0]
+
+--- 7. isolation while the disposable week is live ---
+  ok   [isolation + teardown] the scoreboard reports the real current week, not the disposable one
+  ok   [isolation + teardown] no roster row's `this week` figure points at a disposable week
+  ok   [isolation + teardown] no roster row's `last closed week` is a disposable week
+  ok   [isolation + teardown] no reliability window contains a disposable week (it is closed AND scored, so this is the real test)
+  ok   [isolation + teardown] scoreboard `month` counts only real weeks at or before the current one
+  ok   [isolation + teardown] scoreboard `quarter` counts only real weeks at or before the current one
+  ok   [isolation + teardown] no task_block exists on any disposable task (blocked hours are windowed by created_at, not by week)
+  ok   [isolation + teardown] the week-anchored scoreboard (this week / 4 / 13, reliability, blocked hours) is unchanged while a disposable week is live and scored
+  ok   [isolation + teardown] the reads that are NOT week-anchored do see it: scoreboard `all` plus /points, /queue, /digest, /now — documented, not claimed away
+
+--- 8. close the week ---
+  FAIL [week close + rollover] close_week reports the number of tasks it actually carried
+         expected 2
+         actual   null
+  FAIL [week close + rollover] the week is closed
+         expected "closed"
+         actual   "planning"
+  FAIL [week close + rollover] closed_at is stamped
+         expected a value, got null
+  FAIL [week close + rollover] closed_by is the acting founder
+         expected "966d6ce4-8650-4051-a6c5-66781ffb3851"
+         actual   null
+  FAIL [week close + rollover] rolled_over_at is stamped (the rollover half actually ran)
+         expected a value, got null
+  FAIL [week close + rollover] close created the next week (2099-01-12) to receive the carry-over
+         expected a value, got null
+  FAIL [week close + rollover] exactly the unfinished tasks moved to the next week
+         expected ["210fdd8f-d0e0-4fe9-a689-a2686273e648","c8c809f5-ec1d-42bc-be05-079a4d11bedf"]
+         actual   []
+  FAIL [week close + rollover] a carried task keeps the OLD week's commitment record
+         expected "7483c7b0-ab6b-4910-9d31-ea9afccc1769"
+         actual   null
+  FAIL [week close + rollover] a carried task now lives in the NEXT week
+         week_id=7483c7b0-ab6b-4910-9d31-ea9afccc1769, disposable week=7483c7b0-ab6b-4910-9d31-ea9afccc1769
+  FAIL [week close + rollover] ops.close_week writes no audit row of its own (only close_briefing does)
+         expected ["ops.briefing.closed"]
+         actual   []
+  FAIL [week close + rollover] closing writes no scoring rows: the score is DERIVED from tasks, never stored
+         expected 3
+         actual   0
+
+--- 10. teardown, then prove nothing downstream moved ---
+  teardown: removed 1 disposable week(s) (2099-01-05) and 2 task(s).
+  ok   [isolation + teardown] after teardown, scoreboard is identical to baseline
+  ok   [isolation + teardown] after teardown, points/me:founder is identical to baseline
+  ok   [isolation + teardown] after teardown, points/me:sales is identical to baseline
+  ok   [isolation + teardown] after teardown, points/me:broker is identical to baseline
+  ok   [isolation + teardown] after teardown, ledger is identical to baseline
+  ok   [isolation + teardown] after teardown, queue:gm is identical to baseline
+  ok   [isolation + teardown] after teardown, queue:founder is identical to baseline
+  ok   [isolation + teardown] after teardown, digest is identical to baseline
+  ok   [isolation + teardown] after teardown, now:sales is identical to baseline
+  ok   [isolation + teardown] ops.point_ledger is back at its baseline row count
+  ok   [isolation + teardown] no task this harness created survives teardown
+  ok   [isolation + teardown] core.audit_logs grew by at most one row — the ops.briefing.closed row, which is append-only BY DESIGN and survives teardown
+  ok   [isolation + teardown] no disposable week row is left behind
+
+=== summary ===
+  week creation              9 pass, 0 fail
+  recurring generation       1 pass, 2 fail
+  commitments                8 pass, 3 fail
+  briefing open/close        5 pass, 5 fail
+  submit / verify / clear    4 pass, 17 fail
+  isolation + teardown       22 pass, 0 fail
+  week close + rollover      0 pass, 11 fail
+  TOTAL                      49 pass, 38 fail, 0 inconclusive, 0 known-defect
+
+=== RED CONTROL ===
+  Every transition was skipped, so every side-effect assertion MUST fail.
+  ok   recurring generation       2 of 3 assertions went red
+  ok   briefing open/close        5 of 10 assertions went red
+  ok   submit / verify / clear    17 of 21 assertions went red
+  ok   week close + rollover      11 of 11 assertions went red
+  ok   commitments                3 of 11 assertions went red
+
+  All side-effect groups can go red. The green run above is therefore meaningful.

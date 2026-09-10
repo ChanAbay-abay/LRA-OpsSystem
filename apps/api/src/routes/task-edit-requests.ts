@@ -5,10 +5,23 @@
  * be set and not editable by the staff. Only admin and founder. GM can
  * flag for edits with the founder(LRA) or admin(me) approving the
  * edits." `20260910140000_ops_task_edit_requests.sql` is the real
- * enforcement (a GM/founder/admin-only INSERT guard, a clearing-founder-
- * only, no-self-approval UPDATE guard that applies the change atomically
- * on approval); every guard here is convenience only — a nicer 403/400
- * before the round trip, never the actual gate. All writes run on
+ * enforcement (a GM/founder/admin-only INSERT guard, and a
+ * no-self-approval UPDATE guard that applies the change atomically on
+ * approval); every guard here is convenience only — a nicer 403/400
+ * before the round trip, never the actual gate.
+ *
+ * WHO MAY DECIDE ONE CHANGED ON 2026-09-10, and this comment is the only
+ * thing in this file that changed with it. It was the CLEARING founder
+ * (`core.is_clearing_founder()`). Chan, briefing the bulk-suggestion
+ * work: "then approve by admin or founder" — no clearing qualifier — so
+ * `20260910200000_ops_task_edit_batches.sql` widened the decider on both
+ * paths to `core.is_founder() and not core.is_read_only()`: any founder
+ * or admin, and never a read-only founder (ERC/DCA hold `founder`
+ * authority, so once the predicate stopped being
+ * `is_clearing_founder()` the read-only clause had to be written down
+ * rather than inherited). No code here needed changing, because this
+ * route has always deferred the decision to the database — which is the
+ * argument for having done it that way. All writes run on
  * `userClient` so the database's own triggers are what decide, exactly
  * like `routes/tasks.ts`.
  */
@@ -118,9 +131,13 @@ export default async function taskEditRequestsRoutes(app: FastifyInstance) {
     };
   });
 
-  // The clearing founder (or admin) only — the DB trigger is the real
-  // gate; this 403 just avoids a round trip for an obviously wrong
-  // caller (staff, or a GM trying to decide their own request).
+  // A founder or admin only, and never a read-only one (20260910200000
+  // — see the header; this was the clearing founder until 2026-09-10).
+  // The DB trigger is the real gate; this 403 just avoids a round trip
+  // for an obviously wrong caller (staff, or a GM trying to decide their
+  // own request). Deliberately LOOSER than the real rule rather than a
+  // second copy of it: `requireOversight()` admits GM, whom the database
+  // then refuses. A tightened mirror here is the thing that drifts.
   app.post('/:id/approve', { onRequest: requireOversight() }, async (req) => {
     const { id } = req.params as { id: string };
     const db = userClient(req.accessToken);

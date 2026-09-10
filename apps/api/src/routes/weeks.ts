@@ -35,6 +35,34 @@ export default async function weeksRoutes(app: FastifyInstance) {
     return { data };
   });
 
+  // One week by id, for `/briefing?weekId=…`.
+  //
+  // Registered AFTER the literal `/current` above, deliberately: Fastify
+  // matches a static segment before a parametric one regardless of
+  // registration order, but relying on that silently is how `/board` and
+  // `/:id` collided in the tasks router (apps/api/test/tasks-route.test.ts
+  // pins that one against the real router rather than by inspection). The
+  // same test exists for this pair, for the same reason.
+  //
+  // A non-uuid id is a 404 rather than a 500: PostgREST answers `22P02`
+  // for a malformed uuid and `lib/pg-errors.ts` deliberately leaves that
+  // code unmapped, so it would otherwise surface as an opaque server
+  // error for what is really "no such week".
+  app.get('/:id', async (req) => {
+    const { id } = req.params as { id: string };
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new ApiError(404, 'no such week', 'NOT_FOUND');
+    }
+    const db = userClient(req.accessToken);
+    const { data, error } = await db.schema('ops').from('weeks').select('*').eq('id', id).maybeSingle();
+    if (error) throw error;
+    // `maybeSingle` gives null for a week RLS hides as well as one that
+    // does not exist. From the caller's side those are the same answer,
+    // and saying which would leak the existence of a row they may not see.
+    if (!data) throw new ApiError(404, 'no such week', 'NOT_FOUND');
+    return { data };
+  });
+
   app.get('/', async (req) => {
     const q = req.query as { limit?: string };
     const limit = q.limit ? Number(q.limit) : 8;
