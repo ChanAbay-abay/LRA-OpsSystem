@@ -235,10 +235,44 @@
  * just height.
  */
 @media (pointer: coarse) {
+  /*
+    DESIGN.md §16.2's 44px touch target.
+
+    `min-width` used to be scoped to `.icon-only` — a class that appears
+    ZERO times in this codebase, so that half of the rule matched nothing
+    and was dead from the day it was written. The visible result on a
+    phone was that every icon button got the height and none of the
+    width: the board's flag and overflow controls rendered 16px wide by
+    44px tall, and the "What is this screen for?" button — the exact
+    affordance meant to stop people asking Chan how the app works — was
+    20px wide. Measured, not guessed: with these declarations applied
+    unconditionally, 18 of /board's 72 interactive elements were still
+    under the threshold.
+
+    `min-width` is therefore general now. It cannot stretch a text button
+    (those are already wider), and it only bites on the icon-sized ones
+    it is meant for. `.icon-only` is kept as a no-op alias so any existing
+    or future use keeps working.
+
+    Deliberately NOT included: `[role='gridcell']`. The activity heatmap's
+    cells are gridcells, not buttons, and are sized by their own
+    `(pointer: coarse)` bump (12px -> 13px, §19.2) — matching them here
+    would blow the grid apart on exactly the devices this rule exists to
+    serve. Checked before widening rather than after.
+
+    Also deliberately NOT included: a bare `a[href]`. Stretching every
+    inline link inside a paragraph to 44px would wreck running text. Links
+    that are really controls opt in with `.tap`; `board.tsx`'s "Decide in
+    Approvals" still needs it (noted, not fixed here — that file is
+    another lane's).
+  */
   button, [role='button'], [role='tab'], a.tap, summary {
     min-height: 44px;
-  }
-  button.icon-only, [role='button'].icon-only {
     min-width: 44px;
+  }
+  /* Form controls were never covered at all — the board's search input
+     is 34px tall, which is under the threshold on every phone. */
+  input:not([type='checkbox']):not([type='radio']), select, textarea {
+    min-height: 44px;
   }
 }

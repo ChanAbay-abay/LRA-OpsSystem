@@ -1470,7 +1470,11 @@ export function BoardPage() {
                 <span className="truncate">
                   {t.title} <span className="text-ink-3">— {t.ownerName ?? 'unknown'}</span>
                 </span>
-                <a href="/queue" className="shrink-0 text-label text-brand-700 underline">
+                {/* `tap` is the opt-in that gives this a 44px touch target under
+                    `(pointer: coarse)` — a bare `a[href]` is deliberately not
+                    covered, because stretching every inline link inside running
+                    text would wreck it. This one is a control, not prose. */}
+                <a href="/queue" className="tap inline-flex shrink-0 items-center text-label text-brand-700 underline">
                   Decide in Approvals
                 </a>
               </li>
