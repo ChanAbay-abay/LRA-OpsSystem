@@ -12,6 +12,7 @@ import { Toaster } from 'sonner';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppShell } from '@/components/layout/app-shell';
 import { SkeletonRows, UnreachablePanel } from '@/components/ui/resource-state';
+import { routeGate } from '@/lib/route-gate';
 import { LoginPage } from '@/routes/login';
 import { SetPasswordPage } from '@/routes/set-password';
 import { NowPage } from '@/routes/now';
@@ -97,41 +98,40 @@ function ProtectedRoute({
 }) {
   const { session, me, loading, meError, retryMe } = useAuth();
 
-  if (loading) return <ShellSkeleton />;
-  if (!session) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  }
-  // `me` is still in flight for a beat after the session settles; the
-  // shell skeleton is the honest answer, not a redirect on a role we
-  // have not read yet.
-  //
-  // But "in flight" and "never arriving" are different states, and this
-  // gate used to treat them as one. With the API down, `loading` goes
-  // false and `me` stays null, so every role-gated route sat on the
-  // shell skeleton indefinitely — reproduced past 20s on /queue and
-  // /digest, while every ungated route showed a proper Retry panel.
-  // That is the same "infinite loading must tell the visitor" defect
-  // Chan reported once already, resurfacing on the two routes whose
-  // gate reads `me` rather than the route's own resource.
-  if (meError) {
-    return (
-      <AppShell>
-        <UnreachablePanel message={meError} onRetry={retryMe} />
-      </AppShell>
-    );
-  }
-  if ((requireAdmin || requireOversight || requireFounder) && !me) return <ShellSkeleton />;
-  if (requireAdmin && me?.authority !== 'admin') {
-    return <Navigate to="/" replace />;
-  }
-  if (requireOversight && !['gm', 'founder', 'admin'].includes(me?.authority ?? '')) {
-    return <Navigate to="/" replace />;
-  }
-  if (requireFounder && !['founder', 'admin'].includes(me?.authority ?? '')) {
-    return <Navigate to="/" replace />;
-  }
+  // The decision lives in `lib/route-gate.ts` as a pure function, so it
+  // can be tested. This gate has now been the site of two different
+  // defects — a founder locked out of /admin/settings by a rule stricter
+  // than the server's, and /queue and /digest hanging on the skeleton
+  // forever because "in flight" and "never arriving" were one state —
+  // and neither is reachable from a component that reads a context and
+  // returns JSX, because there is nothing to call. This component now
+  // only renders what it is told.
+  const decision = routeGate(
+    {
+      loading,
+      hasSession: Boolean(session),
+      authority: me?.authority ?? null,
+      meError,
+    },
+    { requireAdmin, requireOversight, requireFounder }
+  );
 
-  return <AppShell>{children}</AppShell>;
+  switch (decision.kind) {
+    case 'skeleton':
+      return <ShellSkeleton />;
+    case 'login':
+      return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+    case 'home':
+      return <Navigate to="/" replace />;
+    case 'error':
+      return (
+        <AppShell>
+          <UnreachablePanel message={decision.message} onRetry={retryMe} />
+        </AppShell>
+      );
+    case 'render':
+      return <AppShell>{children}</AppShell>;
+  }
 }
 
 function AppRoutes() {
