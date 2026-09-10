@@ -14,13 +14,17 @@
  * own destructive-styled decision buttons.
  *
  * The "Clear" button and both cancellation-decision buttons are gated on
- * `me.isClearingFounder`, not `authority === 'founder'`. Multiple people
- * can hold `founder` authority (PLAN.md §0.4), but exactly one of them is
- * the seated clearing founder whose approval the database's own trigger
- * will actually accept (`core.is_clearing_founder()`) — a founder who
- * isn't that seat would otherwise see a live-looking button that always
- * 403s. GM's "Verify" is unaffected: verifying is any GM's job, not the
- * clearing seat's.
+ * `me.isClearingFounder` (or admin), not `authority === 'founder'`.
+ * Multiple people can hold `founder` authority (PLAN.md §0.4), but
+ * exactly one of them is the seated clearing founder whose approval the
+ * database's own trigger will actually accept
+ * (`core.is_clearing_founder()`) — a founder who isn't that seat would
+ * otherwise see a live-looking button that always 403s. Admin is in
+ * because the transition trigger bypasses unconditionally on
+ * `core.is_admin()` before it ever reaches the clearing-seat check, so
+ * excluding admin here refused an account the database accepts. GM's
+ * "Verify" is unaffected: verifying is any GM's job, not the clearing
+ * seat's.
  */
 import * as React from 'react';
 import { useLocation } from 'react-router-dom';
@@ -77,7 +81,17 @@ function QueueList() {
   const [decidingCancellation, setDecidingCancellation] = React.useState<QueueTask | null>(null);
 
   const nextAction = me?.authority === 'founder' || me?.authority === 'admin' ? 'cleared' : 'verified';
-  const canClear = me?.isClearingFounder ?? false;
+  // The clearing seat OR admin. `ops.enforce_task_transition` returns
+  // immediately on `core.is_system_caller() or core.is_admin()`
+  // (20260910170000_audit_direct_edits_and_closed_week_guard.sql:194),
+  // which is BEFORE the `core.is_clearing_founder()` check that guards
+  // `verified -> cleared` at :409 and the cancellation decision at :453.
+  // So admin genuinely may clear, and gating on the seat alone told the
+  // one account that can always act that it could not -- the mirror
+  // being stricter than the policy, which is the quiet half of the
+  // defect PLAN.md §11.1 describes. `moveRefusal` and
+  // `blockResolveRefusal` already carry this same bypass explicitly.
+  const canClear = (me?.isClearingFounder ?? false) || me?.authority === 'admin';
   // ERC / DCA land on this list only via `?view=list` -- FounderDigest is
   // their default founder landing, and it is gated the same way. Checked
   // ahead of the clearing-seat rule below, same ordering the database's

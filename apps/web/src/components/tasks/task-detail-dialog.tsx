@@ -40,6 +40,7 @@ import {
   blockResolveRefusal,
   definitionLockRefusal,
   moveRefusal,
+  noteRefusal,
   type Actor,
   type BoardColumn,
   type MovableTask,
@@ -149,6 +150,10 @@ export function TaskDetailDialog({
   const [error, setError] = React.useState<string | null>(null);
   const closed = task.status === 'cleared' || task.status === 'cancelled';
   const readOnly = me?.readOnly ?? false;
+  // Why this person cannot add a worklog note, or null if they can —
+  // the mirror of `ops.enforce_task_note_insert`, which gates on the
+  // task's owner or oversight and not merely on closed/read-only.
+  const noteBlocked = noteRefusal(task, me as Actor | null);
   // Resolve authority is decided per BLOCK, not per task — see
   // `blockResolveRefusal` in lib/task-permissions.ts. This used to be
   // one task-level `isOversight || owner` flag, which is the defect
@@ -613,10 +618,15 @@ export function TaskDetailDialog({
         </div>
         </div>
 
-        {closed ? (
-          <p className="shrink-0 text-body-sm text-ink-3">This task is closed — the record is frozen and takes no new notes.</p>
-        ) : readOnly ? (
-          <p className="shrink-0 text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
+        {/* One mirror, not three ad-hoc checks. This used to test `closed`
+            and `readOnly` and stop there, which left the trigger's real
+            gate — `ops.enforce_task_note_insert` restricts a note to the
+            task's OWNER or oversight — with no client-side counterpart at
+            all. Any ops member could open a peer's task, write a note, and
+            have it refused only on send. `noteRefusal` covers all three
+            cases in the trigger's own order. */}
+        {noteBlocked ? (
+          <p className="shrink-0 text-body-sm text-ink-3">{noteBlocked}</p>
         ) : (
           <div className="flex shrink-0 flex-col gap-2">
             <textarea
@@ -648,6 +658,12 @@ export function TaskDetailDialog({
           {onFlagCancellation && !closed && task.status !== 'pending_cancellation' ? (
             <Button
               variant="secondary"
+              // Its sibling "Declare a block" above has carried this guard
+              // all along; this button was simply missed. A read-only
+              // account flagging a cancellation is refused by
+              // `core.is_read_only()` before any other check.
+              disabled={readOnly}
+              title={readOnly ? 'Your account is read-only.' : undefined}
               onClick={() => {
                 onClose();
                 onFlagCancellation(task);
@@ -660,7 +676,7 @@ export function TaskDetailDialog({
           <Button variant="secondary" onClick={onClose}>
             Close
           </Button>
-          {!closed && !readOnly ? (
+          {!noteBlocked ? (
             <Button loading={submitting} disabled={!body.trim()} onClick={addNote}>
               Add note
             </Button>
@@ -705,8 +721,7 @@ export function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; on
   const [body, setBody] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const closed = task.status === 'cleared' || task.status === 'cancelled';
-  const readOnly = me?.readOnly ?? false;
+  const noteBlocked = noteRefusal(task, me as Actor | null);
 
   const load = React.useCallback(() => {
     api
@@ -753,10 +768,10 @@ export function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; on
             ))
           )}
         </div>
-        {closed ? (
-          <p className="text-body-sm text-ink-3">This task is closed — no new notes can be added.</p>
-        ) : readOnly ? (
-          <p className="text-body-sm text-ink-3">Your account is read-only — notes cannot be added.</p>
+        {/* Same single mirror as TaskDetailDialog above — this dialog posts
+            to the same endpoint and must not answer the question differently. */}
+        {noteBlocked ? (
+          <p className="text-body-sm text-ink-3">{noteBlocked}</p>
         ) : (
           <div className="flex flex-col gap-2">
             <textarea
@@ -772,7 +787,7 @@ export function TaskNotesDialog({ task, onClose, onNoteAdded }: { task: Task; on
           <Button variant="secondary" onClick={onClose}>
             Close
           </Button>
-          {!closed && !readOnly ? (
+          {!noteBlocked ? (
             <Button loading={submitting} disabled={!body.trim()} onClick={submit}>
               Add note
             </Button>

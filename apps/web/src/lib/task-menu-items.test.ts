@@ -91,15 +91,34 @@ test('rejected: Rework it replaces Submit/Take it back', () => {
   assert.ok(!keys.includes('take-back'));
 });
 
-test('a task with an open block offers Resolve a block instead of Declare a block, gated to owner/oversight', () => {
+test('a task with an open block offers Resolve a block instead of Declare a block', () => {
   const blocked = task({ openBlockCount: 1 });
   const ownerItems = buildTaskMenuItems(blocked, OWNER, allHandlers([]));
   assert.ok(ownerItems.some((i) => i.key === 'resolve-block' && i.disabled === false));
   assert.ok(!ownerItems.some((i) => i.key === 'block'));
+});
 
-  const otherItems = buildTaskMenuItems(blocked, OTHER_STAFF, allHandlers([]));
-  const resolve = otherItems.find((i) => i.key === 'resolve-block')!;
-  assert.equal(resolve.disabled, true);
+// This assertion used to run the other way: a non-owner's Resolve item was
+// disabled with "Only the owner or a GM/founder can resolve a block."
+// `blockResolveRefusal` also grants the block's `created_by` and the person
+// its `blocking_user_id` names, and OTHER_STAFF may be either — from a task
+// and an `openBlockCount` there is no way to tell. The old test locked in a
+// guess as if it were the rule, which is how the guess survived the session
+// that fixed the same defect in the dialog.
+test('a non-owner is NOT pre-refused: the menu cannot see who raised the block', () => {
+  const blocked = task({ openBlockCount: 1 });
+  const resolve = buildTaskMenuItems(blocked, OTHER_STAFF, allHandlers([])).find((i) => i.key === 'resolve-block')!;
+  assert.equal(resolve.disabled, false);
+  assert.equal(resolve.reason, undefined);
+});
+
+test('a read-only account still gets no Resolve item at all, open block or not', () => {
+  const blocked = task({ openBlockCount: 1 });
+  const items = buildTaskMenuItems(blocked, READ_ONLY_FOUNDER, allHandlers([]));
+  assert.deepEqual(
+    items.map((i) => i.key),
+    ['open']
+  );
 });
 
 test('cleared: no write items, only Open task', () => {

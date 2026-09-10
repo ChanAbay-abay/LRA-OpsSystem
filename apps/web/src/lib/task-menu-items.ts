@@ -14,9 +14,12 @@
  * Every item's enabled state comes from `moveRefusal` — the same client
  * mirror of `ops.enforce_task_transition` the board's drag-and-drop
  * already dims columns with. Nothing here invents a looser or stricter
- * rule. A read-only account (`actor.readOnly`) gets no write items at
- * all — omitted, not shown-and-disabled: a menu entry with no live path
- * is worse than no entry.
+ * rule, and where the rule cannot be evaluated from a task alone —
+ * "Resolve a block", which is decided per block — nothing is invented
+ * either: the item carries no reason rather than a guessed one. A
+ * read-only account (`actor.readOnly`) gets no write items at all —
+ * omitted, not shown-and-disabled: a menu entry with no live path is
+ * worse than no entry.
  */
 import type { LucideIcon } from 'lucide-react';
 import { Ban, CheckCircle2, FolderOpen, Send, Undo2 } from 'lucide-react';
@@ -27,7 +30,7 @@ export interface TaskMenuItem {
   label: string;
   icon: LucideIcon;
   disabled: boolean;
-  /** Why it's disabled, verbatim from `moveRefusal` (or the equivalent block-resolve rule) — the item's title/tooltip. */
+  /** Why it's disabled, verbatim from `moveRefusal` — the item's title/tooltip. */
   reason?: string;
   onSelect: () => void;
 }
@@ -60,12 +63,6 @@ export function buildTaskMenuItems<T extends MovableTask & { id: string }>(
   const items: TaskMenuItem[] = [];
   const readOnly = actor?.readOnly ?? false;
   const closed = task.status === 'cleared' || task.status === 'cancelled';
-  const isOversight = actor?.authority === 'gm' || actor?.authority === 'founder' || actor?.authority === 'admin';
-  // Mirrors `TaskDetailDialog`'s `canResolveBlock` exactly — resolving a
-  // block isn't a column move, so `moveRefusal` has no entry for it, but
-  // the rule is the one already enforced there: owner or oversight,
-  // never a read-only account.
-  const canResolveBlock = !!actor && !readOnly && (isOversight || actor.id === task.owner_user_id);
 
   if (!readOnly) {
     if (handlers.onSubmit && (task.status === 'todo' || task.status === 'in_progress')) {
@@ -87,14 +84,31 @@ export function buildTaskMenuItems<T extends MovableTask & { id: string }>(
           items.push(item('block', 'Declare a block', Ban, reason, () => handlers.onDeclareBlock!(task)));
         }
       } else if (handlers.onResolveBlock) {
+        // No refusal reason here, deliberately. Who may resolve a block is
+        // decided per BLOCK, not per task: `blockResolveRefusal` grants the
+        // block's `created_by`, the person its `blocking_user_id` names, the
+        // task's owner, and oversight — four identities, mirroring the four
+        // branches of `task_blocks_update` in
+        // 20260910190000_ops_task_block_owner_resolves.sql. A card menu holds
+        // a task and an `openBlockCount`; it does not hold the blocks, so it
+        // cannot evaluate the two identity branches and cannot honestly
+        // answer the question.
+        //
+        // It used to guess, with `isOversight || actor.id === owner_user_id`,
+        // and the guess was wrong in the direction that costs the most: the
+        // person who RAISED the block — always a legitimate resolver, and
+        // usually the one who finds out first that it has cleared — was shown
+        // a disabled item and a reason that was false. That is the same
+        // second-opinion-not-a-mirror defect PLAN.md §11.1 describes, left
+        // behind here when the dialog's copy of it was fixed.
+        //
+        // So the item stays enabled for anyone who is not read-only (the
+        // `!readOnly` block above), and `quickResolveBlock` in board.tsx —
+        // which fetches the blocks and therefore CAN be judged — surfaces the
+        // server's own refusal in a toast if it comes to that. An honest
+        // refusal after one click beats a false one before it.
         items.push(
-          item(
-            'resolve-block',
-            'Resolve a block',
-            CheckCircle2,
-            canResolveBlock ? null : 'Only the owner or a GM/founder can resolve a block.',
-            () => handlers.onResolveBlock!(task)
-          )
+          item('resolve-block', 'Resolve a block', CheckCircle2, null, () => handlers.onResolveBlock!(task))
         );
       }
     }

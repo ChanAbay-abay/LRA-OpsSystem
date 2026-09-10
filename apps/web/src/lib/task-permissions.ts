@@ -303,3 +303,40 @@ export function blockResolveRefusal(
 
   return 'Only the person who raised this block, whoever it names, the task’s owner, or a GM/founder can resolve it.';
 }
+
+/**
+ * `null` when this person may add a worklog note to this task; otherwise
+ * why not, in a sentence meant to be read on a disabled composer.
+ *
+ * Mirrors `ops.enforce_task_note_insert`
+ * (supabase/migrations/20260910120100_core_read_only_accounts.sql:822),
+ * branch for branch and in the trigger's own order: read-only first, the
+ * admin bypass second, the closed-task refusal, then owner-or-oversight.
+ *
+ * Two of the trigger's branches have no mirror here on purpose. `a note
+ * must be authored by the caller` cannot fire from this UI — the composer
+ * has no author field and the API stamps the caller — and `unknown task`
+ * cannot fire on a task the dialog is already rendering. A mirror that
+ * guesses at a branch it cannot observe is how the two drift apart.
+ *
+ * This surface previously had no gate at all, which meant any ops member
+ * could type a note on a peer's task and read the trigger's refusal only
+ * after pressing send — the work discarded, and the reason arriving as a
+ * toast on an emptied box.
+ */
+export function noteRefusal(
+  task: { owner_user_id: string; status: MovableTask['status'] },
+  actor: Actor | null
+): string | null {
+  if (!actor) return 'You are not signed in.';
+  if (actor.readOnly) return 'Your account is read-only.';
+  if (actor.authority === 'admin') return null; // core.is_admin()
+
+  if (task.status === 'cleared' || task.status === 'cancelled') {
+    return `This task is ${task.status} and cannot take new notes.`;
+  }
+  if (task.owner_user_id === actor.id) return null;
+  if (actor.authority === 'gm' || actor.authority === 'founder') return null; // core.is_oversight()
+
+  return 'Only the task’s owner or a GM/founder can add a note to this task.';
+}

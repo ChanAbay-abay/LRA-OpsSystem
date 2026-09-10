@@ -20,6 +20,7 @@ import {
   definitionLockRefusal,
   dragRefusal,
   moveRefusal,
+  noteRefusal,
   type Actor,
   type MovableTask,
   type ResolvableBlock,
@@ -308,4 +309,58 @@ test('read-only is checked FIRST — a read-only founder resolves nothing, even 
 
 test('nobody signed in resolves nothing', () => {
   assert.match(blockResolveRefusal(blockOn(), ownedTask, null) ?? '', /not signed in/);
+});
+
+// ---------------------------------------------------------------------
+// noteRefusal — the mirror of ops.enforce_task_note_insert
+// (20260910120100_core_read_only_accounts.sql:822). One assertion per
+// branch of the trigger, in the trigger's own order, the same discipline
+// moveRefusal is held to above.
+// ---------------------------------------------------------------------
+
+const notable = (over: Partial<{ owner_user_id: string; status: string }> = {}) => ({
+  owner_user_id: OWNER.id,
+  status: 'in_progress',
+  ...over,
+});
+
+test('noteRefusal: nobody signed in writes nothing', () => {
+  assert.notEqual(noteRefusal(notable(), null), null);
+});
+
+test('noteRefusal: read-only is refused FIRST, ahead of every other branch', () => {
+  // Even on their own task, and even though a read-only account is a
+  // founder and would otherwise pass the oversight branch below.
+  assert.match(noteRefusal(notable(), READ_ONLY_FOUNDER) ?? '', /read-only/);
+  assert.match(
+    noteRefusal(notable({ owner_user_id: READ_ONLY_FOUNDER.id }), READ_ONLY_FOUNDER) ?? '',
+    /read-only/
+  );
+});
+
+test('noteRefusal: admin bypasses, including on a closed task', () => {
+  assert.equal(noteRefusal(notable(), ADMIN), null);
+  assert.equal(noteRefusal(notable({ status: 'cleared' }), ADMIN), null);
+});
+
+test('noteRefusal: a closed task takes no new notes, owner or not', () => {
+  for (const status of ['cleared', 'cancelled']) {
+    assert.match(noteRefusal(notable({ status }), OWNER) ?? '', /closed|cleared|cancelled/);
+    assert.match(noteRefusal(notable({ status }), GM) ?? '', /closed|cleared|cancelled/);
+  }
+});
+
+test('noteRefusal: the task owner may add a note', () => {
+  assert.equal(noteRefusal(notable(), OWNER), null);
+});
+
+test('noteRefusal: oversight may add a note to anyone’s task', () => {
+  assert.equal(noteRefusal(notable(), GM), null);
+  assert.equal(noteRefusal(notable(), FOUNDER), null);
+});
+
+test('noteRefusal: a staff bystander is refused, and told who can', () => {
+  const reason = noteRefusal(notable(), BYSTANDER) ?? '';
+  assert.notEqual(reason, '');
+  assert.match(reason, /owner|GM|founder/);
 });

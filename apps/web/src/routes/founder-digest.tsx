@@ -42,6 +42,10 @@
  * founder's approval the database will accept. A GM or non-clearing
  * founder reading this screen gets the whole summary and no buttons,
  * which is honest — they can see the state, they just cannot bank it.
+ * Admin is granted the banking half as well, because the transition
+ * trigger bypasses on `core.is_admin()` before the clearing-seat check
+ * ever runs — but NOT the edit-request half, whose trigger has no admin
+ * branch. The two are separate flags below for exactly that reason.
  */
 import * as React from 'react';
 import { AlertTriangle, Ban, CheckCircle2, ChevronRight, Clock, RotateCcw, Undo2 } from 'lucide-react';
@@ -260,7 +264,9 @@ interface EditRequestTaskLookup {
  *
  * Read-only for anyone who can see /queue but isn't the clearing founder
  * — same "you can see everything here, but only the clearing founder can
- * bank it" honesty the points section above already uses. A requester
+ * bank it" honesty the points section above already uses. Note this one
+ * really is the seat alone: unlike clearing, the edit-request trigger
+ * grants no admin bypass, so `canClear` here is fed the seat-only flag. A requester
  * never gets decide buttons on their own request even when they ARE the
  * clearing founder (self-approval is refused by the DB trigger; the UI
  * simply never offers it, matching Task 3's brief).
@@ -452,10 +458,25 @@ export function FounderDigest() {
   // `me.isClearingFounder` is already false for ERC/DCA (read-only
   // founders are never the seated clearing founder — see
   // OPEN-QUESTIONS.md #5), so the whole bulk-approve/send-back/flagging
-  // action surface below is already absent for them via this one flag.
-  // No separate `readOnly` check is needed on this screen; if that ever
-  // changes (a read-only clearing founder), gate on `!me?.readOnly` too.
-  const canClear = me?.isClearingFounder ?? false;
+  // action surface below is already absent for them via that flag. The
+  // admin arm added below does not reopen it: ERC and DCA hold `founder`
+  // authority, not `admin`. If that ever changes (a read-only admin, or a
+  // read-only clearing founder), gate on `!me?.readOnly` too.
+  // Two different rules that used to share one flag, because the two
+  // triggers behind them are not the same:
+  //
+  //   canClear  -- banking points. `ops.enforce_task_transition` returns
+  //     immediately on `core.is_system_caller() or core.is_admin()`
+  //     (20260910170000:194), BEFORE the `core.is_clearing_founder()`
+  //     check at :409, so admin may clear.
+  //   canDecideEditRequest -- deciding a task edit request. That trigger
+  //     requires `core.is_system_caller() or core.is_clearing_founder()`
+  //     (20260910170000:670) with NO admin branch at all, so admin may
+  //     not decide one and must not be offered the buttons.
+  //
+  // Collapsing them back into one flag breaks whichever half loses.
+  const canClear = (me?.isClearingFounder ?? false) || me?.authority === 'admin';
+  const canDecideEditRequest = me?.isClearingFounder ?? false;
 
   const digest = resource.status === 'ready' ? resource.data : null;
   const allIds = React.useMemo(
@@ -707,7 +728,7 @@ export function FounderDigest() {
               </section>
             ) : null}
 
-            <EditRequestsSection canClear={canClear} meId={me?.id} />
+            <EditRequestsSection canClear={canDecideEditRequest} meId={me?.id} />
 
             <Fold title="In progress" count={d.inProgress.length}>
               {d.inProgress.map((t) => (
