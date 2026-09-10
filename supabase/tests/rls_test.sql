@@ -106,12 +106,54 @@ end $$;
 
 -- A legitimate action that must succeed. Guards that block real users
 -- are how HR broke clock-out and leave balances.
+--
+-- IT ALSO COUNTS ROWS, and that is not cosmetic. This helper used to
+-- report 'allowed' for anything that did not raise -- so an UPDATE
+-- matching ZERO rows passed green, which is indistinguishable from the
+-- write actually happening. `expect_blocked` was hardened with exactly
+-- this row count (see it above); its sibling was not, and 48 of the 57
+-- `expect_allowed` calls in this file are writes.
+--
+-- The same bug bit this project twice on 2026-09-10/11: a commitment-
+-- forgery probe whose UPDATE control matched no rows read as a clean
+-- refusal, and a week-simulation harness that stayed green when every
+-- transition was skipped. A test that cannot fail is worse than no test,
+-- because it is believed.
+--
+-- Zero rows is now a FAILURE for a write. A statement that legitimately
+-- affects no rows -- a `select` used for its side effect, a call whose
+-- result is discarded -- must say so by using `expect_allowed_zero`
+-- below, deliberately, rather than passing by accident.
 create function pg_temp.expect_allowed(p_area text, p_label text, p_sql text)
+returns void language plpgsql as $$
+declare n int;
+begin
+  execute p_sql;
+  get diagnostics n = row_count;
+  if n = 0 then
+    insert into t_results (area, label, outcome, passed)
+    values (p_area, p_label,
+            'NO-OP - statement succeeded but affected 0 rows (did it really run?)', false);
+  else
+    insert into t_results (area, label, outcome, passed)
+    values (p_area, p_label, 'allowed - ' || n || ' row(s)', true);
+  end if;
+exception when others then
+  insert into t_results (area, label, outcome, passed)
+  values (p_area, p_label, 'REFUSED - expected success: ' || left(sqlerrm, 60), false);
+end $$;
+
+-- The deliberate escape hatch: an action that must succeed and whose
+-- row count is genuinely not meaningful. Separate from `expect_allowed`
+-- so that "this one really does affect no rows" is a statement someone
+-- made on purpose, and is visible in the diff, rather than the default
+-- everything silently enjoys.
+create function pg_temp.expect_allowed_zero(p_area text, p_label text, p_sql text)
 returns void language plpgsql as $$
 begin
   execute p_sql;
   insert into t_results (area, label, outcome, passed)
-  values (p_area, p_label, 'allowed', true);
+  values (p_area, p_label, 'allowed (row count not meaningful)', true);
 exception when others then
   insert into t_results (area, label, outcome, passed)
   values (p_area, p_label, 'REFUSED - expected success: ' || left(sqlerrm, 60), false);
@@ -2416,6 +2458,355 @@ select pg_temp.expect_allowed('admin-corrections',
   'the system caller still bypasses with no reason at all',
   $sql$update ops.tasks set title = 'TEST-corr2 (system-touched)' where id = (select v from t_meta where k='corr2')$sql$);
 set local role authenticated;
+
+reset role;
+
+-- =======================================================================
+-- Task assignment: unassigned tasks, self-claim, oversight assignment,
+-- transfer by invite+accept, and the provenance a committed task's
+-- handoff needs. Chan, 2026-09-11 -- area names 'assignment',
+-- 'transfer', 'repricing' per PLAN-ASSIGNMENT.md §6's naming scheme.
+--
+-- No separate `week_open` fixture is needed here: the current week
+-- (`ops.week_start_for(now())`) was already moved to 'open' by
+-- `ops.close_briefing()` above and never reopened, and `taskA` (owned by
+-- sales, committed, in that now-locked week) is reused below exactly
+-- as-is for the committed+locked transfer and re-pricing assertions.
+-- =======================================================================
+
+reset role;
+select set_config('request.jwt.claims', null, true);
+
+insert into ops.task_types (name, category, guideline_note, default_points, is_active)
+values ('TEST-Type2', 'Test', 'DRAFT — second test fixture, 21 points', 21, true);
+
+insert into t_meta (k, v)
+select 'task_type2', id from ops.task_types where name = 'TEST-Type2';
+
+-- A fresh, isolated PLANNING week -- distinct from the current week
+-- (which is locked from here on) -- for every assertion below that
+-- needs commitments to still be open: self-claim + commit interplay,
+-- and the "re-derive committed_points while planning" repricing case.
+insert into ops.weeks (week_start, state) values ('2099-06-01', 'planning');
+
+-- unassigned1: sits in the fresh planning week with no owner at all --
+-- the plain "nobody has taken this yet" case.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, null, (select v from t_meta where k='task_type'),
+         'TEST-unassigned1', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = '2099-06-01'
+  returning id
+)
+insert into t_meta (k, v) select 'unassigned1', id from ins;
+
+-- unassigned2: a second one, claimed by sales below so there is an
+-- ASSIGNED task to prove self-claim refuses on.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, null, (select v from t_meta where k='task_type'),
+         'TEST-unassigned2', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = '2099-06-01'
+  returning id
+)
+insert into t_meta (k, v) select 'unassigned2', id from ins;
+
+-- reprice1: uncommitted, todo, owned by sales -- assertion 20 (type
+-- change on an ordinary task re-derives catalog_points; no commitment,
+-- no week-lock question involved at all).
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-reprice1', 'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = ops.week_start_for(now())
+  returning id
+)
+insert into t_meta (k, v) select 'reprice1', id from ins;
+
+-- reprice2: committed, todo, owned by sales, in the FRESH planning week
+-- -- assertion 21 (a type change re-derives committed_points too, while
+-- the promise is not yet locked).
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by,
+                          is_committed, committed_week_id, committed_points, committed_by_user_id)
+  select w.id, (select uid from p where k='sales'), (select v from t_meta where k='task_type'),
+         'TEST-reprice2', 'todo', (select uid from p where k='sales'),
+         true, w.id, 8, (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = '2099-06-01'
+  returning id
+)
+insert into t_meta (k, v) select 'reprice2', id from ins;
+
+-- unassigned4: for the oversight-direct-assign block below.
+with ins as (
+  insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+  select w.id, null, (select v from t_meta where k='task_type'), 'TEST-unassigned4',
+         'todo', (select uid from p where k='sales')
+  from ops.weeks w where w.week_start = '2099-06-01'
+  returning id
+)
+insert into t_meta (k, v) select 'unassigned4', id from ins;
+
+set local role authenticated;
+
+-- === Unassigned tasks: an inert row until someone is assigned =========
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('assignment',
+  'an unassigned task cannot change status (todo -> in_progress)',
+  $sql$update ops.tasks set status = 'in_progress' where id = (select v from t_meta where k='unassigned1')$sql$);
+
+select pg_temp.expect_blocked('assignment',
+  'an unassigned task cannot be committed by UPDATE',
+  $sql$update ops.tasks set is_committed = true, committed_week_id = week_id, committed_points = 8
+       where id = (select v from t_meta where k='unassigned1')$sql$);
+
+select pg_temp.expect_blocked('assignment',
+  'an unassigned task cannot be committed by INSERT either',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by,
+                              is_committed, committed_week_id, committed_points)
+       select w.id, null, (select v from t_meta where k='task_type'), 'TEST-forged-unassigned-commit',
+              'todo', core.auth_user_id(), true, w.id, 21
+       from ops.weeks w where w.week_start = '2099-06-01'$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed('assignment',
+  'oversight CAN create a task deliberately unassigned -- the week''s list is where it waits '
+  '(an ordinary staff INSERT always names a real owner, per tasks_insert''s existing RLS: '
+  'owner_user_id = self OR oversight -- unchanged by this migration)',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+       select w.id, null, (select v from t_meta where k='task_type'), 'TEST-unassigned3',
+              'todo', core.auth_user_id()
+       from ops.weeks w where w.week_start = '2099-06-01'$sql$);
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('assignment',
+  'an ordinary staff member cannot INSERT a task with no owner (tasks_insert RLS, unchanged)',
+  $sql$insert into ops.tasks (week_id, owner_user_id, task_type_id, title, status, created_by)
+       select w.id, null, (select v from t_meta where k='task_type'), 'TEST-unassigned3b',
+              'todo', core.auth_user_id()
+       from ops.weeks w where w.week_start = '2099-06-01'$sql$);
+
+-- The structural proof `close_briefing` needs no redundant guard: this
+-- combination is empirically unreachable, not merely refused by luck.
+select pg_temp.expect_rows('assignment',
+  'committed + unassigned is unreachable -- zero such rows exist anywhere',
+  $sql$select count(*) from ops.tasks where owner_user_id is null and is_committed$sql$, 0);
+
+-- === Self-claim: any active ops member, only while unassigned =========
+
+select pg_temp.become((select uid from p where k='other'));
+select pg_temp.expect_blocked('assignment',
+  'a non-ops-member cannot self-claim (RLS scopes the row away before the trigger ever runs)',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='other')
+       where id = (select v from t_meta where k='unassigned1')$sql$);
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_allowed('assignment',
+  'an active ops member CAN self-claim an unassigned task',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='unassigned1')$sql$);
+
+select pg_temp.expect_allowed('assignment',
+  'once claimed, the new owner works it normally (todo -> in_progress)',
+  $sql$update ops.tasks set status = 'in_progress' where id = (select v from t_meta where k='unassigned1')$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('assignment',
+  'sales claims the second unassigned task, to set up the "already assigned" refusal',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='sales')
+       where id = (select v from t_meta where k='unassigned2')$sql$);
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('assignment',
+  'nobody may self-claim a task that is already assigned to someone else',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='unassigned2')$sql$);
+
+-- === Oversight assigns directly =========================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('assignment',
+  'staff cannot assign someone else''s -- an unassigned task -- to a third party',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='unassigned4')$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_allowed('assignment',
+  'GM (oversight) CAN assign an unassigned task directly to someone else',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='unassigned4')$sql$);
+
+select pg_temp.expect_rows('assignment',
+  'that assignment enqueued exactly one ops.task.assigned notice for the new owner',
+  $sql$select count(*) from core.notification_outbox
+       where entity_id = (select v from t_meta where k='unassigned4')
+         and event_type = 'ops.task.assigned' and recipient_id = (select uid from p where k='broker')$sql$, 1);
+
+select pg_temp.become((select uid from p where k='readonly'));
+select pg_temp.expect_blocked('assignment',
+  'a read-only founder cannot assign a task even though is_oversight() would otherwise admit them',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='sales')
+       where id = (select v from t_meta where k='unassigned4')$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('assignment',
+  'reassign + move in the same write is refused -- reassign, then move',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='sales'), status = 'in_progress'
+       where id = (select v from t_meta where k='unassigned4')$sql$);
+
+select pg_temp.expect_blocked('assignment',
+  'an assigned task can never be handed back to nobody -- there is no "unassign"',
+  $sql$update ops.tasks set owner_user_id = null where id = (select v from t_meta where k='unassigned4')$sql$);
+
+-- === committed_by_user_id: server-derived, and never client-writable ===
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('assignment',
+  'committed_by_user_id cannot be set directly without touching the commitment triple',
+  $sql$update ops.tasks set committed_by_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='reprice2')$sql$);
+
+-- === Transfer by invite + accept, on taskA: committed, and its week is
+-- already locked ('open') from ops.close_briefing() above. The promise
+-- must NOT move; only ownership does.
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('transfer',
+  'regression: a GM still cannot reassign a committed, locked task directly (statement 2b unchanged)',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='broker')
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('transfer',
+  'only the task''s current owner may invite someone else to take it over',
+  $sql$insert into ops.task_assignment_invites (task_id, from_user_id, to_user_id)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='broker'),
+               (select uid from p where k='gm'))$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed('transfer',
+  'the current owner (sales) CAN invite broker to take taskA over',
+  $sql$insert into ops.task_assignment_invites (task_id, from_user_id, to_user_id)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='sales'),
+               (select uid from p where k='broker'))$sql$);
+
+insert into t_meta (k, v)
+select 'invite1', id from ops.task_assignment_invites
+where task_id = (select v from t_meta where k='taskA') order by created_at desc limit 1;
+
+-- Notification reads are RLS-scoped to the recipient or oversight, so
+-- checking as the inviter (not the recipient, not oversight) would see
+-- nothing -- become oversight to read someone else's outbox row.
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_rows('transfer',
+  'the invite enqueued exactly one ops.task.transfer_invited notice for the invitee',
+  $sql$select count(*) from core.notification_outbox
+       where entity_id = (select v from t_meta where k='taskA')
+         and event_type = 'ops.task.transfer_invited' and recipient_id = (select uid from p where k='broker')$sql$, 1);
+select pg_temp.become((select uid from p where k='sales'));
+
+select pg_temp.expect_blocked('transfer',
+  'a task cannot carry two pending transfer invites at once',
+  $sql$insert into ops.task_assignment_invites (task_id, from_user_id, to_user_id)
+       values ((select v from t_meta where k='taskA'), (select uid from p where k='sales'),
+               (select uid from p where k='gm'))$sql$);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('transfer',
+  'only the invited person may accept -- a GM calling accept_task_transfer on someone else''s invite is refused',
+  $sql$select ops.accept_task_transfer((select v from t_meta where k='invite1'))$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('transfer',
+  'the INVITER cannot make it accepted by a direct UPDATE either -- "accepted" is unreachable by any direct write',
+  $sql$update ops.task_assignment_invites set status = 'accepted' where id = (select v from t_meta where k='invite1')$sql$);
+
+select pg_temp.become((select uid from p where k='broker'));
+select pg_temp.expect_blocked('transfer',
+  'and neither can the INVITEE, even though they are the one it names -- only the RPC may accept',
+  $sql$update ops.task_assignment_invites set status = 'accepted' where id = (select v from t_meta where k='invite1')$sql$);
+
+select pg_temp.expect_allowed('transfer',
+  'the invitee CAN accept via ops.accept_task_transfer()',
+  $sql$select ops.accept_task_transfer((select v from t_meta where k='invite1'))$sql$);
+
+select pg_temp.expect_rows('transfer',
+  'ownership moved to broker; committed_by_user_id (sales) and the commitment triple did not',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='taskA')
+         and owner_user_id = (select uid from p where k='broker')
+         and committed_by_user_id = (select uid from p where k='sales')
+         and is_committed and committed_points = 8$sql$, 1);
+
+select pg_temp.expect_rows('transfer',
+  'the invite itself now reads accepted, with a decision timestamp',
+  $sql$select count(*) from ops.task_assignment_invites
+       where id = (select v from t_meta where k='invite1') and status = 'accepted' and decided_at is not null$sql$, 1);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_rows('transfer',
+  'the previous owner (sales, the inviter) is notified the transfer completed -- not the accepter, who is the actor',
+  $sql$select count(*) from core.notification_outbox
+       where entity_id = (select v from t_meta where k='taskA')
+         and event_type = 'ops.task.unassigned' and recipient_id = (select uid from p where k='sales')$sql$, 1);
+
+select pg_temp.expect_rows('transfer',
+  'the accepter (broker, the actor) is NOT sent their own assignment notice',
+  $sql$select count(*) from core.notification_outbox
+       where entity_id = (select v from t_meta where k='taskA')
+         and event_type = 'ops.task.assigned' and recipient_id = (select uid from p where k='broker')$sql$, 0);
+select pg_temp.become((select uid from p where k='broker'));
+
+select pg_temp.expect_rows('transfer',
+  'provenance: exactly one ops.task.owner_changed audit row records sales -> broker',
+  $sql$select count(*) from core.audit_logs
+       where entity_id = (select v from t_meta where k='taskA') and action = 'ops.task.owner_changed'
+         and old_values ->> 'owner_user_id' = (select uid from p where k='sales')::text
+         and new_values ->> 'owner_user_id' = (select uid from p where k='broker')::text$sql$, 1);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_allowed('transfer',
+  'regression: a FOUNDER can still change a committed, locked task''s owner directly (statement 2b''s own exception, unchanged)',
+  $sql$update ops.tasks set owner_user_id = (select uid from p where k='sales')
+       where id = (select v from t_meta where k='taskA')$sql$);
+
+-- === Re-pricing (Phase 4 -- defect (a)) ==================================
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_rows('repricing',
+  'changing task_type_id on an ordinary todo task re-derives catalog_points (8 -> 21)',
+  $sql$update ops.tasks set task_type_id = (select v from t_meta where k='task_type2')
+       where id = (select v from t_meta where k='reprice1')
+       returning catalog_points$sql$, 21);
+
+select pg_temp.expect_rows('repricing',
+  'the same change, on a task committed in a still-PLANNING week, re-derives committed_points too',
+  $sql$update ops.tasks set task_type_id = (select v from t_meta where k='task_type2')
+       where id = (select v from t_meta where k='reprice2')
+       returning committed_points$sql$, 21);
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_unchanged('repricing',
+  'on taskA (committed, its week now LOCKED), a founder''s type change re-derives catalog_points but leaves committed_points alone',
+  $sql$update ops.tasks set task_type_id = (select v from t_meta where k='task_type2')
+       where id = (select v from t_meta where k='taskA')$sql$,
+  $sql$select committed_points = 8 from ops.tasks where id = (select v from t_meta where k='taskA')$sql$);
+
+select pg_temp.expect_rows('repricing',
+  '...while catalog_points on that same task DID move, proving the re-derivation actually ran',
+  $sql$select count(*) from ops.tasks
+       where id = (select v from t_meta where k='taskA') and catalog_points = 21$sql$, 1);
+
+select pg_temp.become((select uid from p where k='gm'));
+select pg_temp.expect_blocked('repricing',
+  'changing task_type_id on a submitted task is refused outright',
+  $sql$update ops.tasks set task_type_id = (select v from t_meta where k='task_type')
+       where id = (select v from t_meta where k='task3')$sql$);
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_blocked('repricing',
+  'catalog_points still cannot be set directly by any client, even after the trigger gained OR UPDATE',
+  $sql$update ops.tasks set catalog_points = 3 where id = (select v from t_meta where k='reprice1')$sql$);
 
 reset role;
 
