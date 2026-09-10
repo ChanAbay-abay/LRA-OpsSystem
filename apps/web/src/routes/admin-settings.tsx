@@ -7,6 +7,14 @@
  * already includes admin) — PRD.md names the founder as this screen's
  * owner; admin is added alongside per Chan's ask tonight, not in place
  * of the founder.
+ *
+ * Opening it to founders is what makes the read-only guard below
+ * necessary. ERC and DCA hold `founder` authority with `read_only`
+ * set, so they now reach this screen — correctly, since read-only means
+ * "sees what oversight sees" — but `ops.settings`'s update policy is
+ * `core.is_founder() and not core.is_read_only()`, so the form must not
+ * offer them a Save the database will refuse. While this screen was
+ * admin-only that case could not arise and there was no guard.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
@@ -17,6 +25,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
+import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 
 interface Settings {
@@ -31,6 +40,8 @@ interface Settings {
 }
 
 export function AdminSettingsPage() {
+  const { me } = useAuth();
+  const readOnly = me?.readOnly ?? false;
   const resource = useResource((signal) => api.get<Settings>('/api/settings', { signal }), []);
   const [settings, setSettings] = React.useState<Settings | null>(null);
   const [saving, setSaving] = React.useState(false);
@@ -68,7 +79,13 @@ export function AdminSettingsPage() {
         {() =>
           settings ? (
             <>
-              <div className="grid max-w-xl grid-cols-2 gap-4 rounded-xl border border-hairline bg-surface p-5">
+              {/* A native `fieldset[disabled]` disables every control inside
+                  it, Radix's Select trigger included, so the guard cannot be
+                  missed off a field somebody adds later. */}
+              <fieldset
+                disabled={readOnly}
+                className="grid max-w-xl grid-cols-2 gap-4 rounded-xl border border-hairline bg-surface p-5 disabled:opacity-60"
+              >
         <Field label="Recurring cap (0–1)">
           <Input
             type="number" step="0.01" min={0} max={0.99}
@@ -128,11 +145,17 @@ export function AdminSettingsPage() {
         <Field label="Timezone">
           <Input value={settings.timezone} onChange={(e) => setSettings({ ...settings, timezone: e.target.value })} />
         </Field>
-      </div>
+      </fieldset>
               <div className="mt-4">
-                <Button loading={saving} onClick={save}>
-                  Save settings
-                </Button>
+                {readOnly ? (
+                  <p className="text-body-sm text-ink-3">
+                    Your account is read-only. These are the live values — they just can’t be changed from here.
+                  </p>
+                ) : (
+                  <Button loading={saving} onClick={save}>
+                    Save settings
+                  </Button>
+                )}
               </div>
             </>
           ) : null
