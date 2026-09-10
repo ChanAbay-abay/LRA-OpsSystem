@@ -56,9 +56,43 @@ export interface AuditEntry {
 }
 
 /**
+ * Every audit write that has failed since this process started, and the
+ * last one's detail. `console.error` on a server nobody is tailing is
+ * not "visible" — it is silently swallowed with extra steps, which is
+ * what this comment used to claim it wasn't.
+ *
+ * The cost of believing otherwise was measured on 2026-09-10: a literal
+ * string passed as `entity_id` (a uuid column) made every settings audit
+ * row fail with 22P02, the PATCH returned 200 with a correct body, and
+ * nobody learned that the audit trail for the parameters which rescore
+ * the entire company had simply stopped recording. It was found by
+ * someone counting rows, which is not a control.
+ *
+ * Surfaced on `GET /health` so a broken audit trail is discoverable
+ * without reading logs. Deliberately a counter and not a throw: an
+ * audit failure must never roll back the legitimate action it records.
+ * "Does not throw" and "nobody finds out" are different choices and
+ * this file previously made the second one by accident.
+ */
+export const auditFailures = {
+  count: 0,
+  last: null as { action: string; entityType: string; message: string; at: string } | null,
+};
+
+function recordAuditFailure(entry: AuditEntry, message: string): void {
+  auditFailures.count += 1;
+  auditFailures.last = {
+    action: entry.action,
+    entityType: entry.entityType,
+    message,
+    at: new Date().toISOString(),
+  };
+}
+
+/**
  * Write an audit row. Never throws — an audit failure must not roll
- * back a legitimate business action, but it is logged loudly so the gap
- * is visible rather than silently swallowed.
+ * back a legitimate business action — but a failure is counted in
+ * `auditFailures` and reported by `GET /health`, not merely logged.
  */
 export async function writeAudit(
   actor: { id: string; email: string; authority: Authority },
@@ -81,9 +115,11 @@ export async function writeAudit(
     });
     if (error) {
       console.error('[audit] write failed', { entry, error });
+      recordAuditFailure(entry, error.message);
     }
   } catch (err) {
     console.error('[audit] write threw', { entry, err });
+    recordAuditFailure(entry, err instanceof Error ? err.message : String(err));
   }
 }
 

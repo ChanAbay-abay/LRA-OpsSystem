@@ -70,7 +70,14 @@ export default async function settingsRoutes(app: FastifyInstance) {
         module: 'ops',
         action: 'admin.settings.patch',
         entityType: 'ops.settings',
-        entityId: 'settings',
+        // No entityId: `core.audit_logs.entity_id` is a uuid, and
+        // `ops.settings` is a singleton keyed `id = true` — a boolean —
+        // so there is no uuid to point at and `entity_type` already
+        // identifies the row uniquely. This passed the literal string
+        // 'settings' until 2026-09-10, which Postgres rejected as
+        // 22P02 invalid input syntax for type uuid. `writeAudit` catches
+        // its own errors, so the PATCH still returned 200 with the right
+        // body and the audit row simply never existed.
         oldValues: Object.fromEntries(changedKeys.map((key) => [key, before[key]])),
         newValues: Object.fromEntries(changedKeys.map((key) => [key, data[key]])),
       });

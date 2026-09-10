@@ -15,6 +15,7 @@ import { ZodError } from 'zod';
 import { ApiError } from './lib/domain.js';
 import { mapPostgrestError } from './lib/pg-errors.js';
 import { assertEnv } from './lib/env.js';
+import { auditFailures } from './lib/supabase.js';
 import meRoutes, { membersRoutes } from './routes/me.js';
 import adminRoutes from './routes/admin.js';
 import catalogRoutes from './routes/catalog.js';
@@ -114,10 +115,16 @@ export function buildServer() {
     });
   });
 
+  // `audit.failures` is here so a broken audit trail is discoverable by
+  // asking, rather than by someone eventually noticing a row that was
+  // never written. `status` degrades to 'degraded' when any audit write
+  // has failed: the service is still serving, but it is no longer
+  // keeping the record it promises to keep, and that is not 'ok'.
   app.get('/health', async () => ({
-    status: 'ok',
+    status: auditFailures.count === 0 ? 'ok' : 'degraded',
     service: 'lra-ops-api',
     time: new Date().toISOString(),
+    audit: { failures: auditFailures.count, last: auditFailures.last },
   }));
 
   app.register(meRoutes, { prefix: '/api/me' });
