@@ -3,6 +3,10 @@
 #
 #   DATABASE_URL=postgresql://... ./scripts/run-rls-tests.sh
 #
+# Or put DATABASE_URL in apps/api/.env (gitignored) and just run
+# `npm run test:rls` -- this script reads that file when the variable is
+# not already in the environment. An explicit DATABASE_URL always wins.
+#
 # Everything runs inside a transaction that is rolled back, so it is
 # safe against a live database, though a scratch one (via
 # `supabase start`) is what CI and local development should use.
@@ -15,10 +19,55 @@ set -euo pipefail
 PSQL="${PSQL:-psql}"
 command -v "$PSQL" >/dev/null 2>&1 || PSQL=/opt/homebrew/opt/libpq/bin/psql
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# `apps/api/.env` holds the SUPABASE_* keys, which are the REST API and
+# are NOT a Postgres connection -- psql cannot use them. DATABASE_URL is
+# a separate thing and nothing was reading it from disk, so
+# `npm run test:rls` failed on a clean shell every single time and the
+# suite got run by hand or not at all. Read it here, only when the
+# environment has not already supplied one, and only that one variable:
+# sourcing the whole file would drag SUPABASE_SERVICE_ROLE_KEY into the
+# environment of a script that has no business holding it.
+if [ -z "${DATABASE_URL:-}" ] && [ -f "$ROOT/apps/api/.env" ]; then
+  # Last assignment wins, quotes stripped, `export ` prefix tolerated,
+  # commented-out lines ignored.
+  #
+  # POSIX BREs only: macOS ships BSD sed, which does NOT understand the
+  # GNU `\+` and `\?` extensions. A first attempt used them, matched
+  # nothing, and reported "apps/api/.env does not define one" for a file
+  # that plainly did -- caught only because this was tested against a
+  # fixture instead of being assumed to work.
+  DATABASE_URL="$(
+    sed -e 's/^[[:space:]]*export[[:space:]][[:space:]]*//' "$ROOT/apps/api/.env" \
+      | sed -n 's/^[[:space:]]*DATABASE_URL[[:space:]]*=[[:space:]]*//p' \
+      | tail -n 1 \
+      | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+  )"
+  [ -n "$DATABASE_URL" ] && export DATABASE_URL
+fi
+
 if [ -z "${DATABASE_URL:-}" ]; then
-  echo "DATABASE_URL is not set." >&2
-  echo "For local development: supabase start, then use the connection string it prints" >&2
-  echo "(default: postgresql://postgres:postgres@127.0.0.1:54322/postgres)." >&2
+  echo "DATABASE_URL is not set, and apps/api/.env does not define one." >&2
+  echo >&2
+  echo "The SUPABASE_URL / SUPABASE_*_KEY values in that file are the REST API," >&2
+  echo "not a Postgres connection -- psql cannot use them. You need the database" >&2
+  echo "connection string, which is a different thing:" >&2
+  echo >&2
+  echo "  Local (preferred for a test run): supabase start, then use the string it" >&2
+  echo "  prints -- postgresql://postgres:postgres@127.0.0.1:54322/postgres" >&2
+  echo >&2
+  echo "  Live project: Supabase dashboard -> Project Settings -> Database ->" >&2
+  echo "  Connection string -> URI. Add it to apps/api/.env (gitignored) as" >&2
+  echo "  DATABASE_URL=... and this script will pick it up from then on." >&2
+  echo >&2
+  echo "  URL-ENCODE the password. A '!' must be written %21, '@' as %40, '#' as" >&2
+  echo "  %23 -- an un-encoded special character truncates the URL and the failure" >&2
+  echo "  reads as a wrong password rather than a malformed string." >&2
+  echo >&2
+  echo "The suite runs inside a transaction it rolls back, so pointing it at the" >&2
+  echo "live database writes nothing -- but a canary MUST fail for the run to mean" >&2
+  echo "anything, and that is checked below." >&2
   exit 2
 fi
 
