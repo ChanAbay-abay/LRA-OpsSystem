@@ -30,3 +30,42 @@ export function isStale(lastActivityAt: Date, now: Date, staleAfterDays = 3): bo
   const days = (now.getTime() - lastActivityAt.getTime()) / 86_400_000;
   return days >= staleAfterDays;
 }
+
+/** One cleared (or still-open) task's raw inputs for a person's median cycle time. */
+export interface CycleTimeTaskInput {
+  /** `ops.tasks.first_in_progress_at` — null for a task with no recorded start
+   *  (pre-dates the column, or never entered `in_progress`). Excluded, never
+   *  treated as zero: a fabricated start would understate the true duration. */
+  firstInProgressAt: Date | null;
+  /** `ops.tasks.cleared_at` — null for a task still open. Excluded: an open
+   *  task has no cycle time yet, not a cycle time of zero. */
+  clearedAt: Date | null;
+  /** Total hours the task spent blocked, already summed across its blocks. */
+  blockedHours?: number;
+}
+
+export interface MedianCycleTimeResult {
+  /** null when there is nothing to compute a median over. */
+  medianHours: number | null;
+  /** How many tasks the median was computed from — always shown next to the
+   *  figure (PRD.md §4/§6.5): a median of 2 and a median of 40 are different
+   *  claims. */
+  sampleSize: number;
+}
+
+/**
+ * A person's median cycle time (PRD.md §4: `cleared_at - first_in_progress_at`,
+ * minus blocked time, reported as a median so one three-week task cannot
+ * swamp the number). Only tasks with BOTH a recorded start and a clear time
+ * enter the sample; everything else is excluded, not zeroed.
+ */
+export function medianCycleTimeHours(tasks: CycleTimeTaskInput[]): MedianCycleTimeResult {
+  const hours = tasks
+    .filter((t) => t.firstInProgressAt != null && t.clearedAt != null)
+    .map((t) => cycleTimeHours(t.firstInProgressAt as Date, t.clearedAt as Date, t.blockedHours ?? 0));
+
+  return {
+    medianHours: hours.length > 0 ? median(hours) : null,
+    sampleSize: hours.length,
+  };
+}

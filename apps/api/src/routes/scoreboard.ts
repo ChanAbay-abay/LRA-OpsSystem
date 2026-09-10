@@ -34,6 +34,17 @@
  * roster join, the same pattern every other list endpoint in this app
  * already pays for (`routes/tasks.ts`, `routes/briefing.ts`,
  * `routes/now.ts`).
+ *
+ * Cycle time (PRD.md §4/§6.5) is computed across ALL of a person's
+ * ever-cleared tasks, not scoped to the reliability window — it is a
+ * separate claim ("how long does work take once you start it") from
+ * "did you keep your commitments," and PRD.md §4 names no window for
+ * it. `ops.tasks.first_in_progress_at` (added 20260910150000) is NULL
+ * for any task that pre-dates that migration or never entered
+ * `in_progress`; `medianCycleTimeHours` excludes those, never zeroing
+ * them, so the median only ever reflects tasks with a real recorded
+ * start. It follows the identical `maySeeReliability` gate as
+ * reliability/hit-rate (Chan's brief: "same visibility rule").
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -41,7 +52,9 @@ import {
   applyRecurringCap,
   isStale,
   manilaWeekStart,
+  medianCycleTimeHours,
   reliability,
+  type MedianCycleTimeResult,
   type ReliabilityResult,
   type ReliabilityWeek,
 } from '@lra/ops-scoring';
@@ -90,6 +103,13 @@ interface BlockCausedRow {
   resolved_at: string | null;
 }
 
+interface ClearedTaskRow {
+  id: string;
+  owner_user_id: string;
+  first_in_progress_at: string | null;
+  cleared_at: string | null;
+}
+
 export interface ScoreboardRow {
   userId: string;
   name: string | null;
@@ -119,6 +139,8 @@ export interface ScoreboardRow {
   hoursBlockedByThem: number;
   /** Hours THIS person's own work has spent blocked, within the reliability window — the exoneration this app owes them. */
   hoursTheyWereBlocked: number;
+  /** PRD.md §4: `cleared_at - first_in_progress_at`, minus blocked hours, median across all-time cleared tasks. Founder/admin only, same gate as reliability. */
+  cycleTime: MedianCycleTimeResult;
 }
 
 interface ScoreboardSummary {
@@ -308,6 +330,51 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
     blockedHoursByBlocker.set(b.blocking_user_id, (blockedHoursByBlocker.get(b.blocking_user_id) ?? 0) + hours);
   }
 
+  // --- Cycle time (PRD.md §4): every task this person has ever cleared,
+  // with a real recorded start. Not scoped to the reliability window —
+  // "how long work takes once started" is a different claim from "did
+  // you keep your commitments," and PRD.md §4 names no window for it.
+  // Tasks with a null `first_in_progress_at` (pre-date the 20260910150000
+  // migration, or never entered `in_progress`) are excluded entirely by
+  // the `.not(...)` filter below, before `medianCycleTimeHours` ever sees
+  // them — never zeroed, never approximated from `created_at`.
+  const { data: clearedTasksData, error: clearedTasksError } = await db
+    .schema('ops')
+    .from('tasks')
+    .select('id, owner_user_id, first_in_progress_at, cleared_at')
+    .eq('status', 'cleared')
+    .not('first_in_progress_at', 'is', null);
+  if (clearedTasksError) throw clearedTasksError;
+  const clearedTasks: ClearedTaskRow[] = clearedTasksData ?? [];
+  const clearedTaskIds = clearedTasks.map((t) => t.id);
+
+  // Blocked hours per cleared task, so cycle time excludes time spent
+  // waiting on someone else (PRD.md §4's "minus total blocked time").
+  // A still-open block on an already-cleared task is a data anomaly, not
+  // something this route should assume away — fall back to `now` exactly
+  // like the "hours they were blocked" computation above.
+  const { data: cycleBlocksData, error: cycleBlocksError } = clearedTaskIds.length
+    ? await db.schema('ops').from('task_blocks').select('task_id, created_at, resolved_at').in('task_id', clearedTaskIds)
+    : { data: [] as Array<{ task_id: string; created_at: string; resolved_at: string | null }>, error: null };
+  if (cycleBlocksError) throw cycleBlocksError;
+  const blockedHoursByTask = new Map<string, number>();
+  for (const b of cycleBlocksData ?? []) {
+    const end = b.resolved_at ? new Date(b.resolved_at) : now;
+    const hours = Math.max(0, (end.getTime() - new Date(b.created_at).getTime()) / 3_600_000);
+    blockedHoursByTask.set(b.task_id, (blockedHoursByTask.get(b.task_id) ?? 0) + hours);
+  }
+
+  const clearedTasksByUser = new Map<string, Array<{ firstInProgressAt: Date | null; clearedAt: Date | null; blockedHours: number }>>();
+  for (const t of clearedTasks) {
+    const arr = clearedTasksByUser.get(t.owner_user_id) ?? [];
+    arr.push({
+      firstInProgressAt: t.first_in_progress_at ? new Date(t.first_in_progress_at) : null,
+      clearedAt: t.cleared_at ? new Date(t.cleared_at) : null,
+      blockedHours: blockedHoursByTask.get(t.id) ?? 0,
+    });
+    clearedTasksByUser.set(t.owner_user_id, arr);
+  }
+
   // --- This week's raw/capped points, from the same view /points reads.
   const { data: balancesData, error: balancesError } = await db
     .schema('ops')
@@ -382,6 +449,7 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
         reliabilitySettings: { windowWeeks, halfLifeWeeks, minWeeksForRating },
         hoursBlockedByThem: Math.round((blockedHoursByBlocker.get(m.userId) ?? 0) * 10) / 10,
         hoursTheyWereBlocked: Math.round((blockedHoursByOwner.get(m.userId) ?? 0) * 10) / 10,
+        cycleTime: medianCycleTimeHours(clearedTasksByUser.get(m.userId) ?? []),
       };
     })
     .sort((a, b) => b.currentWeek.cappedScore - a.currentWeek.cappedScore);
@@ -404,14 +472,19 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
 
 type PublicLastClosedWeek = Omit<NonNullable<ScoreboardRow['lastClosedWeek']>, 'hitRate'> & { hitRate?: number | null };
 
-type PublicRow = Omit<ScoreboardRow, 'reliability' | 'reliabilitySettings' | 'lastClosedWeek'> & {
+type PublicRow = Omit<ScoreboardRow, 'reliability' | 'reliabilitySettings' | 'lastClosedWeek' | 'cycleTime'> & {
   reliability?: ReliabilityResult;
   reliabilitySettings?: ScoreboardRow['reliabilitySettings'];
   lastClosedWeek: PublicLastClosedWeek | null;
+  cycleTime?: MedianCycleTimeResult;
 };
 
 function stripReliability(row: ScoreboardRow): PublicRow {
-  const { reliability: _reliability, reliabilitySettings: _reliabilitySettings, ...rest } = row;
+  // Cycle time follows the identical rule as reliability/hit-rate — the
+  // key is genuinely absent from the JSON for anyone who isn't
+  // founder/admin, not hidden client-side (Chan's brief, PLAN.md §10 #4's
+  // established pattern applied to the same gate).
+  const { reliability: _reliability, reliabilitySettings: _reliabilitySettings, cycleTime: _cycleTime, ...rest } = row;
   return {
     ...rest,
     lastClosedWeek: row.lastClosedWeek

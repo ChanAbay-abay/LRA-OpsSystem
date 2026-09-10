@@ -72,10 +72,20 @@ interface PersonScoreboard {
   reliabilitySettings?: { windowWeeks: number; halfLifeWeeks: number; minWeeksForRating: number };
   hoursBlockedByThem: number;
   hoursTheyWereBlocked: number;
+  // PLAN.md Phase 8 (cycle time): absent, not null, for anyone who isn't
+  // founder/admin — same server-side strip as `reliability` above,
+  // `apps/api/src/routes/scoreboard.ts`'s `stripReliability`.
+  cycleTime?: { medianHours: number | null; sampleSize: number };
 }
 
 function pct(n: number | null): string {
   return n == null ? '—' : `${Math.round(n * 100)}%`;
+}
+
+/** `40.5h` under two days, `3.4d` at or beyond — matches how a person
+ *  actually talks about how long something took. */
+function formatCycleTime(hours: number): string {
+  return hours < 48 ? `${hours.toFixed(1)}h` : `${(hours / 24).toFixed(1)}d`;
 }
 
 export function PersonPage() {
@@ -210,6 +220,31 @@ export function PersonPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Median cycle time (PRD.md §4/§6.5). Founder/admin only, same gate
+                  as reliability — the API strips the key entirely for anyone
+                  else, so this section is skipped rather than rendered empty. */}
+              {canSeeReliability ? (
+                <div className="mb-6 rounded-xl border border-hairline bg-surface p-5">
+                  <h2 className="mb-3 text-subtitle text-ink">Median cycle time</h2>
+                  {p.cycleTime && p.cycleTime.sampleSize > 0 ? (
+                    <>
+                      <span className="num text-[40px] font-medium leading-none text-ink">
+                        {formatCycleTime(p.cycleTime.medianHours as number)}
+                      </span>
+                      <p className="mt-2 text-body-sm text-ink-3">
+                        Median of {p.cycleTime.sampleSize} cleared task{p.cycleTime.sampleSize === 1 ? '' : 's'} with a
+                        recorded start. Cleared minus first moved to in progress, blocked time excluded.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-body-sm text-ink-3">
+                      No cycle-time data yet. This figure only counts tasks that first moved to “In progress” on or
+                      after 2026-09-10 — earlier tasks have no recorded start, so nothing is guessed on their behalf.
+                    </p>
+                  )}
+                </div>
+              ) : null}
 
               {/* The audit trail — every number reliability() used, so the score is
                   hand-recomputable. Founder/admin only; for everyone else this

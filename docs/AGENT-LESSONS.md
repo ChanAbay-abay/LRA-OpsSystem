@@ -117,3 +117,35 @@ actually tried the alternatives.
 **Do not dismiss such reports either** — commit 52e00ea fixed a case where three rules really
 did deadlock. That is precisely why the claim was worth checking instead of believing or
 ignoring.
+
+---
+
+## 7. A trigger can trip its own guard
+
+**2026-09-10.** The cycle-time migration added `first_in_progress_at`, stamped by
+`ops.enforce_task_transition` on the first move into `in_progress`, plus a forgery guard
+refusing any client write to that column:
+
+```sql
+new.first_in_progress_at := now();          -- the trigger's own stamp
+...
+if new.first_in_progress_at is distinct from old.first_in_progress_at then
+  raise exception '... is a server-derived stamp and cannot be changed';
+```
+
+The guard cannot tell the trigger's own assignment from a client's. So **every real user's
+`todo -> in_progress` move raised**, and starting a task would have been impossible for
+everyone except system and admin callers. The fix is a local flag (`v_stamped`) set where the
+trigger stamps, and consulted by the guard.
+
+The pattern generalises: whenever a trigger both **writes** a protected column and **guards**
+that column against writes, the guard must distinguish its own write. Comparing `new` to `old`
+cannot do that, because by then the trigger's own assignment is already in `new`.
+
+**What actually caught it:** the RLS suite, on the assertion that *staff CAN still move a
+locked committed task's status* — an **allow** test, not a refusal test. A suite made only of
+"this must be refused" assertions would have gone green while the app was unusable.
+
+**Do:** run the suite against the database **before** treating a migration as landed, not
+after. This migration was reviewed by two agents and read as correct by both; it took
+execution to find it.
