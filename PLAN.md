@@ -1704,3 +1704,69 @@ That is a piece of work to scope, not a brave click at the end of a session, whi
 is written down here rather than attempted. Credit where due: the framing that a click is as
 blind as an endpoint test came from the peer session, and it is the argument that turns
 "try it on a quiet Monday" into an obviously bad plan.
+
+---
+
+## 13. Chan's asks, 2026-09-10 (evening)
+
+> "go do everything you said. but make sure for the monday briefing one the admin and
+> founder be able to edit stuff. GM can send a request to edit (should be done by bulk like
+> an edit feature on google docs), then approve by admin or founder showing what changed
+> like before and after"
+
+"Everything you said" is the three items §12.6 left open, plus a new feature. Full
+specification: `.claude/state/CONTRACT-BULK-EDITS.md`.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Bulk edit suggestions — GM proposes many, founder/admin approves one batch | in flight |
+| 2 | Founder/admin edit the briefing directly | in flight |
+| 3 | The disposable week, and driving the irreversible transitions | in flight |
+| 4 | An `admin` demo login, for the two uncovered admin screens | pending lane C |
+| 5 | Rotate the database password | **Chan only** |
+
+### 13.1 Bulk is a wrapper, not a new mechanism
+
+`ops.task_edit_requests` already carries, per item, `change_*` flags paired with `proposed_*`
+columns for the five defining fields, plus `before_values` snapshotted at request time and
+`after_values` filled from what was actually applied. **That is already Chan's
+before-and-after.** So bulk adds `ops.task_edit_batches` and a nullable `batch_id` — NULL
+preserving today's single-request behaviour exactly — and one atomic decide function that
+sets each child's status so the **existing** apply trigger does the work. One apply path, and
+it is the proven one.
+
+Atomicity is the requirement, not a nicety. §12.7 records three defects whose shape was
+"correct response, broken side effect"; a half-applied batch of edits to the locked Monday
+record would be the worst instance of that pattern this system could produce.
+
+### 13.2 Widening approval, and the trap inside it
+
+Chan said "approve by admin or founder", which **supersedes** 20260910140000's deliberate
+choice of `core.is_clearing_founder()`. The migration says so explicitly rather than leaving
+a comment that contradicts its own code.
+
+The trap: `core.is_founder()` admits admin — which he asked for — but does **not** exclude a
+read-only founder, and ERC and DCA both hold `founder` authority. Without
+`and not core.is_read_only()`, two outside observers could approve edits to the record this
+entire system exists to make un-rewritable. That is the same defect class found three
+separate times on 2026-09-10 (§12.3, §12.6), which is why it is called out in the contract
+rather than left to be noticed.
+
+### 13.3 The admin demo account — created, used, then deactivated
+
+`/admin/everything` and `/admin/audit` have never had UI coverage because no demo login holds
+`admin`, and Chan's own account is the only admin. He has now said go.
+
+**The judgement, stated because it is a real one:** an admin credential is the most
+privileged thing in this platform — admin bypasses `ops.enforce_task_transition` entirely at
+statement 1 and holds the whole provisioning surface — and a demo one has a known password on
+a live project whose auth endpoint is public. Against that: `apps/web/.env` and
+`apps/api/.env` are both gitignored (verified — only `.env.example` is tracked), so no
+password reaches git; `getDemoLogins()` gates the buttons behind two independent dev-only
+checks; and `founder-demo` already carries comparable privilege by the same mechanism.
+
+So the account is created through the sanctioned path (a persona in `scripts/seed-demo.mjs`,
+exactly like the six that exist), used for the coverage pass, and then **deactivated** —
+coverage obtained without leaving a standing admin credential live. Reactivating it for the
+next pass is one flag. That is strictly better than either leaving it live or not covering
+the screens at all.
