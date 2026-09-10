@@ -1640,6 +1640,13 @@ of them settings) and reverting — the row is byte-identical to baseline. The f
 another session's file and is routed to them: `entityId: undefined`, since `ops.settings` is
 a singleton keyed `id = true` and `entity_type` already identifies it.
 
+**Fixed and independently verified (2026-09-10).** The id was dropped rather than invented,
+and every other `writeAudit` call site was swept — `admin.ts` and `stale.ts` all pass genuine
+uuids, settings was the only one. Re-driven through the UI: `stale_after_days` 3 → 4 → 3
+produced **two** audit rows carrying the real before/after (`{"stale_after_days":3}` →
+`{"stale_after_days":4}`, then the reverse), `core.audit_logs` went 53 → 55, and the settings
+row is back at baseline. The trail is a complete and correct record of exactly what was done.
+
 The deeper problem is `writeAudit`'s own contract. Its comment promises an audit failure is
 "logged loudly so the gap is visible rather than silently swallowed" — but `console.error`
 on a server nobody is tailing **is** silently swallowed, and what it swallowed here was the
@@ -1648,7 +1655,14 @@ every person retroactively across the scoreboard's 13-week windows. Not throwing
 an audit failure must not roll back a legitimate business action. But *not throwing* and
 *nobody finding out* are different choices and we currently have the second. **The audit
 table can stop working and no one learns until they go looking for a row that was never
-there.** Raised rather than changed — `lib/supabase.ts` is shared ground.
+there.** Raised rather than changed — `lib/supabase.ts` is shared ground — and then **closed**: audit
+failures are now counted and surfaced by `GET /health`, which degrades to `'degraded'` when
+any write has failed. A service that is still serving but has stopped keeping the record it
+promises to keep should not report `'ok'`; that is the same category of lie as the audit row
+that was not there. Live: `{"status":"ok",...,"audit":{"failures":0,"last":null}}`. A counter
+was chosen over a boot-time self-test — a self-test that writes and deletes a row on every
+boot is more intrusive and catches only schema mismatch at boot, while a counter catches any
+failure at any time and costs nothing.
 
 ### 12.8 The technique for testing an unreachable API
 
