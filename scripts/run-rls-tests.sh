@@ -80,8 +80,29 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # status and an empty terminal, which reads as a hang rather than a
 # failure. `|| rc=$?` keeps psql's own diagnostics and prints them.
 rc=0
+
+# Say what is about to happen, and where. The whole run is captured into
+# `$OUT` -- the canary check below greps it -- so absolutely nothing
+# reaches the terminal until psql exits. That takes ~25s against the
+# pooler, during which a correct run and a wedged connection look
+# identical: a blank terminal. It got interrupted mid-run for exactly
+# that reason. Host only, never the password.
+echo "Running the RLS suite against ${DATABASE_URL##*@}" >&2
+echo "(~25s against a remote database, and nothing prints until it finishes)" >&2
+
 OUT="$("$PSQL" "$DATABASE_URL" -q -f "$HERE/supabase/tests/rls_test.sql" 2>&1)" || rc=$?
-echo "$OUT"
+
+# psql echoes a result set for EVERY `select pg_temp.expect_*()` call --
+# some 200 four-line blocks reading `expect_allowed / (1 row)`, carrying
+# no information, ahead of the two tables that carry all of it. By
+# default print from the report header onward; RLS_VERBOSE=1 prints the
+# lot. On a run that never reached the report, print everything, because
+# then the noise IS the diagnostic.
+if [ "${RLS_VERBOSE:-}" = "1" ] || ! printf '%s\n' "$OUT" | grep -q '^ *area *|'; then
+  printf '%s\n' "$OUT"
+else
+  printf '%s\n' "$OUT" | sed -n '/^ *area *|/,$p'
+fi
 
 # A suite that ran and failed says so below, and its own message is the
 # better one -- so only speak up here when psql died before producing a
