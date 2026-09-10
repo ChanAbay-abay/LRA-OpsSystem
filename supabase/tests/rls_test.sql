@@ -181,7 +181,13 @@ select t.v, 'test-' || t.k || '@lra.invalid',
 from t_ids t;
 
 insert into core.memberships (user_id, module, position)
-select v, 'ops', (case when k in ('sales','broker') then k else 'other' end)::core.position
+-- 'gm' must carry position 'gm', not 'other'. The transition trigger
+-- decides "is this task GM-owned?" from the membership POSITION, not from
+-- authority, so a gm persona positioned as 'other' silently exercises the
+-- wrong branch of the verify rung. That went unnoticed while no assertion
+-- depended on GM-owned semantics; the settlement-forgery tests added in
+-- 20260910160000 do, and three of them failed because of it.
+select v, 'ops', (case when k in ('sales','broker','gm') then k else 'other' end)::core.position
 from t_ids
 where k <> 'other';   -- 'other' is deliberately not an ops member -- the read-scoping victim.
 
@@ -1254,6 +1260,109 @@ select pg_temp.expect_rows('edit-requests',
   'the approved request recorded after_values for the applied change',
   $sql$select count(*) from ops.task_edit_requests where id = (select v from t_meta where k='edit_req1')
        and status = 'approved' and after_values ->> 'title' = 'TEST-taskA (renamed)'$sql$, 1);
+
+-- =======================================================================
+-- 2026-09-10 adversarial sweep fixes
+-- (docs/test-evidence/2026-09-10-adversarial-sweep.md,
+--  20260910160000_adversarial_sweep_fixes.sql). One attack per defect,
+-- plus the allow cases that prove nothing legitimate broke -- lesson §7
+-- exists precisely because a suite of only-refusal assertions can go
+-- green while the real path is broken.
+-- =======================================================================
+
+-- === Defect 1: core.memberships SELECT was infinitely recursive =======
+--
+-- Before the fix this raised 42P17 for every caller, admin or not.
+-- Regression: a plain non-admin member can read the table at all, and
+-- sees every active membership (module-agnostic, matching the policy's
+-- own original EXISTS) -- not just their own row. Counted against
+-- `t_ids` rather than a hardcoded number, and scoped to this file's own
+-- fixture user_ids, so pre-existing production membership rows in a
+-- real target database cannot make this assertion flaky either way.
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_rows('memberships',
+  'a non-admin authenticated member can SELECT core.memberships without recursing, '
+  'and sees every active test membership',
+  $sql$select count(*) from core.memberships where user_id in (select v from t_ids)$sql$,
+  (select count(*)::int from t_ids where k <> 'other'));
+
+-- === Defect 2: founder_id/founder_acted_at/cleared_at/points_awarded ===
+--     forgeable at any status, not just via the transition that stamps
+--     them.
+--
+-- task3 (owner: gm, still sitting at 'submitted' since attack 8 refused
+-- the GM's own self-verify attempt) is reused so the attack has a task
+-- that has never been cleared.
+
+select pg_temp.become((select uid from p where k='founder'));
+select pg_temp.expect_blocked('ladder',
+  'a founder cannot forge points_awarded on a task that is not being cleared '
+  '(status stays submitted, no transition at all)',
+  $sql$update ops.tasks set points_awarded = 999 where id = (select v from t_meta where k='task3')$sql$);
+
+select pg_temp.expect_allowed('lifecycle',
+  'the founder CAN verify task3 (owner is the GM, so only a founder -- not a GM -- may verify)',
+  $sql$update ops.tasks set status = 'verified' where id = (select v from t_meta where k='task3')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'a founder still cannot forge points_awarded once verified, off the real cleared transition',
+  $sql$update ops.tasks set points_awarded = 999 where id = (select v from t_meta where k='task3')$sql$);
+
+select pg_temp.expect_blocked('ladder',
+  'a founder still cannot forge cleared_at directly either -- same guard, same root cause',
+  $sql$update ops.tasks set cleared_at = now() where id = (select v from t_meta where k='task3')$sql$);
+
+select pg_temp.expect_allowed('lifecycle',
+  'the clearing founder CAN clear task3, and the real verified -> cleared transition '
+  'still awards points correctly',
+  $sql$update ops.tasks set status = 'cleared' where id = (select v from t_meta where k='task3')$sql$);
+
+select pg_temp.expect_rows('ladder',
+  'task3 was awarded the catalog default (8 points) by the trigger, not the forged 999',
+  $sql$select points_awarded from ops.tasks where id = (select v from t_meta where k='task3')$sql$, 8);
+
+-- === Defect 3: ops.task_blocks.created_at/resolved_at were fully
+--     client-controlled. ===
+
+select pg_temp.become((select uid from p where k='sales'));
+select pg_temp.expect_allowed_capture('blocks',
+  'a member CAN declare a block on their own task (creation itself is not refused '
+  'by the new timestamp trigger)',
+  $sql$insert into ops.task_blocks (task_id, target, blocking_user_id, reason, created_by, created_at)
+       values ((select v from t_meta where k='main'), 'person',
+               (select uid from p where k='broker'), 'probe: trying to backdate a block 9 days',
+               (select uid from p where k='sales'), now() - interval '9 days')
+       returning id$sql$,
+  'backdated_block');
+
+select pg_temp.expect_rows('blocks',
+  'the fabricated 9-day-old created_at was NOT accepted -- the row is server-stamped '
+  'with the real time instead',
+  $sql$select count(*) from ops.task_blocks
+       where id = (select v from t_meta where k='backdated_block')
+         and created_at > now() - interval '1 minute'$sql$, 1);
+
+select pg_temp.expect_blocked('blocks',
+  'created_at cannot be altered after insert, even by the block''s own creator',
+  $sql$update ops.task_blocks set created_at = now() - interval '30 days'
+       where id = (select v from t_meta where k='backdated_block')$sql$);
+
+select pg_temp.expect_allowed('blocks',
+  'the block''s creator CAN resolve it normally -- the resolve action itself is not refused',
+  $sql$update ops.task_blocks set resolved_at = now() - interval '9 days'
+       where id = (select v from t_meta where k='backdated_block')$sql$);
+
+select pg_temp.expect_rows('blocks',
+  'resolved_at was server-stamped with the real time, not the 9-day-old value the client sent',
+  $sql$select count(*) from ops.task_blocks
+       where id = (select v from t_meta where k='backdated_block')
+         and resolved_at > now() - interval '1 minute'$sql$, 1);
+
+select pg_temp.expect_blocked('blocks',
+  'resolved_at cannot be altered again once a block has been resolved',
+  $sql$update ops.task_blocks set resolved_at = now() - interval '30 days'
+       where id = (select v from t_meta where k='backdated_block')$sql$);
 
 reset role;
 

@@ -149,3 +149,43 @@ locked committed task's status* — an **allow** test, not a refusal test. A sui
 **Do:** run the suite against the database **before** treating a migration as landed, not
 after. This migration was reviewed by two agents and read as correct by both; it took
 execution to find it.
+
+---
+
+## 8. A test fixture that is subtly wrong hides the assertions you add later
+
+**2026-09-10.** `rls_test.sql` built its personas with
+
+```sql
+(case when k in ('sales','broker') then k else 'other' end)::core.position
+```
+
+so the **`gm` persona carried `position = 'other'`**. The transition trigger decides "is this
+task GM-owned?" from the membership *position*, not from authority — so every assertion
+touching a GM-owned task had silently been exercising the wrong branch of the verify rung.
+
+It went unnoticed for 124 assertions because none of them depended on GM-owned semantics. The
+settlement-forgery tests added later did, and three failed at once. The natural reading of
+"three new tests fail" is "the new migration is broken" — the migration was fine.
+
+**Do:** when new assertions fail in a cluster, check whether they are the *first* to depend on
+some property of the fixture. A fixture bug and a product bug present identically; the
+difference is whether older tests were ever exercising the thing at all.
+
+---
+
+## 9. Cleaning up "residue" can destroy real fixtures
+
+**2026-09-10.** Adversarial testing left tasks with names like `HIST-301` and `(RENAMED)`
+titles in the demo project. Deleting them looked like tidying. One of them was a legitimate
+seeded history task that an aborted run had left uncommitted — removing it made the seed
+recreate it, into a week that was by then `closed`, where committing is refused. The seed then
+aborted, twice.
+
+**Do:** before deleting data that looks like debris, check whether something generates it. If a
+script would recreate it, deleting is not cleanup — it is a loop. Fix the generator first.
+
+The generator bug here was itself lesson §5 again: `seedHistory` guarded idempotency by asking
+"is this task already committed?" instead of the database's actual rule, "can this week take a
+commitment at all?" An already-closed history week is the finished artifact and must be skipped
+whole.

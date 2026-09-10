@@ -773,6 +773,23 @@ async function seedHistory(clients) {
     const weekId = week.id;
     console.log(`\n-- ${plan.label}: week ${weekStart} (id ${weekId}, currently ${week.state}) --`);
 
+    // Idempotency, guarded by the database's rule rather than by a list of
+    // things that happened to go wrong before (docs/AGENT-LESSONS.md §5).
+    //
+    // This block builds a week by creating tasks, COMMITTING them, working
+    // them, then closing the week. Committing is refused the moment a week
+    // leaves `planning`, and there is deliberately no reopen path. So on a
+    // re-run, a week that is already `closed` cannot be rebuilt -- and must
+    // not be attempted: a missed title lookup would create a fresh task in
+    // a closed week and then abort trying to commit it, which is exactly
+    // how this script died twice tonight.
+    //
+    // An already-closed history week IS the finished artifact. Skip it.
+    if (week.state === 'closed') {
+      console.log(`  [skip] ${plan.label} is already closed; its history is built. Nothing to do.`);
+      continue;
+    }
+
     // 1. Create + commit every hand-seeded task while the week can still
     //    take commitments -- committing is refused once it leaves `planning`
     //    (`ops.enforce_task_transition` 2a), so this has to happen before
@@ -851,7 +868,15 @@ async function seedHistory(clients) {
         // dated inside that week for the exoneration rule to see it as
         // "declared before the week ended" rather than as declared
         // today, long after every one of these weeks closed.
-        await ensureTaskBlock(clients[spec.key], task.id, {
+        // NOTE the client: `svc`, not the persona. Migration
+        // 20260910160000 server-stamps `task_blocks.created_at` and
+        // refuses a client-supplied value, because a backdated block
+        // retroactively exonerates a missed commitment (PRD §5.2) and
+        // inflates the blocked-hours read aloud at the briefing. The one
+        // exception is `core.is_system_caller()` — a direct service-role
+        // connection with no JWT claims — which is exactly what seeding
+        // historical weeks is. As a persona this insert is now refused.
+        await ensureTaskBlock(svc, task.id, {
           task_id: task.id, target: 'external', blocking_external: 'Bureau of Customs',
           reason:
             'Waiting on BOC to lift an alert before this shipment can move; declared mid-week, so this ' +
