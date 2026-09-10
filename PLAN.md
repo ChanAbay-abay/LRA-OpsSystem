@@ -1380,3 +1380,141 @@ holds for any portalled control put inside a card later. Verified both ways in t
 the menu now opens exactly one dialog, and clicking the card body still opens the task.
 
 Everything else this session is applied, built and tested.
+
+---
+
+## 12. Chan's asks, 2026-09-10 (leaving for the day)
+
+> "keep working on the project. i want it to be good and perfect. btw i want you to group
+> the columns. backlog and this week should be on the same column just on switchable tabs.
+> verified and cleared should also work the same. keep going and ping me on my remote
+> control if you need any input but if there are commands to run, run them on your own. do
+> not ask me to run anything since i will only have my phone."
+
+**Operating constraint for this stretch: he has a phone and nothing else.** No command may
+be handed to him, and no work may end in a state that waits on him. A question worth his
+time goes to remote control; anything else gets a defensible decision and a flagged
+one-line reversal.
+
+| # | Ask | Status |
+|---|---|---|
+| 1 | Group the board columns: Backlog+This week tabbed, Verified+Cleared tabbed | in flight |
+| 2 | "good and perfect" — keep hardening | standing |
+
+### 12.1 Grouping is an information-architecture change, not a layout tweak
+
+Seven lanes become five (Backlog/This week · In progress · Blocked · Submitted ·
+Verified/Cleared), and the full specification with its nine already-made decisions is
+`.claude/state/CONTRACT-BOARD-GROUPING.md`. Two of those decisions are the ones that matter,
+because they are where this change goes wrong:
+
+- **Dimming is per tab, never per group.** `this_week` is deliberately never a drop target
+  ("this week's commitments are set in the Monday briefing, not on the board"), so a lane
+  that dims as a whole would look dead on *every single drag*. Both tabs of a group are
+  their own droppables, the tab strip stays live during a drag, and a card can be dropped
+  onto "Cleared" without switching to it first.
+- **A tab may hide cards; it may never hide the existence of work.** Both tab counts are
+  always visible, and — the sharp edge — the board's search and owner filter must not be
+  able to bury a match in the inactive tab. When the active tab has no matches and its
+  sibling does, the empty body offers a control that says so and switches. A person who
+  searches for a task and is told nothing exists will conclude the record was lost, which
+  is the exact opposite of what this system is for.
+
+`lib/task-permissions.ts` is untouched and `moveRefusal` does not learn about groups. A tab
+is a presentation of an existing column; the ladder stays the ladder.
+
+### 12.2 What "keep going" was spent on
+
+An adversarial pass over every screen except the board, aimed squarely at the class of
+defect §11.1 exposed: **a client/API seam that no test covers.** Seven write paths were dead
+from the UI while every one of their endpoints passed its own API test, because those tests
+call Fastify routes directly and never go through `apps/web/src/lib/api.ts`. Endpoint tests
+are not evidence that a button works. So the instruction to the tester was to exercise every
+write action *through the browser*, not through the router.
+
+### 12.3 The service-role read-only gap, swept to completion
+
+A peer session found that `/admin/settings`, once opened to founders, handed ERC and DCA
+eight editable inputs and a live Save that `ops.settings`' RLS would refuse — and then that
+`routes/admin.ts` had no read-only guard at all. Both are instances of one mechanism:
+
+**RLS's `not core.is_read_only()` cannot protect a service-role connection.**
+`core.is_read_only()` reads `core.auth_user_id()`, which is null as the service role, so it
+returns `false` for everyone. Any router whose writes run on `serviceClient` therefore has
+no read-only guard unless it makes the check itself.
+
+Rather than stop at the reported instance, the whole pattern was swept: 20 `serviceClient()`
+call sites across 10 route/service files. All but two are read-only name/roster joins over
+rows already fetched on `userClient`. The service-role **write** paths are exactly two:
+
+| Router | Writes | Status |
+|---|---|---|
+| `routes/admin.ts` | the provisioning surface — invite, patch, delete, restore, purge | guarded by the peer |
+| `routes/jobs.ts` | `drain-outbox` (inserts `core.notifications`), `flag-stale` (flags tasks) | **was unguarded** |
+
+`jobs.ts` is `requireAuthority('admin')`-gated, and an account can hold `authority = 'admin'`
+**and** `read_only` simultaneously — `/admin/users` can create one in two clicks. Such an
+account kept both jobs while every screen told it, correctly, that it could change nothing.
+
+The guard is now **one** hook, `refuseReadOnlyWrites` in `middleware/auth.ts`, used by both
+routers — extracted only once `jobs.ts` became the second real consumer. Two routers making
+the same security decision by hand is one of them drifting later, which is the same
+hand-copied-mirror defect §11.1 describes. The invariant is recorded on the hook itself:
+**any new router that writes on `serviceClient` must add it.**
+
+Pinned by `apps/api/test/read-only-writes.test.ts` (11 assertions: every mutating verb
+refused with a readable 403 `READ_ONLY_ACCOUNT`, every read verb allowed, a normal admin
+untouched). **Honest gap:** there is no seeded read-only *admin* to drive it end-to-end —
+ERC and DCA are read-only *founders*, refused a step earlier — and creating one on the live
+project purely to test it was not worth the residue. So the hook is proven at the unit
+level, and the live check only confirms the router still loads and refuses non-admins
+(`403 This action requires one of: admin` for founder-demo and erc-demo).
+
+**The general rule worth carrying forward:** widening *who can reach a screen* is not the
+same decision as widening *who can write from it*. A read-only account makes those two come
+apart every single time, and only one of them is ever remembered.
+
+### 12.4 The invariant is now checked, not commented
+
+A peer made the observation that mattered more than either fix: **the invariant in §12.3 was
+a comment, and a comment is exactly what silently failed.** "Any new router writing on
+`serviceClient` must add this hook" held in `admin.ts` and quietly did not in `jobs.ts` —
+and it was unfindable by reading `admin.ts`, because `jobs.ts`' writes live one import away
+in `services/`.
+
+`apps/api/test/service-role-guard.test.ts` checks it mechanically:
+
+1. **Detect** the modules that perform a service-role write — a variable bound *solely* to
+   `serviceClient()` with a write verb called on it. Variable granularity is load-bearing:
+   `db` means the service role in `admin.ts` and the caller's own client in `tasks.ts`, so a
+   name-blind or file-membership scan reports the wrong files. Today: `routes/admin.ts`,
+   `services/outbox.ts`, `lib/supabase.ts`.
+2. **Classify** them in a declared table, one written justification each. A new
+   service-role write anywhere fails the test until someone decides which kind it is.
+   `lib/supabase.ts` is declared but excluded from the "primary" set: `writeAudit()` and
+   `enqueueNotification()` run as the service role *by design regardless of caller* and
+   only ever downstream of an action RLS already gated — an audit row must be written even
+   for a caller with no right to write the audit table, which is the whole point of one.
+3. **Walk** each router's local imports transitively and assert every router that can reach
+   a *primary* service-role write registers `refuseReadOnlyWrites`. No depth cap: the shape
+   that defeats one already exists (`jobs.ts` → `services/stale.ts` → `lib/supabase.ts`).
+
+**Both controls, because a check can fail in two directions.** A positive control asserts
+the detector finds `admin.ts` and `outbox.ts` — a detector matching nothing would pass
+forever. Negative controls assert it never flags `catalog.ts` (which mentions
+`serviceClient` only in a comment recording that it deliberately avoids one) or
+`settings.ts` (whose own write is on `userClient` and which merely imports `writeAudit`).
+For a check like this, **matching everything is the likelier failure and the more dangerous
+one**, because it trains whoever hits it to add a declaration rather than look. Both
+assertions are exact sets, not supersets: a `contains` assertion lets the next real gap hide
+inside a long list.
+
+**Proved red twice** — a green invariant test is worth nothing until it has been seen to
+fail. Removing the hook from `jobs.ts` produces 2 failures including the named "the instance
+this test exists for"; adding a throwaway router that imports `drainOutbox` without the hook
+produces 1 failure naming the new file and printing the fix. `apps/api`: 70 → **87 tests**.
+
+**Residual hole, recorded rather than left implicit:** the declared table is a human
+artefact. If a *primary* service-role write is later added to `lib/supabase.ts`, the
+exact-set assertion stays green because that module is already declared. Closing it would
+need symbol-level dataflow; the risk is noted in the table entry itself.

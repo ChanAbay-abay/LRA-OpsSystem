@@ -19,7 +19,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ApiError } from '../lib/domain.js';
-import { authenticate, requireAuthority } from '../middleware/auth.js';
+import { authenticate, refuseReadOnlyWrites, requireAuthority } from '../middleware/auth.js';
 import { serviceClient, writeAudit } from '../lib/supabase.js';
 import { webAppUrl } from '../lib/env.js';
 
@@ -96,28 +96,14 @@ export default async function adminRoutes(app: FastifyInstance) {
   // and cannot be -- `core.is_read_only()` reads `core.auth_user_id()`, which
   // is null on a service-role connection, so it returns false for everyone.
   //
-  // Every other write path in the API runs on `userClient` and is therefore
-  // covered by that clause. This router is the single exception, so the check
-  // the database would have made is made here instead. Without it, an account
-  // marked read-only that also holds `authority = 'admin'` would keep the full
-  // provisioning surface -- invite, patch, delete, restore, purge -- while the
-  // UI told everyone it could write nothing. Nothing currently seeded is such
-  // an account (ERC and DCA are founders, and are refused by the hook above),
-  // but /admin/users can create one in two clicks, and a guarantee that holds
-  // only because nobody has exercised the gap is not a guarantee.
-  //
-  // Reads are deliberately untouched: read-only means "sees what oversight
-  // sees and writes nothing", so only the mutating verbs are refused.
-  app.addHook('onRequest', async (req) => {
-    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return;
-    if (req.user.readOnly) {
-      throw new ApiError(
-        403,
-        'This account is read-only. It can see everything here and change nothing.',
-        'READ_ONLY_ACCOUNT'
-      );
-    }
-  });
+  // So the check the database would have made is made here instead. The hook
+  // itself lives in `middleware/auth.ts` because `routes/jobs.ts` turned out to
+  // have the identical gap -- both of its handlers write on `serviceClient`
+  // behind the same `requireAuthority('admin')` -- and two routers making the
+  // same security check by hand is one of them drifting later. Read
+  // `refuseReadOnlyWrites`' own comment for the full reasoning; the invariant it
+  // records is that ANY new router writing on `serviceClient` must add it.
+  app.addHook('onRequest', refuseReadOnlyWrites);
 
   app.post('/users', async (req) => {
     const body = inviteSchema.parse(req.body);

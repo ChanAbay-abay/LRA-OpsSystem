@@ -8,13 +8,18 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { authenticate, requireAuthority } from '../middleware/auth.js';
+import { authenticate, refuseReadOnlyWrites, requireAuthority } from '../middleware/auth.js';
 import { drainOutbox } from '../services/outbox.js';
 import { flagStaleTasks } from '../services/stale.js';
 
 export default async function jobsRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
   app.addHook('onRequest', requireAuthority('admin'));
+  // Both handlers below write on `serviceClient` (services/outbox.ts inserts
+  // core.notifications; services/stale.ts flags tasks), so RLS's
+  // `not core.is_read_only()` is never consulted here -- see
+  // `refuseReadOnlyWrites`. A read-only admin would otherwise keep both jobs.
+  app.addHook('onRequest', refuseReadOnlyWrites);
 
   app.post('/drain-outbox', async () => {
     const result = await drainOutbox();

@@ -94,3 +94,43 @@ export function requireMembership(module: Module) {
     }
   };
 }
+
+/**
+ * Refuse a write from a read-only account, in a router whose writes run on
+ * `serviceClient`.
+ *
+ * WHY THIS EXISTS AT ALL. Every write policy in
+ * 20260910120100_core_read_only_accounts.sql carries `not core.is_read_only()`,
+ * and that clause covers every write path in the API that runs on
+ * `userClient`. It cannot cover a service-role connection: `core.is_read_only()`
+ * reads `core.auth_user_id()`, which is null as the service role, so the
+ * function returns false for everyone. A router that writes as the service role
+ * therefore has no read-only guard at all unless it makes the check itself.
+ *
+ * Two routers do: `routes/admin.ts` (the whole provisioning surface — invite,
+ * patch, delete, restore, purge) and `routes/jobs.ts` (drain-outbox and
+ * flag-stale, which write notifications and task flags). Both are
+ * `requireAuthority('admin')`-gated, and an account can hold `authority =
+ * 'admin'` AND `read_only` at the same time — `/admin/users` can create one in
+ * two clicks. Such an account would keep both surfaces in full while every
+ * screen told it, correctly, that it could change nothing.
+ *
+ * Extracted here once `jobs.ts` became the second real consumer, per the
+ * standing rule against speculative abstraction. **Any new router that writes on
+ * `serviceClient` must add this hook** — that is the invariant to preserve, and
+ * the reason it lives next to the other authority hooks rather than inline in
+ * one route file.
+ *
+ * Reads are deliberately untouched: read-only means "sees what oversight sees
+ * and writes nothing", so only the mutating verbs are refused.
+ */
+export async function refuseReadOnlyWrites(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return;
+  if (req.user.readOnly) {
+    throw new ApiError(
+      403,
+      'This account is read-only. It can see everything here and change nothing.',
+      'READ_ONLY_ACCOUNT'
+    );
+  }
+}
