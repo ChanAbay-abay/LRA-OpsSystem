@@ -116,15 +116,121 @@ skipped. It exits 0 only if each of the five side-effect groups reported at
 least one failure. Measured: **42 assertions go red across all five
 groups**, versus 0 in a normal run.
 
+## `simulate`: several consecutive weeks, so cross-week behaviour has something to run on
+
+`run` proves one Monday works. It cannot show what only emerges **across**
+weeks: a carry-over's age growing, a reliability score computed over a real
+multi-week window, a blocked commitment being exonerated and that exoneration
+surviving into the following week, or points accumulating while a still-open
+week stays outside a closed-only aggregate. None of that exists inside a
+single week, so `run` structurally cannot test it.
+
+```
+node scripts/disposable-week.mjs simulate <n>       n >= 4
+node scripts/disposable-week.mjs simulate-red <n>    the negative control for the above
+```
+
+**This is not a container.** There is no `supabase start` here (Docker is
+not available in this environment) and no snapshot/restore. `simulate` is
+the same mechanism `run` already uses, repeated: real Mondays, at
+`week_start >= 2099-01-01`, driven through the real API on `:3099` with each
+persona's real JWT, torn down by deleting exactly the rows this harness
+created. "Several weeks passing" is entirely **date arithmetic** — `n`
+consecutive Mondays 7 days apart, starting at `DISPOSABLE_WEEK_START` — not
+elapsed wall-clock time and not a rewound clock. That is sound for
+everything this harness asserts, because every mechanism it drives
+(`ops.close_week`'s rollover, the reliability window's `state = 'closed'`
+filter, `carry_over_count`, `committed_week_id`, `cleared_at`) keys off
+`ops.weeks.week_start`/`week_end` and row timestamps, never off how much
+real time actually passed between one week and the next. It is NOT sound for
+anything that keys off wall-clock elapsed time instead of week arithmetic —
+concretely, `ops.settings.stale_after_days` staleness and any
+`task_blocks.created_at`-windowed figure — which is exactly why `simulate`
+raises exactly one block (an `external`-target block, so it cannot pollute a
+real person's "blocking others" modifier) and otherwise leaves every task's
+`last_activity_at` untouched by anything but the state transitions the
+scenario actually calls for.
+
+**The fixed scenario** (not randomised, so the log and the hand-computed
+expectations below are exact): `sales` never misses — a fresh task,
+committed and cleared, every single week including the last, still-open
+one. `broker` is blocked in week 0 (an external block declared before week 0
+ends), has that block **resolved in week 1** — proving a block crosses the
+week boundary — but the task is deliberately never cleared afterward,
+because `ops.tasks.status === 'cleared'` is checked *before* the block
+lookback in the exoneration query, so clearing it later would silently turn
+week 0 from an exonerated miss into an ordinary hit and there would be
+nothing left to assert. `broker` also picks up a fresh, ordinary task every
+other closed week, so their reliability is a real RATED score, not
+UNRATED. `gm` commits exactly once, in week 0, to a task that is never
+touched again — the control case: no block, so no exoneration, a plain miss
+that keeps carrying every week after. Both `broker`'s week-0 task and `gm`'s
+task are therefore carry-overs from week 1 onward, their age growing by
+exactly 1 every week — "something carries over twice" happens on its own
+once `n >= 4`. The last week is opened and its briefing closed (so
+commitments lock) but `ops.close_week` is never called on it, so there is
+always exactly one still-open week to prove a closed-only aggregate excludes.
+
+**What it asserts, and how "hand-computed" is enforced**, not just claimed:
+reliability/hit-rate is checked two independent ways — weight-invariant
+identities (`0/x = 0`, `x/x = 1`, true regardless of the recency-weighting
+scheme, so they catch a broken exclusion or a flipped numerator/denominator)
+**and** an independent re-transcription of PRD.md §5.2's own formula that
+does not import anything from `packages/ops-scoring/src/reliability.ts`, so
+a weighting bug (wrong half-life, wrong window order) is caught too. Because
+`/api/scoreboard`'s real reliability window is anchored on the **current
+real week** and a 2099 week can never be `< currentWeek.week_start`, none of
+this can be observed through that endpoint at all — by design, that is the
+isolation the whole harness rests on. So `simulate` re-derives
+`weeksByUser` from the driven rows itself (a second, independent
+transcription of `scoreboard.ts`'s own construction, scoped to just the
+disposable weeks) and feeds that into the actual, imported
+`reliability()` from `@lra/ops-scoring` — the real production function, not
+a copy of it — so a bug in the real formula is a bug this harness catches,
+even though the real endpoint structurally cannot see the data.
+
+**A residue `run` cannot reach.** `chronicCarryOverByUser` in
+`scoreboard.ts` reads every currently-open task with **no week filter at
+all**. Once a disposable task's `carry_over_count` reaches 3 — guaranteed by
+`n >= 4` leaving the last week open — it is structurally indistinguishable
+from a real chronic carry-over belonging to whichever demo persona owns it,
+**live, before teardown, inside a single run**. This is the same class of
+residue `--keep` already warns about, just reachable now without `--keep`
+because `simulate` is the first caller that pushes a disposable
+`carry_over_count` past 3 before its own teardown runs. `simulate` asserts
+this causally against each affected persona's own live
+`GET /api/scoreboard` row, before vs. during vs. after, rather than assuming
+it away — see the run's own output for the actual result.
+
+## Proving `simulate` can go red
+
+```
+node scripts/disposable-week.mjs simulate-red <n>
+```
+
+creates the `n` weeks and the ad-hoc tasks (creation is not a transition,
+exactly like `prove-red` above) and then skips every transition — no
+commits, no briefing open/close, no blocks, no status changes, no
+`close_week` — while running the identical cross-week assertion battery
+with identical expectations. With nothing ever committed, every person's
+`ratedWeeks` is 0 and their reliability reads UNRATED; with nothing ever
+closed, there are no carry-overs at all in any week's briefing; with nothing
+ever cleared, both the closed/open points split and the per-day heatmap data
+are empty. It exits 0 only if each of the five cross-week groups
+(carry-over, reliability, blocked-time exoneration, scoreboard accumulation,
+per-day activity) actually reported at least one failure.
+
 ## Commands
 
 ```
-node scripts/disposable-week.mjs run           seed, drive, assert, tear down
-node scripts/disposable-week.mjs run --keep    ... but leave the week (see the warning above)
-node scripts/disposable-week.mjs run --verbose  print detail on passing checks too
-node scripts/disposable-week.mjs teardown      remove every disposable week
-node scripts/disposable-week.mjs inspect       print weeks, templates, roster, row counts
-node scripts/disposable-week.mjs prove-red     the negative control
+node scripts/disposable-week.mjs run              seed, drive, assert, tear down
+node scripts/disposable-week.mjs run --keep       ... but leave the week (see the warning above)
+node scripts/disposable-week.mjs run --verbose     print detail on passing checks too
+node scripts/disposable-week.mjs teardown         remove every disposable week
+node scripts/disposable-week.mjs inspect          print weeks, templates, roster, row counts
+node scripts/disposable-week.mjs prove-red        the negative control for `run`
+node scripts/disposable-week.mjs simulate <n>      n >= 4 consecutive disposable weeks
+node scripts/disposable-week.mjs simulate-red <n>  the negative control for `simulate`
 ```
 
 Credentials come from `apps/api/.env` (Supabase URL + service role, for

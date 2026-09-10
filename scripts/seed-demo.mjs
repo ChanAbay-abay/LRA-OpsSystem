@@ -40,7 +40,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { randomInt } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -77,6 +77,8 @@ const ROTATE = process.argv.includes('--rotate-passwords');
   PLAN.md §13.3 records the judgement in full.
 */
 const WITH_ADMIN = process.argv.includes('--with-admin');
+/** Opt-in: rewrite apps/web/.env's VITE_DEMO_LOGINS with what this run minted. */
+const WRITE_DEMO_LOGINS = process.argv.includes('--write-demo-logins');
 /**
  * `--deactivate=<key>` flips `core.users.is_active` to false for one demo
  * persona and changes nothing else -- no password, no rows, no membership.
@@ -390,6 +392,74 @@ async function upsertMembership(authUserId, persona) {
   if (error) throw error;
 }
 
+
+/**
+ * Keep `apps/web/.env`'s VITE_DEMO_LOGINS honest about these accounts.
+ *
+ * WHY THIS EXISTS. Creating or rotating an account changes its password in
+ * Supabase and nothing else. The login screen's demo buttons read
+ * VITE_DEMO_LOGINS, so every purge+reseed silently invalidated all six of
+ * them: the buttons stayed on screen, looked fine, and returned "Invalid
+ * login credentials" for everybody -- and because the credentials are
+ * printed once and then scroll away, the connection between the reseed and
+ * the broken buttons is not obvious at all. It cost a real debugging
+ * detour on 2026-09-10, where broken demo logins were first read as another
+ * session having rotated something.
+ *
+ * The banner above says "never written to disk", and that stance is right
+ * for a secret. So: WARN by default and say exactly what to paste, and
+ * write only when asked with `--write-demo-logins`. `apps/web/.env` is
+ * gitignored (only `.env.example` is tracked), so the opt-in write puts
+ * nothing new at risk -- it just saves retyping six passwords.
+ */
+function syncDemoLogins(credentials) {
+  if (!credentials.length) return;
+
+  const envPath = new URL('../apps/web/.env', import.meta.url);
+  let current = '';
+  try {
+    current = readFileSync(envPath, 'utf8');
+  } catch {
+    console.warn('\n[note] apps/web/.env not found — VITE_DEMO_LOGINS not checked.');
+    return;
+  }
+
+  const existingLine = current.split('\n').find((l) => l.startsWith('VITE_DEMO_LOGINS='));
+  let existing = {};
+  try {
+    if (existingLine) existing = JSON.parse(existingLine.slice('VITE_DEMO_LOGINS='.length).trim());
+  } catch {
+    existing = {};
+  }
+
+  // Only the accounts this run actually knows a password for. Accounts left
+  // alone keep whatever is already in the file.
+  const merged = { ...existing };
+  for (const c of credentials) merged[c.email] = c.password;
+
+  const stale = credentials.filter((c) => existing[c.email] !== c.password);
+  if (!stale.length) return;
+
+  const line = `VITE_DEMO_LOGINS=${JSON.stringify(merged)}`;
+
+  if (!WRITE_DEMO_LOGINS) {
+    console.warn(
+      `\n[WARNING] ${stale.length} demo password(s) changed, so the login screen's demo\n` +
+        "          buttons in apps/web/.env are now STALE and will fail with\n" +
+        '          "Invalid login credentials". Re-run with --write-demo-logins, or\n' +
+        '          replace that file\'s VITE_DEMO_LOGINS line with:\n\n' +
+        `${line}\n`
+    );
+    return;
+  }
+
+  const next = existingLine
+    ? current.replace(existingLine, line)
+    : `${current.replace(/\n*$/, '\n')}${line}\n`;
+  writeFileSync(envPath, next);
+  console.log(`\n  apps/web/.env updated — ${stale.length} demo login(s) refreshed (--write-demo-logins).`);
+}
+
 async function seed() {
   console.log(`=== LRA Ops :: seeding ${PERSONAS.length} demo accounts (@${DEMO_DOMAIN}) ===\n`);
 
@@ -486,6 +556,8 @@ async function seed() {
 
   console.log('\n=== Credentials (printed once, never written to disk) ===');
   console.table(credentials);
+
+  syncDemoLogins(credentials);
 
   // Three closed weeks of real history BEFORE the current (still-planning)
   // week is touched -- Chan reviews this in the morning and Phase 8's

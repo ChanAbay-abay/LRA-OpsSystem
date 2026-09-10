@@ -58,6 +58,12 @@
  *   node scripts/disposable-week.mjs teardown      remove every disposable week
  *   node scripts/disposable-week.mjs inspect       print current disposable + real state
  *   node scripts/disposable-week.mjs prove-red     the negative control (see below)
+ *   node scripts/disposable-week.mjs simulate <n>       n>=4 consecutive disposable
+ *                                                        weeks, driven end to end,
+ *                                                        asserting what only emerges
+ *                                                        ACROSS weeks (see `simulate`
+ *                                                        below and docs/DISPOSABLE-WEEK.md)
+ *   node scripts/disposable-week.mjs simulate-red <n>   simulate's own negative control
  *
  * PROVING THE HARNESS CAN GO RED. A green suite that cannot fail is worse
  * than no suite. `prove-red` creates the week and the tasks and then SKIPS
@@ -72,6 +78,12 @@ import { createClient } from '@supabase/supabase-js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+// `simulate` needs the ACTUAL reliability formula, not a restatement of
+// it — this is the same built artifact apps/api/src/routes/scoreboard.ts
+// imports (`packages/ops-scoring/dist`), reached here via the npm
+// workspace symlink at the repo root. A wrong number here is a wrong
+// number in production, not a harness bug.
+import { reliability } from '@lra/ops-scoring';
 
 // ---------------------------------------------------------------------
 // Environment. Same convention as scripts/seed-demo.mjs: read
@@ -152,6 +164,11 @@ const GROUPS = {
   lifecycle: 'submit / verify / clear',
   close: 'week close + rollover',
   isolation: 'isolation + teardown',
+  carryover: 'cross-week: carry-over age',
+  reliabilityX: 'cross-week: reliability / hit-rate',
+  scoreboardAccum: 'cross-week: scoreboard accumulation',
+  blocked: 'cross-week: blocked-time exoneration',
+  heatmap: 'cross-week: per-day activity (heatmap data)',
 };
 const checks = [];
 
@@ -1198,6 +1215,500 @@ async function run({ red = false } = {}) {
 }
 
 // ---------------------------------------------------------------------
+// simulate — several consecutive disposable weeks, end to end, to
+// surface what only emerges ACROSS weeks: carry-over age, reliability
+// computed over a real window, blocked-time exoneration surviving a
+// rollover, accumulation that respects closed-vs-open, and the per-day
+// clear counts the contribution heatmap will read.
+//
+// `run` proves a single Monday works. `simulate` proves the calendar
+// works — it never rebuilds anything `run` already covers (recurring
+// generation, audit-row shape, ledger rows per transition, idempotency)
+// and drives NO recurring generation at all: an uncommitted recurring
+// task would sit in `todo` forever and carry every week exactly like
+// this harness's own deliberately-missed task, contaminating the one
+// set of carry-overs this file needs to reason about by hand.
+//
+// THE SCENARIO (fixed, not randomised, so a human can follow the log
+// and the hand-computed expectations below can be exact):
+//   - `sales` NEVER misses: a fresh task, committed and cleared, every
+//     single week — including the last, still-open one.
+//   - `broker` is blocked in week 0 (an external block, declared before
+//     week 0 ends), gets that block RESOLVED in week 1 — proving a
+//     block resolves across the week boundary — but the task is
+//     deliberately never cleared afterward. That is not an oversight:
+//     `ops.tasks.status === 'cleared'` is checked BEFORE the block
+//     lookback in the exoneration query (scoreboard.ts / mirrored
+//     below), so clearing it later would silently convert week 0 from
+//     an exonerated miss into an ordinary hit and this harness would
+//     have nothing left to assert. `broker` also picks up a FRESH,
+//     ordinary task every other closed week (a perfect hit), so their
+//     reliability is a real, non-degenerate RATED score, not UNRATED.
+//   - `gm` commits exactly once, in week 0, to a task that is never
+//     touched again — the control case: no block, so no exoneration,
+//     a plain miss that keeps carrying every week after.
+//   - Both `broker`'s week-0 task and `gm`'s task are therefore
+//     carry-overs from week 1 onward, their age growing by exactly 1
+//     every week — "something carries over twice" happens automatically
+//     once n >= 4.
+//   - The LAST week is deliberately left open (briefing opened and
+//     closed, so commitments lock, but `ops.close_week` is never
+//     called) so requirement 3 — a still-open week must not contribute
+//     where only closed weeks should — has something real to exclude.
+//
+// n must be >= 4: 3 closed weeks is the minimum for anyone to leave
+// UNRATED (`ops.settings.min_weeks_for_rating`, default 3), and a 4th,
+// open week is what proves the closed/open boundary.
+// ---------------------------------------------------------------------
+async function simulate(n, { red = false } = {}) {
+  const act = !red;
+  if (!Number.isInteger(n) || n < 4) {
+    console.error(`[fatal] simulate needs n >= 4 (got ${n}): 3 closed weeks to clear min_weeks_for_rating, plus one still-open week to prove closed-only aggregates exclude it.`);
+    process.exit(1);
+  }
+
+  console.log(`=== simulate ${n} consecutive disposable weeks from ${WEEK_START} ${red ? '(RED CONTROL — transitions skipped on purpose)' : ''} ===`);
+  console.log(`API ${API}\n`);
+
+  console.log('--- pre-run teardown ---');
+  await teardown();
+
+  console.log('\n--- baseline snapshot of every downstream read ---');
+  const baseline = await downstreamSnapshot();
+  const fpBaseline = await fingerprintNonDisposable();
+  const { count: auditBefore } = await core().from('audit_logs').select('*', { count: 'exact', head: true });
+  console.log(`  audit_logs=${auditBefore}`);
+
+  const { data: settingsRow } = await ops().from('settings').select('*').eq('id', true).single();
+  const halfLifeWeeks = settingsRow?.reliability_half_life_weeks ?? 3;
+  const minWeeksForRating = settingsRow?.min_weeks_for_rating ?? 3;
+  console.log(`  ops.settings: reliability_half_life_weeks=${halfLifeWeeks} min_weeks_for_rating=${minWeeksForRating}`);
+
+  const pricedType = await pickPricedTaskType();
+  const P = pricedType?.default_points ?? 0;
+  const sales = await signIn('sales');
+  const broker = await signIn('broker');
+  const gm = await signIn('gm');
+  await signIn('founder');
+  console.log(`  priced task type: ${pricedType?.name ?? '(none)'} (${P} pts)`);
+
+  // Causal, immune to peer noise: the REAL demo personas' own live
+  // reliability modifiers, captured before this run touches anything.
+  // chronicCarryOverByUser in scoreboard.ts reads EVERY currently-open
+  // task with no week filter, so once a disposable task's
+  // carry_over_count reaches 3 (guaranteed here once n >= 4, because the
+  // last week is left open on purpose) it is structurally
+  // indistinguishable from a real chronic carry-over for whichever real
+  // account owns it — this is the same residue docs/DISPOSABLE-WEEK.md
+  // already names for `--keep`, just reachable now WITHOUT `--keep`,
+  // from inside a single run, because `simulate` is the first caller to
+  // push carry_over_count past 3 before its own teardown.
+  async function liveReliabilityFor(userId) {
+    const sb = await call('founder', 'GET', '/api/scoreboard');
+    const row = (sb.rows ?? []).find((r) => r.userId === userId);
+    return { chronicCarryOver: row?.reliability?.modifiers?.chronicCarryOver ?? null, score: row?.reliability?.score ?? null };
+  }
+  const brokerBefore = await liveReliabilityFor(broker.userId);
+  const gmBefore = await liveReliabilityFor(gm.userId);
+
+  const weeks = []; // { index, weekStart, weekId }
+  const salesTasks = []; // { weekIndex, id }
+  const brokerTasks = []; // { weekIndex, id }
+  let gmTask = null;
+  const clears = []; // { who, id, weekIndex, clearedAt }
+
+  try {
+    for (let i = 0; i < n; i++) {
+      const weekStart = isoPlus(WEEK_START, i * 7);
+      const isLast = i === n - 1;
+      console.log(`\n--- week ${i}: ${weekStart}${isLast ? ' (stays OPEN — close_week is never called)' : ''} ---`);
+
+      // Week creation, like task creation below, is not a "transition" —
+      // it happens in both modes, exactly like run()'s section 1. In RED
+      // mode this is also the ONLY way week i+1 ever exists, because
+      // nothing ever closes to create it automatically.
+      const week = await call('founder', 'POST', '/api/weeks', { weekStart });
+      const weekId = week.id;
+      weeks.push({ index: i, weekStart, weekId });
+
+      // --- carry-over check, BEFORE this week's own new work, so it
+      // reflects only what rolled in from the PREVIOUS week's close.
+      if (i >= 1) {
+        const briefing = await call('founder', 'GET', `/api/briefing/${weekId}`);
+        const carryMap = new Map((briefing.carryOvers ?? []).map((c) => [c.id, c]));
+        if (act) {
+          const b0 = brokerTasks.find((t) => t.weekIndex === 0);
+          for (const [label, task] of [
+            ["broker's blocked wk0 task", b0],
+            ["gm's never-touched wk0 task", gmTask],
+          ]) {
+            truthy(GROUPS.carryover, `week ${i}: ${label} is a carry-over`, task && carryMap.has(task.id));
+            if (task && carryMap.has(task.id)) {
+              eq(GROUPS.carryover, `week ${i}: ${label}'s carry-over age is exactly ${i} (grew by 1 from last week)`, carryMap.get(task.id).carryOverCount, i);
+            }
+          }
+        } else {
+          eq(GROUPS.carryover, `week ${i}: RED — nothing ever closed, so there are no carry-overs`, (briefing.carryOvers ?? []).length, 0);
+        }
+      }
+
+      // --- this week's ad-hoc work -------------------------------------
+      const sTask = await call('sales', 'POST', '/api/tasks', {
+        weekId,
+        title: `[disposable] simulate wk${i} sales`,
+        description: 'scripts/disposable-week.mjs simulate. Safe to delete.',
+        taskTypeId: pricedType?.id,
+      });
+      salesTasks.push({ weekIndex: i, id: sTask.id });
+      if (act) await call('sales', 'POST', `/api/tasks/${sTask.id}/commit`);
+
+      const bTask = await call('broker', 'POST', '/api/tasks', {
+        weekId,
+        title: `[disposable] simulate wk${i} broker${i === 0 ? ' (will be blocked, never cleared)' : ''}`,
+        description: 'scripts/disposable-week.mjs simulate. Safe to delete.',
+        taskTypeId: pricedType?.id,
+      });
+      brokerTasks.push({ weekIndex: i, id: bTask.id });
+      if (act) await call('broker', 'POST', `/api/tasks/${bTask.id}/commit`);
+
+      if (i === 0) {
+        gmTask = await call('gm', 'POST', '/api/tasks', {
+          weekId,
+          title: '[disposable] simulate wk0 gm (never finished, never recommitted)',
+          description: 'scripts/disposable-week.mjs simulate — a genuine, un-exonerated miss. Safe to delete.',
+          taskTypeId: pricedType?.id,
+        });
+        if (act) await call('gm', 'POST', `/api/tasks/${gmTask.id}/commit`);
+      }
+
+      if (act) {
+        await call('founder', 'POST', `/api/weeks/${weekId}/briefing/open`);
+        await call('founder', 'POST', `/api/weeks/${weekId}/briefing/close`);
+      }
+
+      // --- week 0: broker's task goes in_progress, then blocked, before
+      // the week ends. Never resolved or touched again within week 0.
+      if (act && i === 0) {
+        await call('broker', 'POST', `/api/tasks/${bTask.id}/status`, { to: 'in_progress' });
+        await call('broker', 'POST', `/api/tasks/${bTask.id}/blocks`, {
+          target: 'external',
+          blockingExternal: 'Bureau of Customs release',
+          reason: 'simulated by scripts/disposable-week.mjs — declared before week 0 ends, on purpose.',
+        });
+      }
+
+      // --- week 1: resolve the week-0 block (crossing the boundary),
+      // but do NOT clear the task — see the file header for why.
+      if (act && i === 1) {
+        const b0 = brokerTasks.find((t) => t.weekIndex === 0);
+        const blocks = await call('broker', 'GET', `/api/tasks/${b0.id}/blocks`);
+        const open = (blocks ?? []).find((b) => !b.resolved_at);
+        truthy(GROUPS.blocked, 'week 1: the week-0 block is still open going in, as expected', open);
+        if (open) await call('broker', 'POST', `/api/blocks/${open.id}/resolve`);
+        const { data: resolved } = await ops().from('task_blocks').select('resolved_at').eq('id', open?.id).maybeSingle();
+        truthy(GROUPS.blocked, "week 1: resolving it stamps resolved_at — a block genuinely closing across the week boundary", resolved?.resolved_at);
+      }
+
+      // --- sales clears every single week, including the open one.
+      if (act) {
+        await call('sales', 'POST', `/api/tasks/${sTask.id}/status`, { to: 'in_progress' });
+        await call('sales', 'POST', `/api/tasks/${sTask.id}/status`, { to: 'submitted' });
+        await call('gm', 'POST', `/api/tasks/${sTask.id}/status`, { to: 'verified' });
+        await call('founder', 'POST', `/api/tasks/${sTask.id}/status`, { to: 'cleared' });
+        const { data: row } = await ops().from('tasks').select('cleared_at').eq('id', sTask.id).single();
+        clears.push({ who: 'sales', id: sTask.id, weekIndex: i, clearedAt: row.cleared_at });
+      }
+
+      // --- broker's OWN week's task clears the same week too, EXCEPT
+      // week 0 (that is the one being blocked) and the last, open week
+      // (left mid-flight, on purpose — an open week's own commitment
+      // must not look finished before the week is).
+      if (act && i > 0 && !isLast) {
+        await call('broker', 'POST', `/api/tasks/${bTask.id}/status`, { to: 'in_progress' });
+        await call('broker', 'POST', `/api/tasks/${bTask.id}/status`, { to: 'submitted' });
+        await call('gm', 'POST', `/api/tasks/${bTask.id}/status`, { to: 'verified' });
+        await call('founder', 'POST', `/api/tasks/${bTask.id}/status`, { to: 'cleared' });
+        const { data: row } = await ops().from('tasks').select('cleared_at').eq('id', bTask.id).single();
+        clears.push({ who: 'broker', id: bTask.id, weekIndex: i, clearedAt: row.cleared_at });
+      }
+
+      if (act && !isLast) {
+        const closeResult = await call('founder', 'POST', `/api/weeks/${weekId}/close`);
+        const cr = Array.isArray(closeResult) ? closeResult[0] : closeResult;
+        console.log(`  closed week ${i}; carried ${cr?.carried_count ?? '?'} task(s) into week ${i + 1}`);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Week states: n-1 closed, exactly 1 (the last) still open.
+    // -------------------------------------------------------------
+    console.log('\n--- cross-week assertions ---');
+    const { data: weekRows } = await ops()
+      .from('weeks')
+      .select('id, week_start, week_end, state')
+      .in('id', weeks.map((w) => w.weekId))
+      .order('week_start');
+    const closedWeekRows = (weekRows ?? []).filter((w) => w.state === 'closed');
+    const openWeekRows = (weekRows ?? []).filter((w) => w.state !== 'closed');
+    eq(GROUPS.scoreboardAccum, `exactly ${act ? n - 1 : 0} of the ${n} simulated weeks are closed`, closedWeekRows.length, act ? n - 1 : 0);
+    if (act) {
+      eq(GROUPS.scoreboardAccum, 'the LAST simulated week is the one still open', openWeekRows.map((w) => w.id), [weeks[n - 1].weekId]);
+    }
+
+    // -------------------------------------------------------------
+    // Reliability / hit-rate over the closed weeks, hand-computed
+    // TWICE independently of packages/ops-scoring/src/reliability.ts:
+    //  1. weight-invariant identities (0/x = 0, x/x = 1) that any
+    //     correct implementation must satisfy regardless of the
+    //     weighting scheme, so they catch a broken exclusion or a
+    //     flipped numerator/denominator.
+    //  2. an independent re-transcription of PRD.md §5.2's own formula
+    //     (handComputeBase below), so a WEIGHTING bug — recency wrong,
+    //     lambda wrong, wrong window order — is caught too. It does not
+    //     import anything from reliability.ts.
+    // -------------------------------------------------------------
+    console.log('\n--- reliability, hand-computed against the real closed weeks ---');
+    const closedWeekIds = closedWeekRows.map((w) => w.id);
+    const weekEndById = new Map(closedWeekRows.map((w) => [w.id, w.week_end]));
+
+    const trackedTaskIds = [...salesTasks.map((t) => t.id), ...brokerTasks.map((t) => t.id), ...(gmTask ? [gmTask.id] : [])];
+    const { data: committedTasks } = trackedTaskIds.length
+      ? await ops().from('tasks').select('id, owner_user_id, status, committed_points, committed_week_id').in('id', trackedTaskIds)
+      : { data: [] };
+    const { data: blocksOnTracked } = trackedTaskIds.length
+      ? await ops().from('task_blocks').select('task_id, created_at').in('task_id', trackedTaskIds)
+      : { data: [] };
+    const earliestBlockByTask = new Map();
+    for (const b of blocksOnTracked ?? []) {
+      const cur = earliestBlockByTask.get(b.task_id);
+      if (!cur || b.created_at < cur) earliestBlockByTask.set(b.task_id, b.created_at);
+    }
+
+    /**
+     * A re-transcription of scoreboard.ts's `weeksByUser` construction
+     * (lines ~426-460), independent of that file, scoped to just the
+     * closed disposable weeks. If scoreboard.ts's real query ever
+     * diverges from this, the two would disagree on the SAME rows —
+     * except scoreboard.ts's real query can never see 2099 at all
+     * (that is the isolation this whole harness rests on), which is
+     * exactly why this exists: it is the only way to prove the
+     * exoneration rule against real, driven rows.
+     */
+    function weeksFor(userId) {
+      // Most-recent-closed-first, matching packages/ops-scoring's `i=0
+      // is most recent`.
+      return [...closedWeekRows].reverse().map((w) => {
+        const tasks = (committedTasks ?? []).filter((t) => t.owner_user_id === userId && t.committed_week_id === w.id);
+        let committedPoints = 0;
+        let clearedCommittedPoints = 0;
+        let exoneratedPoints = 0;
+        for (const t of tasks) {
+          const pts = t.committed_points ?? 0;
+          committedPoints += pts;
+          if (t.status === 'cleared') {
+            clearedCommittedPoints += pts;
+            continue;
+          }
+          const firstBlock = earliestBlockByTask.get(t.id);
+          if (firstBlock && firstBlock <= w.week_end) exoneratedPoints += pts;
+        }
+        return { weekId: w.id, weekStart: w.week_start, committedPoints, clearedCommittedPoints, exoneratedPoints };
+      });
+    }
+
+    /** Independent re-transcription of PRD.md §5.2's arithmetic, not a call into reliability.ts. */
+    function handComputeBase(weeksMostRecentFirst) {
+      const lambda = Math.pow(0.5, 1 / halfLifeWeeks);
+      let num = 0;
+      let den = 0;
+      weeksMostRecentFirst.forEach((w, i) => {
+        const denom = Math.max(0, w.committedPoints - w.exoneratedPoints);
+        if (denom <= 0) return;
+        const weight = Math.pow(lambda, i);
+        num += weight * w.clearedCommittedPoints;
+        den += weight * denom;
+      });
+      return den > 0 ? num / den : 0;
+    }
+
+    for (const [label, userId, expectBase, expectRatedWeeks] of [
+      ['sales (never misses)', sales.userId, 1, act ? n - 1 : 0],
+      ['broker (exonerated wk0 + perfect hits after)', broker.userId, 1, act ? n - 1 : 0],
+      ['gm (one un-exonerated miss, never recommitted)', gm.userId, 0, act ? 1 : 0],
+    ]) {
+      const weeksArr = weeksFor(userId);
+      const rel = reliability(weeksArr, {}, { halfLifeWeeks, minWeeksForRating });
+      const handBase = handComputeBase(weeksArr);
+      eq(GROUPS.reliabilityX, `${label}: ratedWeeks`, rel.ratedWeeks, expectRatedWeeks);
+      if (act) {
+        record(
+          GROUPS.reliabilityX,
+          `${label}: reliability.ts's base (${rel.base.toFixed(4)}) matches an INDEPENDENT re-transcription of PRD.md §5.2 (${handBase.toFixed(4)})`,
+          Math.abs(rel.base - handBase) < 1e-9,
+          `library base=${rel.base} hand-computed base=${handBase}`
+        );
+        eq(GROUPS.reliabilityX, `${label}: base is exactly ${expectBase} (weight-invariant — every INCLUDED week is either 0/x or x/x)`, Number(rel.base.toFixed(6)), expectBase);
+        const shouldBeRated = expectRatedWeeks >= minWeeksForRating;
+        eq(GROUPS.reliabilityX, `${label}: ${shouldBeRated ? 'RATED' : 'UNRATED'} (ratedWeeks=${expectRatedWeeks}, threshold=${minWeeksForRating})`, rel.score === null, !shouldBeRated);
+      } else {
+        eq(GROUPS.reliabilityX, `${label}: RED — nothing was ever committed or cleared, so ratedWeeks is 0 and the score is UNRATED`, [rel.ratedWeeks, rel.score], [0, null]);
+      }
+    }
+
+    // The money assertion for "blocked time exonerates a miss, plain misses don't" —
+    // broker and gm's week-0 rows, side by side.
+    if (act) {
+      const brokerW0 = weeksFor(broker.userId).find((w) => w.weekId === weeks[0].weekId);
+      const gmW0 = weeksFor(gm.userId).find((w) => w.weekId === weeks[0].weekId);
+      eq(GROUPS.blocked, "broker's week-0 commitment is FULLY exonerated (blocked before week end, still never cleared)", brokerW0?.exoneratedPoints, P);
+      eq(GROUPS.blocked, "...so it contributes nothing to the ratio, hit or miss", [brokerW0?.committedPoints, brokerW0?.clearedCommittedPoints], [P, 0]);
+      eq(GROUPS.blocked, "gm's week-0 commitment has NO block, so exoneratedPoints is 0", gmW0?.exoneratedPoints, 0);
+      eq(GROUPS.blocked, "...so it IS counted — a real, un-exonerated miss", [gmW0?.committedPoints, gmW0?.clearedCommittedPoints], [P, 0]);
+    }
+
+    // -------------------------------------------------------------
+    // Scoreboard accumulation: closed weeks vs. the one still open.
+    // Formulas, not queries echoing queries:
+    //   sales clears once a week for all n weeks (n-1 in closed weeks, 1 in the open one).
+    //   broker clears once a week for weeks 1..n-2 (n-2 clears, all in closed weeks).
+    //   gm never clears anything.
+    // -------------------------------------------------------------
+    console.log('\n--- points accumulation: closed weeks vs. the still-open one ---');
+    const clearedTaskIds = clears.map((c) => c.id);
+    const { data: clearedLedgerRows } = clearedTaskIds.length
+      ? await ops().from('point_ledger').select('task_id, week_id, points').in('task_id', clearedTaskIds).eq('state', 'cleared')
+      : { data: [] };
+    const closedWeekIdSet = new Set(closedWeekIds);
+    const closedOnlyPoints = (clearedLedgerRows ?? []).filter((r) => closedWeekIdSet.has(r.week_id)).reduce((s, r) => s + r.points, 0);
+    const openWeekPoints = (clearedLedgerRows ?? []).filter((r) => !closedWeekIdSet.has(r.week_id)).reduce((s, r) => s + r.points, 0);
+    const totalPoints = closedOnlyPoints + openWeekPoints;
+
+    const expectedClosedOnly = P * (act ? (n - 1) + (n - 2) : 0); // sales(n-1 closed) + broker(n-2 closed)
+    const expectedOpenWeek = P * (act ? 1 : 0); // sales's clear in the still-open last week
+    eq(GROUPS.scoreboardAccum, "closed-weeks-only points (the shape reliability/month/quarter use) — hand formula P*((n-1)+(n-2))", closedOnlyPoints, expectedClosedOnly);
+    eq(GROUPS.scoreboardAccum, "the still-open week's own cleared points (P*1, sales only) — real, but must sit OUTSIDE a closed-only aggregate", openWeekPoints, expectedOpenWeek);
+    eq(GROUPS.scoreboardAccum, 'total = closed-only + the open week (identity, but confirms nothing else leaked in)', totalPoints, expectedClosedOnly + expectedOpenWeek);
+    if (act) {
+      truthy(GROUPS.scoreboardAccum, "the still-open week's points are real (not a rejected/zeroed write) — it just must not enter a closed-only window", openWeekPoints > 0);
+    }
+
+    // -------------------------------------------------------------
+    // Per-day activity: the data the contribution heatmap will read.
+    // Every cleared task's `cleared_at`, grouped by UTC calendar day,
+    // must equal exactly what THIS run caused — no more, no less.
+    // -------------------------------------------------------------
+    console.log('\n--- per-day cleared counts (heatmap data) ---');
+    const { data: clearedTaskRows } = clearedTaskIds.length
+      ? await ops().from('tasks').select('id, cleared_at').in('id', clearedTaskIds)
+      : { data: [] };
+    const actualByDay = new Map();
+    for (const t of clearedTaskRows ?? []) {
+      const day = String(t.cleared_at).slice(0, 10);
+      actualByDay.set(day, (actualByDay.get(day) ?? 0) + 1);
+    }
+    const expectedByDay = new Map();
+    for (const c of clears) {
+      const day = String(c.clearedAt).slice(0, 10);
+      expectedByDay.set(day, (expectedByDay.get(day) ?? 0) + 1);
+    }
+    eq(
+      GROUPS.heatmap,
+      'per-day cleared-task counts match exactly what this run caused (grouped by UTC calendar day of cleared_at)',
+      Object.fromEntries([...actualByDay.entries()].sort()),
+      Object.fromEntries([...expectedByDay.entries()].sort())
+    );
+    eq(GROUPS.heatmap, `total cleared tasks across the run is ${act ? 2 * n - 2 : 0} (sales n + broker n-2)`, clearedTaskRows?.length ?? 0, act ? 2 * n - 2 : 0);
+    if ([...actualByDay.keys()].length <= 1) {
+      console.log('         NOTE: every clear landed on the same UTC calendar day — expected for a run that');
+      console.log('         completes in minutes. The grouping query is proven correct; a real multi-day');
+      console.log('         spread was not (and cannot be) exercised by a single sitting of this harness.');
+    }
+
+    // -------------------------------------------------------------
+    // The residue this run's own carry-over growth can leave on a REAL
+    // demo persona's LIVE reliability, before teardown — a genuine
+    // isolation gap this harness is positioned to prove, not assume.
+    // -------------------------------------------------------------
+    console.log('\n--- residue check: does a disposable carry_over_count >= 3 leak into a real persona\'s live reliability? ---');
+    if (act) {
+      const brokerDuring = await liveReliabilityFor(broker.userId);
+      const gmDuring = await liveReliabilityFor(gm.userId);
+      for (const [label, before, during] of [
+        ['broker-demo', brokerBefore, brokerDuring],
+        ['gm-demo', gmBefore, gmDuring],
+      ]) {
+        eq(
+          GROUPS.isolation,
+          `${label}'s LIVE reliability.modifiers.chronicCarryOver is unaffected by the disposable week's carry-over count while this run is live`,
+          during.chronicCarryOver,
+          before.chronicCarryOver
+        );
+        eq(GROUPS.isolation, `${label}'s LIVE reliability.score is unaffected`, during.score, before.score);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // The same anchored-scoreboard proof `run` does, over a longer,
+    // multi-week session.
+    // -------------------------------------------------------------
+    const during = await downstreamSnapshot();
+    const fpDuring = await fingerprintNonDisposable();
+    compareOrExcuse(
+      GROUPS.isolation,
+      'the week-anchored scoreboard (this week / 4 / 13, reliability, blocked hours) is unchanged after simulating several disposable weeks',
+      comparable(anchoredScoreboard(during.scoreboard)),
+      comparable(anchoredScoreboard(baseline.scoreboard)),
+      fpBaseline,
+      fpDuring
+    );
+  } finally {
+    if (KEEP) {
+      console.log('\n--- teardown SKIPPED (--keep) ---');
+      console.log(`  ${n} disposable weeks are still in the database. Run \`node scripts/disposable-week.mjs teardown\` when done.`);
+    } else {
+      console.log('\n--- teardown, then prove nothing downstream moved ---');
+      let tornDown = false;
+      for (let attempt = 1; attempt <= 3 && !tornDown; attempt++) {
+        try {
+          await teardown();
+          tornDown = true;
+        } catch (err) {
+          console.log(`  [teardown attempt ${attempt}/3 failed] ${err?.message ?? err}`);
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 15_000));
+        }
+      }
+      if (!tornDown) {
+        console.log('\n  !!! DISPOSABLE WEEKS ARE STILL IN THE DATABASE !!!');
+        console.log('  Run this until it succeeds:  node scripts/disposable-week.mjs teardown');
+        record(GROUPS.isolation, 'teardown completed', false, 'teardown could not reach the database after 3 attempts');
+        return;
+      }
+      const after = await downstreamSnapshot();
+      const fpAfter = await fingerprintNonDisposable();
+      for (const key of Object.keys(baseline)) {
+        compareOrExcuse(GROUPS.isolation, `after teardown, ${key} is identical to baseline`, comparable(after[key]), comparable(baseline[key]), fpBaseline, fpAfter);
+      }
+      const { count: dispTasks } = await ops().from('tasks').select('*', { count: 'exact', head: true }).like('title', '[disposable]%');
+      eq(GROUPS.isolation, 'no task this harness created survives teardown', dispTasks, 0);
+      const { count: auditAfter } = await core().from('audit_logs').select('*', { count: 'exact', head: true });
+      const expectedAuditGrowth = act ? n : 0; // one ops.briefing.closed row per week's briefing close
+      record(
+        GROUPS.isolation,
+        `core.audit_logs grew by exactly ${expectedAuditGrowth} row(s) — one ops.briefing.closed per week's briefing close, append-only BY DESIGN`,
+        auditAfter - auditBefore === expectedAuditGrowth,
+        `baseline ${auditBefore} -> ${auditAfter} (expected +${expectedAuditGrowth})`
+      );
+      const { count: weeksLeft } = await ops().from('weeks').select('*', { count: 'exact', head: true }).gte('week_start', DISPOSABLE_EPOCH);
+      eq(GROUPS.isolation, 'no disposable week row is left behind', weeksLeft, 0);
+      const brokerAfter = await liveReliabilityFor(broker.userId);
+      const gmAfter = await liveReliabilityFor(gm.userId);
+      eq(GROUPS.isolation, "after teardown, broker-demo's live reliability is back to its pre-run baseline", brokerAfter, brokerBefore);
+      eq(GROUPS.isolation, "after teardown, gm-demo's live reliability is back to its pre-run baseline", gmAfter, gmBefore);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // Small readers, kept out of the narrative above.
 // ---------------------------------------------------------------------
 function isoPlus(iso, days) {
@@ -1287,7 +1798,7 @@ async function pickPricedTaskType() {
 // ---------------------------------------------------------------------
 // Reporting.
 // ---------------------------------------------------------------------
-function report({ red }) {
+function report({ red, requiredGroups }) {
   const failed = checks.filter((c) => !c.ok);
   const unclear = checks.filter((c) => c.inconclusive);
   const known = checks.filter((c) => c.known);
@@ -1333,7 +1844,7 @@ function report({ red }) {
   // Negative control: every side-effect group must have proven it can
   // fail. A group that stayed green with the transitions skipped is a
   // group whose assertions are not reading the side effect at all.
-  const required = [GROUPS.recurring, GROUPS.briefing, GROUPS.lifecycle, GROUPS.close, GROUPS.commit];
+  const required = requiredGroups ?? [GROUPS.recurring, GROUPS.briefing, GROUPS.lifecycle, GROUPS.close, GROUPS.commit];
   console.log('\n=== RED CONTROL ===');
   console.log('  Every transition was skipped, so every side-effect assertion MUST fail.');
   let bad = 0;
@@ -1363,8 +1874,18 @@ try {
     const red = MODE === 'prove-red';
     await run({ red });
     process.exit(report({ red }));
+  } else if (MODE === 'simulate' || MODE === 'simulate-red') {
+    const red = MODE === 'simulate-red';
+    const n = Number(process.argv[3] ?? 4);
+    await simulate(n, { red });
+    process.exit(
+      report({
+        red,
+        requiredGroups: red ? [GROUPS.carryover, GROUPS.reliabilityX, GROUPS.blocked, GROUPS.scoreboardAccum, GROUPS.heatmap] : undefined,
+      })
+    );
   } else {
-    console.error(`unknown command "${MODE}". Try: run | run --keep | teardown | inspect | prove-red`);
+    console.error(`unknown command "${MODE}". Try: run | run --keep | teardown | inspect | prove-red | simulate <n> | simulate-red <n>`);
     process.exit(2);
   }
 } catch (err) {
