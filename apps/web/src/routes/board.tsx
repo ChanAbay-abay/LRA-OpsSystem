@@ -199,18 +199,30 @@ function pointsChip(t: Task) {
   return (
     <span
       className={cn(
-        'num text-num-md inline-flex items-center gap-1',
+        // `ml-auto` pushes this to the right-hand end of the card's
+        // metadata row, so points sit bottom-right (Chan's ask) rather
+        // than lost in the middle of the carry-over/blocks/notes cluster.
+        'num text-num-md ml-auto inline-flex items-center gap-1',
         cleared && 'text-ink',
         pending && 'text-pending border-b border-dashed border-current',
         !cleared && !pending && 'text-ink-2'
       )}
     >
       {t.points_override != null ? (
-        <span title={`Overridden: ${t.points_override}`}>
-          <Pencil className="size-3" aria-hidden />
-        </span>
+        <Hint text={`Overridden: ${t.points_override} points`}>
+          <span className="inline-flex">
+            <Pencil className="size-3" aria-hidden />
+          </span>
+        </Hint>
       ) : null}
-      {value ?? '—'}
+      {/*
+        The unit is spelled out. A bare `3` next to a `2w` carry-over
+        badge and a `4` note count reads as just another number on a
+        crowded row — Chan's words: "add pts to it so its more clear".
+        The em dash stays bare for an unpriced task: "—pts" would be
+        claiming a unit for a value that does not exist.
+      */}
+      {value != null ? `${value}pts` : '—'}
     </span>
   );
 }
