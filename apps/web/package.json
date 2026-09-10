@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "node --import tsx --test \"src/**/*.test.ts\""
+    "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

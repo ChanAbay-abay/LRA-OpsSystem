@@ -20,6 +20,6 @@
     "seed:demo:purge": "node scripts/seed-demo.mjs --purge"
   },
   "engines": {
-    "node": ">=21"
+    "node": ">=20"
   }
 }
