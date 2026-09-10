@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { manilaWeekStart, manilaWeekBounds, weeksBetween } from '../src/weeks.js';
+import { manilaWeekStart, manilaWeekBounds, manilaDayStart, manilaDayBounds, weeksBetween } from '../src/weeks.js';
 
 test('Manila Monday 00:15 and Manila Sunday 23:45 of the same week map to the same week_start', () => {
   // 2026-09-07 is a Monday. 00:15 Manila == 2026-09-06T16:15:00Z.
@@ -75,4 +75,50 @@ test('manilaWeekBounds rejects a non-date string', () => {
 
 test('weeksBetween rejects non-date input', () => {
   assert.throws(() => weeksBetween('nope', '2026-09-07'));
+});
+
+// ---------------------------------------------------------------------
+// manilaDayStart / manilaDayBounds — the activity heatmap's day
+// grouping (DESIGN.md §19.1). Same failure mode as manilaWeekStart
+// above, one day's width instead of seven: a UTC-naive grouping puts a
+// clear made near midnight Manila into the wrong square.
+// ---------------------------------------------------------------------
+
+test('a clear at 23:59 Manila and one at 00:01 Manila (two minutes apart) land in different days', () => {
+  // Tue 15 Sep 2026 23:59 Manila == 2026-09-15T15:59:00Z.
+  const lateTuesday = new Date('2026-09-15T15:59:00Z');
+  // Wed 16 Sep 2026 00:01 Manila == 2026-09-15T16:01:00Z — two minutes
+  // later in real time, but the Manila calendar has already turned over.
+  const earlyWednesday = new Date('2026-09-15T16:01:00Z');
+
+  assert.equal(manilaDayStart(lateTuesday), '2026-09-15');
+  assert.equal(manilaDayStart(earlyWednesday), '2026-09-16');
+  assert.notEqual(manilaDayStart(lateTuesday), manilaDayStart(earlyWednesday));
+});
+
+test('a UTC-vs-Manila straddle lands in the Manila day, not the UTC one', () => {
+  // 2026-09-15T20:00:00Z is 04:00 Manila on 16 Sep — still Tue in UTC,
+  // already Wed in Manila. A UTC-naive grouping would say 15 Sep.
+  const straddle = new Date('2026-09-15T20:00:00Z');
+  assert.equal(straddle.getUTCDate(), 15, 'sanity: the instant is still the 15th in raw UTC');
+  assert.equal(manilaDayStart(straddle), '2026-09-16');
+});
+
+test('manilaDayBounds spans exactly 00:00:00.000 to 23:59:59.999 Manila', () => {
+  const { start, end } = manilaDayBounds('2026-09-16');
+  assert.equal(start.toISOString(), '2026-09-15T16:00:00.000Z');
+  assert.equal(end.toISOString(), '2026-09-16T15:59:59.999Z');
+  assert.equal(end.getTime() - start.getTime(), 24 * 60 * 60 * 1000 - 1);
+
+  // Both boundary instants above fall inside the day their manilaDayStart names.
+  assert.ok(new Date('2026-09-15T16:01:00Z').getTime() >= start.getTime());
+});
+
+test('manilaDayBounds rejects a non-date string', () => {
+  assert.throws(() => manilaDayBounds('not-a-date'));
+});
+
+test('manilaDayStart defaults to "now" without throwing', () => {
+  const result = manilaDayStart();
+  assert.match(result, /^\d{4}-\d{2}-\d{2}$/);
 });

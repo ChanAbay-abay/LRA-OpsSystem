@@ -162,7 +162,7 @@ export function SubmitSuggestionsDialog({
             id="batch-reason"
             value={reason}
             onChange={setReason}
-            placeholder="Why do these need to change?"
+            placeholder="e.g. Points were set before we knew the container count"
           />
         </div>
 

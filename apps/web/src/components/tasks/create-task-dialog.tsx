@@ -57,7 +57,23 @@ interface Week {
   state: 'planning' | 'open' | 'closed';
 }
 
-export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+export function CreateTaskDialog({
+  onClose,
+  onCreated,
+  defaultOwnerId,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+  /**
+   * DESIGN.md §21.3: the briefing's "No backlog work to pick from" empty
+   * state opens this dialog with the person already chosen, so it reads
+   * as a shortcut rather than a second form to fill in. Optional and
+   * oversight-only in effect — an owner other than yourself is disabled
+   * below for anyone who is not oversight regardless of this prop, same
+   * as today.
+   */
+  defaultOwnerId?: string;
+}) {
   const { me } = useAuth();
   const isOversight = me?.authority === 'gm' || me?.authority === 'founder' || me?.authority === 'admin';
 
@@ -69,7 +85,7 @@ export function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; 
 
   const [title, setTitle] = React.useState('');
   const [typeId, setTypeId] = React.useState<string>('');
-  const [ownerId, setOwnerId] = React.useState<string>(me?.id ?? '');
+  const [ownerId, setOwnerId] = React.useState<string>(defaultOwnerId ?? me?.id ?? '');
   const [weekId, setWeekId] = React.useState<string>('');
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);

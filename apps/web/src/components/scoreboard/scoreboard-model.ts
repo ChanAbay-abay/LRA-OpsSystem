@@ -31,6 +31,7 @@
  *      where it applies.
  */
 import type { ReliabilityBand } from '@/lib/reliability-ui';
+import type { ActivityWindow } from './activity-heatmap-model';
 // Relative, not `@/lib/labels` — this module is unit-tested directly by
 // `node --test`, which resolves imports with plain Node module
 // resolution and has no Vite alias to expand `@/`. A `type`-only import
@@ -99,6 +100,8 @@ export interface ScoreboardRow {
   position: string;
   currentWeek: CurrentWeekPoints;
   periods: Record<PeriodKey, PointBuckets>;
+  /** Tasks cleared per Manila day (DESIGN.md §19) — visible to every viewer, never gated. */
+  activity: ActivityWindow;
   // PLAN.md §10 #4: absent, not just falsy, for anyone who isn't
   // founder/admin — `apps/api/src/routes/scoreboard.ts` strips both
   // fields from the JSON before it leaves the server. Points, cleared

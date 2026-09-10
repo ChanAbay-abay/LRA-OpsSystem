@@ -12,17 +12,48 @@
  * It deliberately does NOT trap focus and does NOT dim the page — a
  * person reads this while still working, the same way they'd glance at
  * a help card taped to a monitor.
+ *
+ * `open`/`onOpenChange` are optional and additive — every existing call
+ * site (`app-shell.tsx`'s `PageHeader`) leaves them `undefined` and gets
+ * Radix's normal uncontrolled icon-triggered behaviour, unchanged. They
+ * exist for exactly one caller today: DESIGN.md §21.5's briefing
+ * first-run, which needs to force this same popover open on first visit
+ * — "the only auto-opening help in the app" is still built out of this
+ * one component, not a second one, because the content and styling must
+ * stay identical. `footer` renders below the "what to do here" list and
+ * is how that one caller adds its `Got it` button without every other
+ * screen's popover growing an unused slot.
  */
+import type * as React from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { ArrowRight, HelpCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getHelpTopic, type HelpTopicId } from '@/lib/help';
 
-export function WhatIsThis({ topic, className }: { topic: HelpTopicId; className?: string }) {
+export function WhatIsThis({
+  topic,
+  className,
+  open,
+  onOpenChange,
+  footer,
+}: {
+  topic: HelpTopicId;
+  className?: string;
+  /** Controlled open state. Omit for the normal, icon-triggered popover. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  footer?: React.ReactNode;
+}) {
   const help = getHelpTopic(topic);
+  // Only pass `open`/`onOpenChange` through when the caller actually
+  // wants control — Radix's Root treats `open={undefined}` as "still
+  // controlled, permanently closed" rather than falling back to its own
+  // uncontrolled state, so the two props are withheld together instead
+  // of defaulted.
+  const controlled = open !== undefined && onOpenChange !== undefined;
 
   return (
-    <PopoverPrimitive.Root>
+    <PopoverPrimitive.Root {...(controlled ? { open, onOpenChange } : {})}>
       <PopoverPrimitive.Trigger asChild>
         <button
           type="button"
@@ -67,6 +98,7 @@ export function WhatIsThis({ topic, className }: { topic: HelpTopicId; className
               </ul>
             </div>
           ) : null}
+          {footer ? <div className="mt-3 border-t border-hairline pt-3">{footer}</div> : null}
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>

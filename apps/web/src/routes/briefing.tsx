@@ -32,6 +32,20 @@
  * `commitCandidates`/`committed` carry titles and points, not
  * description/type/owner/client-ref, and it is not this lane's endpoint
  * to widen.
+ *
+ * 2026-09-10, Chan: "they should be guided with how to do it with the
+ * input placeholders etc. and once its done, there are tooltips… i dont
+ * want this webapp to be too daunting." This pass (DESIGN.md §21, §16,
+ * §20, §24) makes the ritual a stated, four-step flow rather than four
+ * unlabelled sections: a step rail under the header, a step marker and
+ * purpose line above each section (`components/briefing/step-rail.tsx`),
+ * plain-words empty states that explain what to do next instead of
+ * describing the schema, a `<WhatIsThis>` that opens itself the first
+ * time anyone visits (`lib/briefing-first-run.ts`), and a below-`md`
+ * layout that turns the four-column commit grid into one collapsible
+ * card per person and the scorecard table into a stack of cards
+ * (`components/briefing/commit-section.tsx`, §16.4) so the whole ritual
+ * is runnable from a phone, not just the shared display in the room.
  */
 import * as React from 'react';
 import { toast } from 'sonner';
@@ -39,12 +53,19 @@ import { useSearchParams } from 'react-router-dom';
 import { CheckCircle2, RotateCcw } from 'lucide-react';
 import { PageHeader } from '@/components/layout/app-shell';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { fmtDate, fmtTime, weekLabel, fmtWeekRange } from '@/lib/dates';
+import { formatDuration, formatDurationLong } from '@/lib/duration';
+import { hasSeenBriefingIntro, markBriefingIntroSeen } from '@/lib/briefing-first-run';
+import { StepHeading, StepRail, type BriefingStep } from '@/components/briefing/step-rail';
+import { useActiveBriefingStep } from '@/components/briefing/use-active-briefing-step';
+import { CommitSection, type CommitCandidateTask, type CommitRosterPerson } from '@/components/briefing/commit-section';
 import type { Actor } from '@/lib/task-permissions';
 import type { DiffResolvers } from '@/lib/task-edit-requests';
 import type { SuggestionResolvers } from '@/lib/edit-suggestions';
@@ -63,6 +84,8 @@ interface Week {
   state: 'planning' | 'open' | 'closed';
   briefing_opened_at: string | null;
   briefing_closed_at: string | null;
+  /** Who closed it — resolved to a name against `members` below, for the completion banner (§21.4). */
+  briefing_closed_by: string | null;
 }
 
 interface ScorecardRow {
@@ -92,25 +115,28 @@ interface OpenBlock {
   blockingName: string | null;
 }
 
-interface CandidateTask {
-  id: string;
-  title: string;
-  status: string;
-  catalog_points: number | null;
-  points_override: number | null;
-  committed_points: number | null;
-}
-
 interface BriefingData {
   week: Week;
   previousWeek: Week | null;
-  roster: Array<{ userId: string; name: string | null; position: string }>;
+  roster: CommitRosterPerson[];
   scorecard: ScorecardRow[];
   carryOvers: CarryOver[];
   blocks: { open: OpenBlock[]; byBlocker: Array<{ label: string; hours: number }> };
-  commitCandidates: Record<string, CandidateTask[]>;
-  committed: Record<string, CandidateTask[]>;
+  commitCandidates: Record<string, CommitCandidateTask[]>;
+  committed: Record<string, CommitCandidateTask[]>;
 }
+
+const HOUR_MS = 60 * 60 * 1000;
+const WEEK_MS = 7 * 24 * HOUR_MS;
+
+/** DESIGN.md §21.1 — the four steps, in order, stated on the screen. */
+const STEPS: BriefingStep[] = [
+  { id: 'step-scorecard', title: "Last week's scorecard" },
+  { id: 'step-carryovers', title: 'Carry-overs' },
+  { id: 'step-blocks', title: 'Blocks' },
+  { id: 'step-commit', title: 'Commit' },
+];
+const STEP_IDS = STEPS.map((s) => s.id);
 
 export function BriefingPage() {
   const { me } = useAuth();
@@ -193,8 +219,8 @@ export function BriefingPage() {
     [week?.id]
   );
 
-  // The catalog and roster the diff needs to render an id as a name.
-  // Loaded once for the screen rather than per row.
+  // The catalog and roster the diff needs to render an id as a name, and
+  // the completion banner needs to resolve `briefing_closed_by` to a name.
   const [types, setTypes] = React.useState<BriefingTaskType[]>([]);
   const [members, setMembers] = React.useState<BriefingMember[]>([]);
   React.useEffect(() => {
@@ -214,6 +240,33 @@ export function BriefingPage() {
       cancelled = true;
     };
   }, []);
+
+  // DESIGN.md §21.5: "On first visit to `/briefing` with no
+  // `localStorage['lra.seen.briefing.v1']`, the `<WhatIsThis>` popover
+  // opens automatically… It never re-opens on its own." Controlled
+  // permanently on THIS screen (the only screen this applies to) rather
+  // than only for the first render, so a later manual click of the icon
+  // still opens the very same popover through the very same state.
+  //
+  // Derived at mount via a lazy `useState` initializer, not an effect —
+  // both flags come from the same one-time `localStorage` read, so there
+  // is one `wasFirstVisit` computed once and reused for both, rather
+  // than a `setState` call inside a `useEffect` that fires the render it
+  // could have started with.
+  const [wasFirstVisit] = React.useState(() => !hasSeenBriefingIntro());
+  const [helpOpen, setHelpOpen] = React.useState(wasFirstVisit);
+  const [helpIsFirstRun, setHelpIsFirstRun] = React.useState(wasFirstVisit);
+  function handleHelpOpenChange(next: boolean) {
+    setHelpOpen(next);
+    if (!next) {
+      // Any dismissal counts — Esc, outside click or "Got it" — per
+      // §21.5's "must be dismissible… must never re-open once dismissed".
+      markBriefingIntroSeen();
+      setHelpIsFirstRun(false);
+    }
+  }
+
+  const activeStepIndex = useActiveBriefingStep(STEP_IDS);
 
   const actor: Actor | null = me
     ? { id: me.id, authority: me.authority, isClearingFounder: me.isClearingFounder, readOnly: me.readOnly }
@@ -290,44 +343,46 @@ export function BriefingPage() {
     <div className="mx-auto max-w-briefing">
       <PageHeader
         title="Monday briefing"
-        description={week ? `W${weekNumber(week.week_start)} · ${week.week_start} – ${week.week_end}` : undefined}
+        description={week ? `${weekLabel(week.week_start)} · ${fmtWeekRange(week.week_start, week.week_end)}` : undefined}
         help="briefing"
+        helpOpen={helpOpen}
+        onHelpOpenChange={handleHelpOpenChange}
+        helpFooter={
+          helpIsFirstRun ? (
+            <Button size="sm" onClick={() => handleHelpOpenChange(false)}>
+              Got it
+            </Button>
+          ) : undefined
+        }
         actions={
           isOversight && week && week.state === 'planning' ? (
             <div className="flex gap-2">
               {!week.briefing_opened_at ? (
-                <Button
-                  variant="secondary"
-                  onClick={openBriefing}
-                  disabled={readOnly}
-                  title={readOnly ? readOnlyReason : undefined}
-                >
-                  Open the briefing
-                </Button>
+                <Hint text={readOnly ? readOnlyReason : undefined}>
+                  <Button variant="secondary" onClick={openBriefing} disabled={readOnly}>
+                    Open the briefing
+                  </Button>
+                </Hint>
               ) : null}
-              <Button
-                variant="destructive"
-                onClick={() => setConfirmingClose(true)}
-                disabled={readOnly}
-                title={readOnly ? readOnlyReason : undefined}
-              >
-                Close the briefing
-              </Button>
             </div>
           ) : undefined
         }
       />
+
+      <StepRail steps={STEPS} activeIndex={activeStepIndex} className="mb-5" />
 
       <ResourceView
         resource={weekResource}
         skeleton={<BriefingSkeleton />}
         empty={
           <div className="mx-auto max-w-[420px] rounded-xl border border-hairline bg-surface p-8 text-center">
-            <p className="mb-3 text-body text-ink-2">This week hasn't been opened.</p>
+            <p className="mb-3 text-body text-ink-2">{weekLabel(new Date().toISOString())} hasn't been opened.</p>
             {isOversight ? (
-              <Button onClick={openTheWeek} disabled={readOnly} title={readOnly ? readOnlyReason : undefined}>
-                Open the week
-              </Button>
+              <Hint text={readOnly ? readOnlyReason : undefined}>
+                <Button onClick={openTheWeek} disabled={readOnly}>
+                  Open the week
+                </Button>
+              </Hint>
             ) : null}
           </div>
         }
@@ -348,8 +403,8 @@ export function BriefingPage() {
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-pending-border bg-pending-wash px-4 py-3">
                 <p className="text-body-sm text-ink-2">
                   You are viewing a <strong className="font-semibold">specific week</strong>, not necessarily the
-                  current one — W{weekNumber(w.week_start)}, {w.week_start} – {w.week_end}. Opening or closing a
-                  briefing here acts on <em>this</em> week.
+                  current one — {weekLabel(w.week_start)}, {fmtWeekRange(w.week_start, w.week_end)}. Opening or closing
+                  a briefing here acts on <em>this</em> week.
                 </p>
                 <a href="/briefing" className="shrink-0 text-label text-brand-700 underline">
                   Back to the current week
@@ -357,8 +412,32 @@ export function BriefingPage() {
               </div>
             ) : null}
             {w && w.state !== 'planning' ? (
-              <div className="mb-4 rounded-lg border border-info-border bg-info-wash px-4 py-3 text-body-sm text-ink-2">
-                This week's briefing is already closed. Commitments are locked; new tasks can still be created and worked mid-week.
+              <div className="mb-4 flex items-start gap-2 rounded-lg border border-cleared-border bg-cleared-wash px-4 py-3">
+                <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-cleared" aria-hidden />
+                <div>
+                  <p className="text-body font-medium text-ink">
+                    {weekLabel(w.week_start)} is {w.state}. Committed work is locked.
+                  </p>
+                  <p className="text-body-sm text-ink-3">
+                    {w.briefing_closed_at ? (
+                      <>
+                        Closed{' '}
+                        <span className="num text-num-xs">
+                          {fmtDate(w.briefing_closed_at)}, {fmtTime(w.briefing_closed_at)}
+                        </span>
+                        {closedByName(members, w.briefing_closed_by) ? ` by ${closedByName(members, w.briefing_closed_by)}` : ''}
+                        .
+                      </>
+                    ) : (
+                      "New tasks can still be created and worked mid-week; they won't count as commitments."
+                    )}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            {readOnly ? (
+              <div className="mb-4 rounded-lg border border-blocked-border bg-blocked-wash px-4 py-3 text-body-sm text-ink-2">
+                You have read-only access. You can see everything and change nothing.
               </div>
             ) : null}
           </>
@@ -371,20 +450,66 @@ export function BriefingPage() {
           {(data) =>
             data ? (
               <div className="flex flex-col gap-8">
-                <ScorecardSection scorecard={data.scorecard} previousWeek={data.previousWeek} />
-                <CarryOverSection carryOvers={data.carryOvers} />
-                <BlocksSection blocks={data.blocks} />
-                <CommitSection
-                  roster={data.roster}
-                  candidates={data.commitCandidates}
-                  committed={data.committed}
-                  locked={week.state !== 'planning'}
-                  meId={me?.id}
-                  isOversight={isOversight}
-                  readOnly={readOnly}
-                  onCommit={commit}
-                  onUncommit={uncommit}
-                />
+                <section id="step-scorecard">
+                  <StepHeading
+                    step={1}
+                    total={4}
+                    title="Last week's scorecard"
+                    purpose="What we said we'd do last week, and what actually cleared."
+                  />
+                  <ScorecardSection scorecard={data.scorecard} previousWeek={data.previousWeek} />
+                </section>
+
+                <section id="step-carryovers">
+                  <StepHeading
+                    step={2}
+                    total={4}
+                    title="Carry-overs"
+                    purpose="Work that didn't finish. Decide if it's still worth doing."
+                  />
+                  <CarryOverSection carryOvers={data.carryOvers} />
+                </section>
+
+                <section id="step-blocks">
+                  <StepHeading
+                    step={3}
+                    total={4}
+                    title="Blocks"
+                    purpose="What stopped people, and who is clearing each one."
+                  />
+                  <BlocksSection blocks={data.blocks} />
+                </section>
+
+                <section id="step-commit">
+                  <StepHeading
+                    step={4}
+                    total={4}
+                    title="Commit"
+                    purpose="Each person picks this week's work. This is the record."
+                  />
+                  <CommitSection
+                    roster={data.roster}
+                    candidates={data.commitCandidates}
+                    committed={data.committed}
+                    locked={week.state !== 'planning'}
+                    meId={me?.id}
+                    isOversight={isOversight}
+                    readOnly={readOnly}
+                    onCommit={commit}
+                    onUncommit={uncommit}
+                    onTaskCreated={() => briefingResource.reload()}
+                  />
+                </section>
+
+                {isOversight && week.state === 'planning' ? (
+                  <CloseBar
+                    roster={data.roster}
+                    committed={data.committed}
+                    readOnly={readOnly}
+                    readOnlyReason={readOnlyReason}
+                    onRequestClose={() => setConfirmingClose(true)}
+                  />
+                ) : null}
               </div>
             ) : null
           }
@@ -452,13 +577,12 @@ export function BriefingPage() {
                 `week.id` — what was missing was the reader being told
                 which week that is at the moment they confirm.
               */}
-              <DialogTitle>
-                Close the briefing for {week ? `W${weekNumber(week.week_start)} · ${week.week_start} – ${week.week_end}` : 'this week'}?
-              </DialogTitle>
+              <DialogTitle>Close the briefing for {week ? weekLabel(week.week_start) : 'this week'}?</DialogTitle>
             </DialogHeader>
             <p className="text-body-sm text-ink-2">
-              This locks every commitment for that week. It cannot be undone from this screen — reopening requires the
-              founder. Tasks can still be created and worked mid-week; they just won't count as commitments.
+              Closing locks Monday's record. Nobody can change what was committed after this — a GM can only suggest
+              edits, and you or the admin approve them. Tasks can still be created and worked mid-week; they won't
+              count as commitments.
             </p>
             <DialogFooter>
               <Button variant="secondary" onClick={() => setConfirmingClose(false)}>
@@ -471,6 +595,67 @@ export function BriefingPage() {
           </DialogContent>
         </Dialog>
       ) : null}
+    </div>
+  );
+}
+
+function closedByName(members: BriefingMember[], userId: string | null): string | null {
+  if (!userId) return null;
+  const m = members.find((x) => x.userId === userId);
+  return m?.name ?? m?.email ?? null;
+}
+
+/**
+ * DESIGN.md §21.4: the sticky close bar. `bottom-0`, holding the live
+ * readout on the left and the one `primary` action on the right —
+ * "that band is what makes 'done' a visible state rather than an
+ * absence of buttons," and the same discipline applies before closing:
+ * the reader should never have to count committed cards by eye to know
+ * whether the week is ready to lock.
+ */
+function CloseBar({
+  roster,
+  committed,
+  readOnly,
+  readOnlyReason,
+  onRequestClose,
+}: {
+  roster: CommitRosterPerson[];
+  committed: Record<string, CommitCandidateTask[]>;
+  readOnly: boolean;
+  readOnlyReason: string;
+  onRequestClose: () => void;
+}) {
+  const visibleRoster = roster.filter((r) => r.position !== 'other');
+  const committedCounts = visibleRoster.map((p) => (committed[p.userId] ?? []).length);
+  const numCommitted = committedCounts.filter((n) => n > 0).length;
+  const totalPoints = visibleRoster.reduce(
+    (sum, p) => sum + (committed[p.userId] ?? []).reduce((s, t) => s + (t.committed_points ?? 0), 0),
+    0
+  );
+  const everyoneHasOne = visibleRoster.length > 0 && committedCounts.every((n) => n > 0);
+  const disabledReason = readOnly
+    ? readOnlyReason
+    : !everyoneHasOne
+      ? 'Everyone needs at least one committed task before the week can be locked.'
+      : undefined;
+
+  return (
+    <div
+      className="sticky bottom-0 z-10 -mx-6 flex flex-wrap items-center justify-between gap-3 border-t border-hairline bg-surface px-6 py-3 lg:mx-0 lg:rounded-xl lg:border"
+      style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}
+    >
+      <p className="text-body-sm text-ink-2">
+        <span className="num text-num-sm text-ink">
+          {numCommitted} of {visibleRoster.length}
+        </span>{' '}
+        people have committed · <span className="num text-num-sm text-ink">{totalPoints}</span> points
+      </p>
+      <Hint text={disabledReason}>
+        <Button onClick={onRequestClose} disabled={Boolean(disabledReason)}>
+          Close the briefing
+        </Button>
+      </Hint>
     </div>
   );
 }
@@ -493,14 +678,17 @@ function BriefingSkeleton() {
     <div className="flex flex-col gap-8" aria-busy="true">
       <span className="sr-only">Loading the briefing…</span>
       <section>
+        <div className="skeleton-pulse mb-1 h-2.5 w-20 rounded-xs bg-surface-3" aria-hidden />
         <div className="skeleton-pulse mb-3 h-5 w-48 rounded-md bg-surface-2" aria-hidden />
         <SkeletonRows rows={4} height={40} />
       </section>
       <section>
+        <div className="skeleton-pulse mb-1 h-2.5 w-20 rounded-xs bg-surface-3" aria-hidden />
         <div className="skeleton-pulse mb-3 h-5 w-32 rounded-md bg-surface-2" aria-hidden />
         <SkeletonRows rows={2} height={40} />
       </section>
       <section>
+        <div className="skeleton-pulse mb-1 h-2.5 w-20 rounded-xs bg-surface-3" aria-hidden />
         <div className="skeleton-pulse mb-3 h-5 w-24 rounded-md bg-surface-2" aria-hidden />
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2" aria-hidden>
           {[0, 1].map((i) => (
@@ -513,6 +701,7 @@ function BriefingSkeleton() {
         </div>
       </section>
       <section>
+        <div className="skeleton-pulse mb-1 h-2.5 w-20 rounded-xs bg-surface-3" aria-hidden />
         <div className="skeleton-pulse mb-3 h-5 w-20 rounded-md bg-surface-2" aria-hidden />
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3" aria-hidden>
           {[0, 1, 2].map((i) => (
@@ -533,209 +722,169 @@ function BriefingSkeleton() {
   );
 }
 
-function weekNumber(weekStart: string): number {
-  const d = new Date(weekStart);
-  const start = new Date(d.getFullYear(), 0, 1);
-  return Math.ceil(((d.getTime() - start.getTime()) / 86400000 + start.getDay() + 1) / 7);
-}
-
 function ScorecardSection({ scorecard, previousWeek }: { scorecard: ScorecardRow[]; previousWeek: Week | null }) {
   // PLAN.md §10 #4: hit-rate is founder/admin only. The API already
   // strips it from the payload; this drops the column too, so the
   // standup table has no empty gap where the numbers used to be.
   const { me } = useAuth();
   const showHitRate = me?.authority === 'founder' || me?.authority === 'admin';
-  return (
-    <section>
-      <h2 className="mb-3 text-title-lg text-ink">Last week's scorecard</h2>
-      {!previousWeek ? (
+
+  if (!previousWeek) {
+    return (
+      <div className="rounded-xl border border-hairline bg-surface px-4 py-3">
         <p className="text-body-sm text-ink-3">There is no previous week yet — this is the first one.</p>
-      ) : scorecard.length === 0 ? (
-        <p className="text-body-sm text-ink-3">Nobody committed to anything last week.</p>
-      ) : (
-        <div className="overflow-hidden rounded-xl border border-hairline bg-surface">
-          <table className="w-full">
-            <thead className="bg-surface-2">
-              <tr className="h-8 text-eyebrow text-ink-2">
-                <th className="px-3 text-left">Person</th>
-                <th className="px-3 text-right">Committed</th>
-                <th className="px-3 text-right">Cleared (committed)</th>
-                {showHitRate ? <th className="px-3 text-right">Hit-rate</th> : null}
-                <th className="px-3 text-right">Cleared this week</th>
+        <a href="#step-commit" className="mt-2 inline-block text-label text-brand-700 underline">
+          Skip to Commit ↓
+        </a>
+      </div>
+    );
+  }
+  if (scorecard.length === 0) {
+    return (
+      <p className="rounded-xl border border-hairline bg-surface px-4 py-3 text-body-sm text-ink-3">
+        Nobody committed to anything last week.
+      </p>
+    );
+  }
+
+  return (
+    <>
+      {/* ≥sm: the real table, unchanged. Below sm: a stack of cards — a
+          4-5 column table hides the hit-rate off the right edge of a
+          343px phone rather than scrolling, and a scroller here would
+          hide exactly the number the founder most needs (§16.4). */}
+      <div className="hidden overflow-hidden rounded-xl border border-hairline bg-surface sm:block">
+        <table className="w-full">
+          <thead className="bg-surface-2">
+            <tr className="h-8 text-eyebrow text-ink-2">
+              <th className="px-3 text-left">Person</th>
+              <th className="px-3 text-right">Committed</th>
+              <th className="px-3 text-right">Cleared (committed)</th>
+              {showHitRate ? <th className="px-3 text-right">Hit-rate</th> : null}
+              <th className="px-3 text-right">Cleared this week</th>
+            </tr>
+          </thead>
+          <tbody>
+            {scorecard.map((row) => (
+              <tr key={row.userId} className="h-9 border-t border-hairline text-body-sm">
+                <td className="px-3">
+                  {row.name} <span className="text-eyebrow text-ink-3">{row.position}</span>
+                </td>
+                <td className="num text-num-sm px-3 text-right">{row.committedPoints}</td>
+                <td className="num text-num-sm px-3 text-right">{row.clearedCommittedPoints}</td>
+                {showHitRate ? (
+                  <td className="num text-num-sm px-3 text-right">{row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`}</td>
+                ) : null}
+                <td className="num text-num-sm px-3 text-right text-ink">{row.clearedPoints}</td>
               </tr>
-            </thead>
-            <tbody>
-              {scorecard.map((row) => (
-                <tr key={row.userId} className="h-9 border-t border-hairline text-body-sm">
-                  <td className="px-3">
-                    {row.name} <span className="text-eyebrow text-ink-3">{row.position}</span>
-                  </td>
-                  <td className="num text-num-sm px-3 text-right">{row.committedPoints}</td>
-                  <td className="num text-num-sm px-3 text-right">{row.clearedCommittedPoints}</td>
-                  {showHitRate ? (
-                    <td className="num text-num-sm px-3 text-right">{row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`}</td>
-                  ) : null}
-                  <td className="num text-num-sm px-3 text-right text-ink">{row.clearedPoints}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-col gap-2 sm:hidden">
+        {scorecard.map((row) => (
+          <div key={row.userId} className="rounded-xl border border-hairline bg-surface p-3">
+            <p className="text-strong text-ink">
+              {row.name} <span className="text-eyebrow text-ink-3">{row.position}</span>
+            </p>
+            <div className={cn('mt-2 grid gap-2', showHitRate ? 'grid-cols-4' : 'grid-cols-3')}>
+              <ScorecardStat label="Committed" value={row.committedPoints} />
+              <ScorecardStat label="Cleared" value={row.clearedCommittedPoints} />
+              {showHitRate ? (
+                <ScorecardStat label="Hit-rate" value={row.hitRate == null ? '—' : `${Math.round(row.hitRate * 100)}%`} />
+              ) : null}
+              <ScorecardStat label="This week" value={row.clearedPoints} emphasis />
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ScorecardStat({ label, value, emphasis }: { label: string; value: number | string; emphasis?: boolean }) {
+  return (
+    <div>
+      <p className="text-eyebrow text-ink-3">{label}</p>
+      <p className={cn('num text-num-sm', emphasis ? 'text-ink' : 'text-ink-2')}>{value}</p>
+    </div>
   );
 }
 
 function CarryOverSection({ carryOvers }: { carryOvers: CarryOver[] }) {
+  if (carryOvers.length === 0) {
+    return (
+      <p className="flex items-center gap-1.5 rounded-xl border border-hairline bg-surface px-4 py-3 text-body-sm text-ink-3">
+        <CheckCircle2 className="size-4 shrink-0 text-cleared" aria-hidden />
+        Nothing carried over. Everything committed last week finished.
+      </p>
+    );
+  }
   return (
-    <section>
-      <h2 className="mb-3 text-title-lg text-ink">Carry-overs</h2>
-      {carryOvers.length === 0 ? (
-        <p className="text-body-sm text-ink-3">Nothing carried into this week. Clean sweep.</p>
-      ) : (
-        <div className="rounded-xl border border-hairline bg-surface">
-          {carryOvers.map((c) => (
-            <div key={c.id} className="flex items-center gap-4 border-b border-hairline px-4 py-2 text-body-sm last:border-0">
-              <span className="flex-1 truncate">{c.title}</span>
-              <span className="text-ink-3">{c.ownerName}</span>
-              <span className={cn('num text-num-xs flex items-center gap-1', c.carryOverCount >= 3 ? 'text-danger' : 'text-ink-3')}>
-                <RotateCcw className="size-3" aria-hidden /> {c.carryOverCount}w
-              </span>
-            </div>
-          ))}
+    <div className="rounded-xl border border-hairline bg-surface">
+      {carryOvers.map((c) => (
+        <div key={c.id} className="flex items-center gap-4 border-b border-hairline px-4 py-2 text-body-sm last:border-0">
+          <span className="min-w-0 flex-1 truncate">{c.title}</span>
+          <span className="hidden text-ink-3 sm:inline">{c.ownerName}</span>
+          <Hint text={`Carried over for ${formatDurationLong(c.carryOverCount * WEEK_MS)} in a row.`}>
+            <span
+              className={cn(
+                'num text-num-xs flex shrink-0 items-center gap-1',
+                c.carryOverCount >= 3 ? 'text-danger' : 'text-ink-3'
+              )}
+            >
+              <RotateCcw className="size-3 shrink-0" aria-hidden />
+              {formatDuration(c.carryOverCount * WEEK_MS)}
+            </span>
+          </Hint>
         </div>
-      )}
-    </section>
+      ))}
+    </div>
   );
 }
 
 function BlocksSection({ blocks }: { blocks: { open: OpenBlock[]; byBlocker: Array<{ label: string; hours: number }> } }) {
+  if (blocks.open.length === 0 && blocks.byBlocker.length === 0) {
+    return (
+      <p className="rounded-xl border border-hairline bg-surface px-4 py-3 text-body-sm text-ink-3">
+        No blocks were raised last week.
+      </p>
+    );
+  }
   return (
-    <section>
-      <h2 className="mb-3 text-title-lg text-ink">Blocks</h2>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="rounded-xl border border-hairline bg-surface p-4">
-          <p className="mb-2 text-eyebrow text-ink-3">Open now</p>
-          {blocks.open.length === 0 ? (
-            <p className="text-body-sm text-ink-3">Nothing currently blocked.</p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {blocks.open.map((b) => (
-                <li key={b.id} className="text-body-sm">
-                  <span className="text-ink">{b.blockingName ?? 'Unknown'}</span> — {b.reason}{' '}
-                  <span className="num text-num-xs text-ink-3">({b.hoursOpen}h)</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div className="rounded-xl border border-hairline bg-surface p-4">
-          <p className="mb-2 text-eyebrow text-ink-3">Hours blocked last week, by blocker</p>
-          {blocks.byBlocker.length === 0 ? (
-            <p className="text-body-sm text-ink-3">Nothing resolved last week.</p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {blocks.byBlocker.map((b) => (
-                <li key={b.label} className="flex justify-between text-body-sm">
-                  <span>{b.label}</span>
-                  <span className="num text-num-sm text-ink">{Math.round(b.hours)}h</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="rounded-xl border border-hairline bg-surface p-4">
+        <p className="mb-2 text-eyebrow text-ink-3">Open now</p>
+        {blocks.open.length === 0 ? (
+          <p className="text-body-sm text-ink-3">Nothing currently blocked.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {blocks.open.map((b) => (
+              <li key={b.id} className="text-body-sm">
+                <span className="text-ink">{b.blockingName ?? 'Unknown'}</span> — {b.reason}{' '}
+                <Hint text={`Blocked for ${formatDurationLong(b.hoursOpen * HOUR_MS)}.`}>
+                  <span className="num text-num-xs text-ink-3">({formatDuration(b.hoursOpen * HOUR_MS)})</span>
+                </Hint>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
-    </section>
-  );
-}
-
-function CommitSection({
-  roster,
-  candidates,
-  committed,
-  locked,
-  meId,
-  isOversight,
-  readOnly,
-  onCommit,
-  onUncommit,
-}: {
-  roster: Array<{ userId: string; name: string | null; position: string }>;
-  candidates: Record<string, CandidateTask[]>;
-  committed: Record<string, CandidateTask[]>;
-  locked: boolean;
-  meId?: string;
-  isOversight: boolean;
-  readOnly: boolean;
-  onCommit: (taskId: string) => void;
-  onUncommit: (taskId: string) => void;
-}) {
-  const visibleRoster = roster.filter((r) => r.position !== 'other');
-
-  return (
-    <section>
-      <h2 className="mb-3 text-title-lg text-ink">Commit</h2>
-      {locked ? (
-        <p className="mb-3 text-body-sm text-pending">Commitments are locked for this week.</p>
-      ) : null}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {visibleRoster.map((person) => {
-          // Read-only oversight (ERC/DCA) reads every card in this
-          // grid, same as a real founder would -- it just never gets
-          // the commit/uncommit affordance, on any row, including its
-          // own (a read-only account has no `person_id` of its own to
-          // match here anyway).
-          const canAct = (isOversight || person.userId === meId) && !readOnly;
-          const theirCommitted = committed[person.userId] ?? [];
-          const theirCandidates = candidates[person.userId] ?? [];
-          const total = theirCommitted.reduce((sum, t) => sum + (t.committed_points ?? 0), 0);
-          return (
-            <div key={person.userId} className="rounded-xl border border-hairline bg-surface p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <p className="text-strong text-ink">{person.name}</p>
-                <span className="num text-num-md text-ink-2">{total}</span>
-              </div>
-              <p className="mb-1 text-eyebrow text-ink-3">Committed</p>
-              {theirCommitted.length === 0 ? (
-                <p className="mb-3 text-body-sm text-ink-3">Nothing yet.</p>
-              ) : (
-                <ul className="mb-3 flex flex-col gap-1">
-                  {theirCommitted.map((t) => (
-                    <li key={t.id} className="flex items-center justify-between text-body-sm">
-                      <span className="flex items-center gap-1.5 truncate">
-                        <CheckCircle2 className="size-3.5 shrink-0 text-cleared" aria-hidden />
-                        {t.title}
-                      </span>
-                      {!locked && canAct ? (
-                        <button className="text-label text-ink-3 underline" onClick={() => onUncommit(t.id)}>
-                          Uncommit
-                        </button>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <p className="mb-1 text-eyebrow text-ink-3">Candidates</p>
-              {theirCandidates.length === 0 ? (
-                <p className="text-body-sm text-ink-3">No uncommitted board/backlog tasks.</p>
-              ) : (
-                <ul className="flex flex-col gap-1">
-                  {theirCandidates.map((t) => (
-                    <li key={t.id} className="flex items-center justify-between text-body-sm">
-                      <span className="truncate">{t.title}</span>
-                      {!locked && canAct ? (
-                        <Button size="sm" variant="secondary" onClick={() => onCommit(t.id)}>
-                          Commit
-                        </Button>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          );
-        })}
+      <div className="rounded-xl border border-hairline bg-surface p-4">
+        <p className="mb-2 text-eyebrow text-ink-3">Hours blocked last week, by blocker</p>
+        {blocks.byBlocker.length === 0 ? (
+          <p className="text-body-sm text-ink-3">Nothing resolved last week.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {blocks.byBlocker.map((b) => (
+              <li key={b.label} className="flex justify-between text-body-sm">
+                <span className="min-w-0 truncate">{b.label}</span>
+                <span className="num text-num-sm shrink-0 text-ink">{formatDuration(b.hours * HOUR_MS)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
-    </section>
+    </div>
   );
 }

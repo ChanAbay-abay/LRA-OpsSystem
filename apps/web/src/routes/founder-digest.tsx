@@ -56,11 +56,34 @@ import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { EditRequestCard } from '@/components/tasks/edit-request-diff';
+import { Hint } from '@/components/ui/hint';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { buildFieldDiffs, type DiffResolvers, type TaskEditRequest } from '@/lib/task-edit-requests';
+import { ageTone, formatDuration, formatDurationLong } from '@/lib/duration';
+import { fmtDateTime } from '@/lib/dates';
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * A duration badge — DESIGN.md §18. `ageHours` is already server-rounded
+ * (this screen's one-round-trip contract, so the header counts and the
+ * rows underneath can never disagree), so the badge itself is derived
+ * from that stable number rather than re-reading `Date.now()` on every
+ * render — the same impurity `routes/points.tsx` had to delete once
+ * already. The `<Hint>` carries the exact instant, per §18.3: "the badge
+ * says `2w 1d`, the tooltip says `Since … — 2 weeks, 1 day`."
+ */
+function AgeBadge({ hours, since, className }: { hours: number; since: string; className?: string }) {
+  const ms = hours * HOUR_MS;
+  return (
+    <Hint text={`Since ${fmtDateTime(since)} — ${formatDurationLong(ms)}`}>
+      <span className={cn('num shrink-0 text-num-xs', ageTone(ms), className)}>{formatDuration(ms)}</span>
+    </Hint>
+  );
+}
 
 interface DigestTask {
   id: string;
@@ -73,6 +96,8 @@ interface DigestTask {
   is_committed: boolean;
   carry_over_count: number;
   ageHours: number;
+  /** The instant `ageHours` was rounded from — DESIGN.md §18.3's exact-timestamp `<Hint>`. */
+  since: string;
 }
 
 interface BlockedTask extends DigestTask {
@@ -81,6 +106,7 @@ interface BlockedTask extends DigestTask {
   blockingName: string | null;
   raisedByName: string | null;
   blockedHours: number;
+  blockedSince: string;
 }
 
 interface Group {
@@ -90,6 +116,7 @@ interface Group {
   count: number;
   points: number;
   oldestHours: number;
+  oldestSince: string;
   tasks: DigestTask[];
 }
 
@@ -116,11 +143,6 @@ interface Digest {
 
 function initials(name: string | null) {
   return (name ?? '?').slice(0, 2).toUpperCase();
-}
-
-/** Age colour is the same everywhere on this screen: 24h is the SLA the queue already advertises. */
-function ageTone(hours: number) {
-  return hours >= 24 ? 'text-danger' : hours >= 8 ? 'text-pending' : 'text-ink-3';
 }
 
 /**
@@ -229,7 +251,7 @@ function TaskRow({ task, trailing }: { task: DigestTask; trailing?: React.ReactN
         </span>
       ) : null}
       <span className="num shrink-0 text-num-sm text-ink-2">{task.points || '—'}</span>
-      <span className={cn('num w-10 shrink-0 text-right text-num-xs', ageTone(task.ageHours))}>{task.ageHours}h</span>
+      <AgeBadge hours={task.ageHours} since={task.since} className="w-14 text-right" />
       {trailing}
     </div>
   );
@@ -664,7 +686,7 @@ export function FounderDigest() {
                         <span className="ml-auto num text-num-sm text-ink-2">
                           {g.count} · {g.points} pts
                         </span>
-                        <span className={cn('num w-10 text-right text-num-xs', ageTone(g.oldestHours))}>{g.oldestHours}h</span>
+                        <AgeBadge hours={g.oldestHours} since={g.oldestSince} className="w-14 text-right" />
                       </div>
                       {g.tasks.map((t) => (
                         <div key={t.id} className="flex items-center gap-3 border-b border-hairline pl-4 last:border-0">
@@ -703,7 +725,7 @@ export function FounderDigest() {
                           {b.raisedByName ? ` · raised by ${b.raisedByName}` : ''}
                         </p>
                       </div>
-                      <span className={cn('num shrink-0 text-num-xs', ageTone(b.blockedHours))}>{b.blockedHours}h</span>
+                      <AgeBadge hours={b.blockedHours} since={b.blockedSince} />
                     </div>
                   ))}
                 </div>

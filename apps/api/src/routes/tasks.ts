@@ -335,6 +335,69 @@ async function noteCounts(db: ReturnType<typeof serviceClient>, taskIds: string[
   return counts;
 }
 
+/**
+ * A task's activity history for the detail dialog's timeline (Chan: "each
+ * task should have updates on when it was created, etc so when they open
+ * a task, it shows when a task was made"). Two append-only sources, both
+ * already governed by RLS the trigger writes into, so nothing here is a
+ * new capability:
+ *
+ *  - `ops.point_ledger` — every status transition this task has ever
+ *    made, with its actor, reason and timestamp (`point_ledger_select`:
+ *    "any ops member reads the whole ledger"). This IS the task's
+ *    submitted/verified/cleared/rejected/cancelled history; there is no
+ *    second place that records it.
+ *  - `core.audit_logs`, filtered to `entity_type = 'ops.task'` — admin
+ *    corrections and direct definition edits. Read on `userClient`, NOT
+ *    `serviceClient`, so `audit_select`'s own RLS (`actor_id = caller OR
+ *    core.can_read_audit(...)`, which for `ops.task` means oversight or
+ *    the task's owner) decides what comes back — a staff owner of a
+ *    DIFFERENT task gets an empty array here, not a 403, exactly as RLS
+ *    silently filtering a row is treated everywhere else in this file.
+ *    This widens nothing: it is the same read `GET /admin/audit` already
+ *    grants, scoped to one task instead of everything.
+ *
+ * Names are resolved with the same `enrichWithOwners` join every other
+ * list endpoint in this file pays for — actor ids arrive as raw uuids
+ * from both tables and neither carries a display name of its own.
+ */
+async function taskHistory(
+  userDb: ReturnType<typeof userClient>,
+  svc: ReturnType<typeof serviceClient>,
+  taskId: string
+): Promise<{ ledger: unknown[]; auditLogs: unknown[] }> {
+  const [{ data: ledger, error: ledgerError }, { data: auditLogs, error: auditError }] = await Promise.all([
+    userDb.schema('ops').from('point_ledger').select('*').eq('task_id', taskId).order('created_at', { ascending: true }),
+    userDb
+      .schema('core')
+      .from('audit_logs')
+      .select('*')
+      .eq('entity_type', 'ops.task')
+      .eq('entity_id', taskId)
+      .order('created_at', { ascending: true }),
+  ]);
+  if (ledgerError) throw ledgerError;
+  if (auditError) throw auditError;
+
+  const actorIds = [
+    ...new Set(
+      [...(ledger ?? []).map((r) => r.actor_id), ...(auditLogs ?? []).map((r) => r.actor_id)].filter(
+        (v): v is string => Boolean(v)
+      )
+    ),
+  ];
+  const named = actorIds.length ? await enrichWithOwners(svc, actorIds.map((owner_user_id) => ({ owner_user_id }))) : [];
+  const nameByActor = new Map(named.map((n) => [n.owner_user_id, n.ownerName]));
+
+  return {
+    ledger: (ledger ?? []).map((r) => ({ ...r, actorName: r.actor_id ? (nameByActor.get(r.actor_id) ?? null) : null })),
+    auditLogs: (auditLogs ?? []).map((r) => ({
+      ...r,
+      actorName: r.actor_id ? (nameByActor.get(r.actor_id) ?? null) : (r.actor_email ?? null),
+    })),
+  };
+}
+
 export default async function tasksRoutes(app: FastifyInstance) {
   app.addHook('onRequest', authenticate);
   app.addHook('onRequest', requireMembership('ops'));
@@ -513,6 +576,26 @@ export default async function tasksRoutes(app: FastifyInstance) {
     const notes = await noteCounts(svc, [id]);
 
     return { data: { ...enriched, openBlockCount: counts.get(id) ?? 0, noteCount: notes.get(id) ?? 0 } };
+  });
+
+  /**
+   * A task's activity history — Chan: "each task should have updates on
+   * when it was created, etc so when they open a task, it shows when a
+   * task was made." Deliberately a SEPARATE endpoint from `GET /:id`,
+   * the same shape decision `/notes` and `/blocks` already made: `GET
+   * /:id` has to stay byte-identical to a board card (the Now screen
+   * opens this exact modal from a board-card-shaped row, and
+   * `test/lifecycle-integration.test.ts` asserts the two payloads
+   * `deepEqual` end to end), so a field only the detail dialog needs
+   * does not belong on it. `taskHistory` does the actual read/join work;
+   * see its own comment for the RLS story.
+   */
+  app.get('/:id/history', async (req) => {
+    const { id } = req.params as { id: string };
+    const db = userClient(req.accessToken);
+    const svc = serviceClient();
+    const { ledger, auditLogs } = await taskHistory(db, svc, id);
+    return { data: { ledger, auditLogs } };
   });
 
   app.post('/', async (req) => {

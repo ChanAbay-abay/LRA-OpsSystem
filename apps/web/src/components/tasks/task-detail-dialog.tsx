@@ -35,7 +35,9 @@ import { useResource, type ResourceStatus } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { taskStatusLabel } from '@/lib/labels';
+import { taskStatusLabel, taskStatusTransition } from '@/lib/labels';
+import { fmtDateTime, fmtTime } from '@/lib/dates';
+import { Hint } from '@/components/ui/hint';
 import {
   COLUMN_STATUS,
   blockResolveRefusal,
@@ -108,6 +110,160 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div>
       <p className="text-eyebrow text-ink-3">{label}</p>
       <div className="mt-0.5 text-body-sm text-ink">{children}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// History — GET /api/tasks/:id/history. Chan: "each task should have
+// updates on when it was created, etc so when they open a task, it
+// shows when a task was made."
+//
+// Every timestamp here is data that already existed (`ops.tasks.
+// created_at`/`first_in_progress_at`, `ops.point_ledger`'s transition
+// rows, `core.audit_logs`' admin-correction rows) — this section adds
+// no new column and no new write path, only a read and a render.
+// ---------------------------------------------------------------------
+
+interface HistoryLedgerRow {
+  id: string;
+  from_status: string;
+  to_status: string;
+  state: string;
+  points: number;
+  created_at: string;
+  actor_id: string | null;
+  actorName: string | null;
+  reason: string | null;
+}
+
+interface HistoryAuditRow {
+  id: string;
+  action: string;
+  created_at: string;
+  actor_id: string | null;
+  actorName: string | null;
+  actor_email: string | null;
+}
+
+interface TaskHistory {
+  ledger: HistoryLedgerRow[];
+  auditLogs: HistoryAuditRow[];
+}
+
+interface TimelineEntry {
+  key: string;
+  at: string;
+  label: string;
+  actorName?: string | null;
+  reason?: string | null;
+}
+
+/**
+ * The two admin-audit actions this task can carry
+ * (`20260910240000_ops_admin_corrections.sql`,
+ * `20260910170000_audit_direct_edits_and_closed_week_guard.sql`), spoken
+ * in a sentence rather than the raw `module.entity.verb` action string
+ * `/admin/audit` renders as-is. Not moved to `lib/labels.ts`: that file
+ * models database ENUMs (§17), and an audit `action` is a free-text
+ * column, not one — an unrecognised value still renders as itself,
+ * never blank, same rule as `labels.ts`'s own fallback.
+ */
+function auditActionLabel(action: string): string {
+  switch (action) {
+    case 'ops.task.admin_corrected':
+      return 'Corrected by an admin';
+    case 'ops.task.definition_edited_directly':
+      return 'Definition edited directly';
+    default:
+      return action;
+  }
+}
+
+/**
+ * Created → started → every ledger transition → every admin correction,
+ * oldest first. `first_in_progress_at` is only added when it exists — a
+ * task nobody has picked up yet has no "Started" line, which is itself
+ * the honest state rather than a guessed one.
+ */
+function buildTimeline(task: Task, history: TaskHistory | null): TimelineEntry[] {
+  const entries: TimelineEntry[] = [{ key: 'created', at: task.created_at, label: 'Created' }];
+  if (task.first_in_progress_at) {
+    entries.push({ key: 'started', at: task.first_in_progress_at, label: 'Started' });
+  }
+  for (const row of history?.ledger ?? []) {
+    entries.push({
+      key: `ledger-${row.id}`,
+      at: row.created_at,
+      label: taskStatusTransition(row.from_status, row.to_status),
+      actorName: row.actorName,
+      reason: row.reason,
+    });
+  }
+  for (const row of history?.auditLogs ?? []) {
+    entries.push({
+      key: `audit-${row.id}`,
+      at: row.created_at,
+      label: auditActionLabel(row.action),
+      actorName: row.actorName ?? row.actor_email,
+    });
+  }
+  return entries.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+}
+
+function HistorySection({ task }: { task: Task }) {
+  const [history, setHistory] = React.useState<TaskHistory | null>(null);
+  const [failed, setFailed] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    api
+      .get<TaskHistory>(`/api/tasks/${task.id}/history`)
+      .then((data) => {
+        setHistory(data);
+        setFailed(false);
+      })
+      .catch(() => setFailed(true));
+  }, [task.id]);
+
+  React.useEffect(() => load(), [load]);
+
+  const entries = React.useMemo(() => buildTimeline(task, history), [task, history]);
+
+  return (
+    <div>
+      <p className="mb-1 text-eyebrow text-ink-3">History</p>
+      {failed ? (
+        <ErrorPanel message="This task's history could not be loaded." onRetry={load} />
+      ) : (
+        <ul
+          className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-lg border border-hairline bg-surface-2 p-3"
+          aria-busy={history == null}
+        >
+          {entries.map((e) => (
+            <li key={e.key} className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-body-sm text-ink">
+                  {e.label}
+                  {e.actorName ? <span className="text-ink-3"> — {e.actorName}</span> : null}
+                </p>
+                {e.reason ? <p className="break-words text-micro text-ink-3">{e.reason}</p> : null}
+              </div>
+              <Hint text={fmtDateTime(e.at)}>
+                <span className="num shrink-0 text-num-xs text-ink-3">{fmtTime(e.at)}</span>
+              </Hint>
+            </li>
+          ))}
+          {/* Ledger/audit rows are still loading (Created/Started already
+              render from the task itself, never blank) — two skeleton
+              bars at the row's own geometry, DESIGN.md §8. */}
+          {history == null ? (
+            <>
+              <div className="skeleton-pulse h-3 w-3/5 rounded-xs bg-surface-3" aria-hidden />
+              <div className="skeleton-pulse h-3 w-2/5 rounded-xs bg-surface-3" style={{ animationDelay: '80ms' }} aria-hidden />
+            </>
+          ) : null}
+        </ul>
+      )}
     </div>
   );
 }
@@ -558,6 +714,8 @@ export function TaskDetailDialog({
             </ul>
           )}
         </div>
+
+        <HistorySection task={task} />
 
         </div>
 

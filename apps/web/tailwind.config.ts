@@ -18,9 +18,19 @@ export default {
         navy: { 900: 'var(--navy-900)', 800: 'var(--navy-800)', 700: 'var(--navy-700)' },
         brand: {
           800: 'var(--brand-800)', 700: 'var(--brand-700)', 600: 'var(--brand-600)',
-          500: 'var(--brand-500)', 300: 'var(--brand-300)', 200: 'var(--brand-200)',
+          500: 'var(--brand-500)', 400: 'var(--brand-400)', 300: 'var(--brand-300)', 200: 'var(--brand-200)',
           100: 'var(--brand-100)', 50: 'var(--brand-50)',
           DEFAULT: 'var(--brand-600)',
+        },
+        // The activity heatmap's blue ramp (DESIGN.md §19.4/§25.2) —
+        // one new interpolated brand step (400) plus the ramp's own
+        // named tokens, since `--heat-2` is the same hex as `brand-400`
+        // but the two mean different things (a chart tint vs. a cell
+        // fill) and `§19.4`'s "one ramp, one direction flip" wants its
+        // own tokens rather than reusing `brand-*` positionally.
+        heat: {
+          0: 'var(--heat-0)', 1: 'var(--heat-1)', 2: 'var(--heat-2)',
+          3: 'var(--heat-3)', 4: 'var(--heat-4)', ring: 'var(--heat-ring)',
         },
         cyan: 'var(--cyan)',
         canvas: 'var(--canvas)',
@@ -77,6 +87,7 @@ export default {
       },
       borderRadius: {
         xs: '4px', sm: '6px', md: '8px', lg: '12px', xl: '16px',
+        cell: 'var(--radius-cell)',
       },
       boxShadow: {
         pop: 'var(--shadow-pop)',
@@ -92,6 +103,18 @@ export default {
       },
       width: { column: '288px', sidebar: '240px' },
       maxWidth: { prose: '68ch', briefing: '1200px', app: '1440px' },
+      // DESIGN.md §7.1: "Accordion / collapsible — Radix
+      // `--radix-collapsible-content-height` keyframe, `--dur-pop`,
+      // `--ease-out`." Added for the briefing's below-`md` per-person
+      // Collapsible (§16.4) — the first Radix Collapsible in the app.
+      keyframes: {
+        'collapsible-down': { from: { height: '0' }, to: { height: 'var(--radix-collapsible-content-height)' } },
+        'collapsible-up': { from: { height: 'var(--radix-collapsible-content-height)' }, to: { height: '0' } },
+      },
+      animation: {
+        'collapsible-down': 'collapsible-down var(--dur-pop) var(--ease-out)',
+        'collapsible-up': 'collapsible-up var(--dur-pop) var(--ease-out)',
+      },
     },
   },
   plugins: [animate],

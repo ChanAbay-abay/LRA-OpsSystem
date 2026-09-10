@@ -109,6 +109,33 @@
   --dur-pop: 200ms;
   --dur-dialog: 260ms;
   --dur-clear: 420ms;
+
+  /* ── brand ramp: one new interpolated step (DESIGN.md §25.2) ─────── */
+  --brand-400: #6D9CF3;   /* between --brand-300 and --brand-500 */
+
+  /* ── activity heatmap (§19) — light: more work = darker ──────────── */
+  --heat-0: var(--surface-2);
+  --heat-1: #C9DDFB;      /* = --brand-200 */
+  --heat-2: #6D9CF3;      /* = --brand-400 */
+  --heat-3: #1662E8;      /* = --brand-600 */
+  --heat-4: #0C3FA3;      /* = --brand-800 */
+  --heat-ring: var(--hairline);
+
+  --radius-cell: 2px;     /* heatmap cells only — 4px is too round at 12px */
+}
+
+/*
+ * Inert until a theme toggle exists (§25.1 — dark mode is not built),
+ * but measured and correct when it does: same four hexes as light,
+ * assigned in reverse. On navy, more work = brighter.
+ */
+.dark {
+  --heat-0: #182031;
+  --heat-1: #0C3FA3;
+  --heat-2: #1662E8;
+  --heat-3: #6D9CF3;
+  --heat-4: #C9DDFB;
+  --heat-ring: #232C42;
 }
 
 @layer base {

@@ -381,14 +381,37 @@ async function upsertMembership(authUserId, persona) {
     .eq('user_id', authUserId)
     .eq('module', 'ops')
     .maybeSingle();
+  /*
+    `joined_at` is backdated deliberately, and it is not cosmetic.
+
+    `core.memberships.joined_at` defaults to now(), and the activity
+    heatmap uses it to tell a REAL zero ("you cleared nothing that day")
+    from a before-account day ("you did not work here yet", rendered
+    dimmed and aria-hidden). A demo account created today therefore has
+    every cell before today dimmed, and the heatmap — the whole point of
+    which is to show a pattern over months — renders as one lit square
+    on an otherwise grey grid, which reads as broken rather than empty.
+
+    The seed already builds three closed weeks of history stretching back
+    weeks before today, so a joined_at of "now" also contradicts the
+    ledger rows this same script writes. Six months back is comfortably
+    before the oldest seeded week and before the heatmap's 26-week window,
+    so every cell in range is a real zero or a real count.
+  */
+  const joinedAt = new Date(Date.now() - 183 * 24 * 60 * 60 * 1000).toISOString();
+
   if (existing) {
-    await svc.schema('core').from('memberships').update({ position: persona.position, is_active: true }).eq('id', existing.id);
+    await svc
+      .schema('core')
+      .from('memberships')
+      .update({ position: persona.position, is_active: true, joined_at: joinedAt })
+      .eq('id', existing.id);
     return;
   }
   const { error } = await svc
     .schema('core')
     .from('memberships')
-    .insert({ user_id: authUserId, module: 'ops', position: persona.position });
+    .insert({ user_id: authUserId, module: 'ops', position: persona.position, joined_at: joinedAt });
   if (error) throw error;
 }
 

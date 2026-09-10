@@ -27,13 +27,20 @@ export interface RosterMember {
    * able to tell them apart from someone who simply scored zero.
    */
   readOnly: boolean;
+  /**
+   * `core.memberships.joined_at` for this person's `ops` membership —
+   * the activity heatmap's (DESIGN.md §19.5) dividing line between "a
+   * real zero" and "we weren't watching yet". A day before this instant
+   * is rendered as an absence, never a zero.
+   */
+  joinedAt: string | null;
 }
 
 export async function loadOpsRoster(db: SupabaseClient): Promise<RosterMember[]> {
   const { data: memberships, error } = await db
     .schema('core')
     .from('memberships')
-    .select('module, position, is_active, user_id, users:user_id(id, email, authority, person_id, read_only)')
+    .select('module, position, is_active, joined_at, user_id, users:user_id(id, email, authority, person_id, read_only)')
     .eq('module', 'ops')
     .eq('is_active', true);
 
@@ -58,6 +65,7 @@ export async function loadOpsRoster(db: SupabaseClient): Promise<RosterMember[]>
       authority: u?.authority ?? null,
       position: m.position as string,
       readOnly: u?.read_only ?? false,
+      joinedAt: (m.joined_at as string | null) ?? null,
       name: person ? (person.display_name as string) ?? `${person.first_name} ${person.last_name}` : (u?.email ?? null),
     };
   });

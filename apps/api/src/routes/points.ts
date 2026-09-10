@@ -70,6 +70,11 @@ export default async function pointsRoutes(app: FastifyInstance) {
       ...t,
       queueKind: 'verify_or_clear',
       ageHours: Math.round((now - new Date(t.last_activity_at).getTime()) / 36e5),
+      // The raw instant `ageHours` was rounded from, so the client can
+      // pair the capped duration badge (DESIGN.md §18.3, formatDuration)
+      // with its exact Manila timestamp in a `<Hint>` instead of only
+      // ever showing the rounded hour count.
+      since: t.last_activity_at,
     }));
 
     // Flagged cancellations sit in the SAME queue but are a distinctly
@@ -92,6 +97,7 @@ export default async function pointsRoutes(app: FastifyInstance) {
       ...t,
       queueKind: 'cancellation_decision',
       ageHours: Math.round((now - new Date(t.cancellation_requested_at ?? t.last_activity_at).getTime()) / 36e5),
+      since: t.cancellation_requested_at ?? t.last_activity_at,
     }));
 
     return { data: [...withAge, ...withCancellationAge] };
@@ -168,6 +174,10 @@ export default async function pointsRoutes(app: FastifyInstance) {
       is_committed: t.is_committed,
       carry_over_count: t.carry_over_count,
       ageHours: ageHours(t.last_activity_at),
+      // The instant `ageHours` was rounded from — DESIGN.md §18.3 pairs
+      // every capped duration badge with its exact timestamp in a
+      // `<Hint>`, which needs the raw value, not just the rounded hours.
+      since: t.last_activity_at,
     });
 
     const blockedTaskIds = new Set(relevantBlocks.map((b) => b.task_id));
@@ -186,6 +196,7 @@ export default async function pointsRoutes(app: FastifyInstance) {
           blockingName: b.blocking_user_id ? (nameById.get(b.blocking_user_id) ?? null) : b.blocking_external,
           raisedByName: nameById.get(b.created_by) ?? null,
           blockedHours: ageHours(b.created_at),
+          blockedSince: b.created_at,
         };
       })
       .filter((b) => !['cleared', 'cancelled'].includes(b.status))
@@ -225,6 +236,7 @@ export default async function pointsRoutes(app: FastifyInstance) {
         count: items.length,
         points: items.reduce((n, t) => n + t.points, 0),
         oldestHours: Math.max(...items.map((t) => t.ageHours)),
+        oldestSince: items.reduce((oldest, t) => (t.ageHours > oldest.ageHours ? t : oldest)).since,
         tasks: items,
       };
     });

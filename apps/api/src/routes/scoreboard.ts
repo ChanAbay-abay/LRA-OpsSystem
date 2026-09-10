@@ -51,6 +51,8 @@ import type { FastifyInstance } from 'fastify';
 import {
   applyRecurringCap,
   isStale,
+  manilaDayBounds,
+  manilaDayStart,
   manilaWeekStart,
   medianCycleTimeHours,
   reliability,
@@ -108,6 +110,119 @@ interface ClearedTaskRow {
   owner_user_id: string;
   first_in_progress_at: string | null;
   cleared_at: string | null;
+}
+
+// ---------------------------------------------------------------------
+// The activity heatmap (DESIGN.md §19) — Chan, 2026-09-10: "like git
+// commits, the greens on how many tasks they complete on those days,
+// the greener it is — but instead of green use a blue."
+//
+// A cell counts TASKS that reached `cleared` on one Manila calendar day
+// (§19.1) — read straight off `ops.point_ledger` where `state =
+// 'cleared'`, the SAME rows the balance figures above are built from, so
+// the picture can never disagree with the number over it. One
+// `point_ledger` row with `state = 'cleared'` is written exactly once
+// per task (the trigger fires on the transition, and the ledger is
+// append-only), so counting rows per day IS counting tasks per day —
+// no separate task read is needed.
+// ---------------------------------------------------------------------
+
+export interface ActivityDay {
+  /** Manila calendar day, `YYYY-MM-DD` (`manilaDayStart`). */
+  date: string;
+  /** Tasks that reached `cleared` on this day. What the cell paints. */
+  count: number;
+  /** Points those tasks were worth — the tooltip's second line, never the cell's colour (§19.1). */
+  points: number;
+}
+
+export interface ActivityWindow {
+  /** Oldest to newest, always whole Manila weeks (Monday..Sunday), `windowWeeks * 7` entries. */
+  days: ActivityDay[];
+  windowWeeks: number;
+  /** Sum of `count` across every day in the window — the total line (§19.6). */
+  totalCleared: number;
+  /**
+   * The Manila day this person's `ops` membership began, or `null` if
+   * unknown. A day strictly before this is an ABSENCE ("we weren't
+   * watching yet"), not a zero (§19.5) — the client, not this function,
+   * decides which days that covers, since it also has to know which
+   * days are simply in the future.
+   */
+  sinceDate: string | null;
+}
+
+/** The one column `ops.point_ledger` gives this function that it needs. */
+export interface ActivityLedgerRow {
+  user_id: string;
+  created_at: string;
+  points: number;
+}
+
+/** DESIGN.md §19.2: 26 weeks is the full variant's measured maximum. */
+export const ACTIVITY_WINDOW_WEEKS = 26;
+
+/**
+ * Calendar-date arithmetic on a `YYYY-MM-DD` string. Both the input and
+ * the output are already Manila calendar days by the time anything here
+ * touches them, so this is plain date math with no further timezone
+ * conversion — `manilaDayStart` is what did the timezone work, upstream
+ * of this function.
+ */
+function addDaysToIsoDate(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+/**
+ * Every day of the window, per person in `userIds`, even a person with
+ * zero cleared ledger rows — DESIGN.md §19.5's "render the full empty
+ * grid anyway" needs a real day list to render, not a missing key.
+ *
+ * The window is anchored on `referenceWeekStart` (the same reference
+ * week the rest of `buildScoreboard` uses, so `?weekId=` moves the
+ * heatmap along with everything else) and always ends on that week's
+ * Sunday — full weeks only, so the grid's columns are never a ragged
+ * partial week. `rows` should already be filtered to `state = 'cleared'`
+ * before this function ever sees them; it does not re-check `state`.
+ */
+export function buildActivityByUser(
+  rows: ActivityLedgerRow[],
+  userIds: string[],
+  referenceWeekStart: string,
+  sinceDateByUser: Map<string, string | null>,
+  weeks: number = ACTIVITY_WINDOW_WEEKS
+): Map<string, ActivityWindow> {
+  const windowStart = addDaysToIsoDate(referenceWeekStart, -(weeks - 1) * 7);
+  const windowEnd = addDaysToIsoDate(referenceWeekStart, 6);
+
+  const byUserByDay = new Map<string, Map<string, { count: number; points: number }>>();
+  for (const row of rows) {
+    const day = manilaDayStart(new Date(row.created_at));
+    if (day < windowStart || day > windowEnd) continue;
+    const byDay = byUserByDay.get(row.user_id) ?? new Map<string, { count: number; points: number }>();
+    const cell = byDay.get(day) ?? { count: 0, points: 0 };
+    cell.count += 1;
+    cell.points += row.points;
+    byDay.set(day, cell);
+    byUserByDay.set(row.user_id, byDay);
+  }
+
+  const out = new Map<string, ActivityWindow>();
+  for (const userId of userIds) {
+    const byDay = byUserByDay.get(userId);
+    const days: ActivityDay[] = [];
+    let totalCleared = 0;
+    for (let cursor = windowStart; cursor <= windowEnd; cursor = addDaysToIsoDate(cursor, 1)) {
+      const cell = byDay?.get(cursor);
+      days.push({ date: cursor, count: cell?.count ?? 0, points: cell?.points ?? 0 });
+      totalCleared += cell?.count ?? 0;
+    }
+    out.set(userId, { days, windowWeeks: weeks, totalCleared, sinceDate: sinceDateByUser.get(userId) ?? null });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------
@@ -334,6 +449,13 @@ export interface ScoreboardRow {
   cycleTime: MedianCycleTimeResult;
   /** Points to do / pending / completed / at risk, over four windows. Visible to everyone — see `stripReliability` below. */
   periods: ScoreboardPeriods;
+  /**
+   * Tasks cleared per Manila day, DESIGN.md §19. It belongs to the
+   * person, not to management (Chan: "so staff can stay accountable on
+   * their own"), so it is visible to everyone including staff and is
+   * unaffected by `stripReliability` below, same as `periods`.
+   */
+  activity: ActivityWindow;
 }
 
 interface ScoreboardSummary {
@@ -601,6 +723,29 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
     roster.map((m) => m.userId)
   );
 
+  // --- The activity heatmap (DESIGN.md §19): every `cleared` ledger row
+  // in the window, for every roster member, read on the SAME
+  // `userClient` as everything else in this route — RLS already grants
+  // any ops member read of the whole ledger (`point_ledger_select`,
+  // same rule `/api/points/ledger` reads under), so this widens nothing.
+  const activityWindowStart = addDaysToIsoDate(currentWeek.week_start, -(ACTIVITY_WINDOW_WEEKS - 1) * 7);
+  const { start: activityQueryStart } = manilaDayBounds(activityWindowStart);
+  const { data: activityLedgerData, error: activityLedgerError } = await db
+    .schema('ops')
+    .from('point_ledger')
+    .select('user_id, created_at, points')
+    .eq('state', 'cleared')
+    .gte('created_at', activityQueryStart.toISOString());
+  if (activityLedgerError) throw activityLedgerError;
+
+  const sinceDateByUser = new Map(roster.map((m) => [m.userId, m.joinedAt ? manilaDayStart(new Date(m.joinedAt)) : null]));
+  const activityByUser = buildActivityByUser(
+    (activityLedgerData ?? []) as ActivityLedgerRow[],
+    roster.map((m) => m.userId),
+    currentWeek.week_start,
+    sinceDateByUser
+  );
+
   // --- This week's raw/capped points, from the same view /points reads.
   const { data: balancesData, error: balancesError } = await db
     .schema('ops')
@@ -681,6 +826,10 @@ async function buildScoreboard(accessToken: string, weekIdOverride?: string): Pr
         // below are a subset of it, so this key always exists -- the
         // assertion is Map.get's type, not a real possibility.
         periods: periodsByUser.get(m.userId)!,
+        // Same "the assertion is Map.get's type, not a real possibility"
+        // reasoning as `periods` above — `buildActivityByUser` was
+        // handed the whole roster too.
+        activity: activityByUser.get(m.userId)!,
       };
     })
     .sort((a, b) => b.currentWeek.cappedScore - a.currentWeek.cappedScore);

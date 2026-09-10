@@ -59,6 +59,36 @@ export function manilaWeekBounds(weekStart: string): { start: Date; end: Date } 
   return { start: new Date(startMs), end: new Date(endMs) };
 }
 
+/**
+ * The Manila-local calendar day `ts` falls in, as `YYYY-MM-DD` — the
+ * per-day sibling of `manilaWeekStart`, added for the activity heatmap
+ * (DESIGN.md §19): a cell counts tasks that reached `cleared` on ONE
+ * Manila calendar day, and a clear at 23:59 Manila must land in a
+ * different cell than one one minute later at 00:01 Manila, which a
+ * UTC calendar day would get wrong for 8 hours of every 24 exactly like
+ * `manilaWeekStart` above.
+ */
+export function manilaDayStart(ts: Date = new Date()): string {
+  return formatIsoDate(toManilaWallClock(ts));
+}
+
+/**
+ * The real-world UTC instants a Manila calendar day (`YYYY-MM-DD`)
+ * spans: 00:00:00.000 through 23:59:59.999 Manila. Mirrors
+ * `manilaWeekBounds` at one day's width instead of seven, for querying
+ * `ops.point_ledger` by a Manila day boundary rather than filtering rows
+ * in memory.
+ */
+export function manilaDayBounds(day: string): { start: Date; end: Date } {
+  const [y, m, d] = day.split('-').map(Number);
+  if (!y || !m || !d) {
+    throw new Error(`manilaDayBounds: "${day}" is not a YYYY-MM-DD date`);
+  }
+  const startMs = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - MANILA_OFFSET_MS;
+  const endMs = startMs + DAY_MS - 1;
+  return { start: new Date(startMs), end: new Date(endMs) };
+}
+
 /** Whole ISO weeks between two `YYYY-MM-DD` Monday week_start values. */
 export function weeksBetween(a: string, b: string): number {
   const da = Date.parse(`${a}T00:00:00Z`);

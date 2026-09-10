@@ -25,7 +25,7 @@ import * as React from 'react';
 import { toast } from 'sonner';
 import { CheckCircle2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { ReasonTextarea } from '@/components/ui/reason-textarea';
+import { REASON_MIN_LENGTH, ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
 import { EditBatchCard, type BatchDiffRow } from '@/components/tasks/edit-request-diff';
@@ -370,7 +370,11 @@ function RejectBatchDialog({
           Every task in this batch stays exactly as it is. {batch.requestedByName ?? 'The requester'} sees this
           reason.
         </p>
-        <ReasonTextarea value={reason} onChange={setReason} placeholder="Why isn't this batch happening?" />
+        <ReasonTextarea
+          value={reason}
+          onChange={setReason}
+          placeholder="e.g. Keep the original points — we agreed these on Monday"
+        />
         {error ? (
           <p role="alert" className="text-body-sm text-danger">
             {error}
@@ -383,7 +387,7 @@ function RejectBatchDialog({
           <Button
             variant="destructive"
             loading={submitting}
-            disabled={reason.trim().length < 10}
+            disabled={reason.trim().length < REASON_MIN_LENGTH}
             onClick={submit}
           >
             Reject the batch

@@ -42,6 +42,13 @@ export interface Task {
   created_at: string;
   last_activity_at: string;
   cleared_at: string | null;
+  // Cycle time's "started" stamp (PRD.md §4, migration
+  // 20260910150000_ops_cycle_time.sql) — the FIRST `todo`/`rejected` ->
+  // `in_progress` move, server-derived and never re-stamped. Was always
+  // in the `select('*')` payload and simply undeclared; the task detail
+  // dialog's history timeline (Chan: "it shows when a task was made") is
+  // its first real consumer.
+  first_in_progress_at: string | null;
   openBlockCount: number;
   noteCount: number;
   ownerName: string | null;

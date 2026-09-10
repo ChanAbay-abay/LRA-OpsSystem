@@ -34,10 +34,13 @@ import { Button } from '@/components/ui/button';
 import { ReasonTextarea } from '@/components/ui/reason-textarea';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
+import { Hint } from '@/components/ui/hint';
 import { useResource } from '@/lib/use-resource';
 import { useAuth } from '@/lib/auth-context';
 import { api, ApiClientError } from '@/lib/api';
 import { FounderDigest } from '@/routes/founder-digest';
+import { ageTone, formatDuration, formatDurationLong } from '@/lib/duration';
+import { fmtDateTime } from '@/lib/dates';
 
 interface QueueTask {
   id: string;
@@ -46,9 +49,23 @@ interface QueueTask {
   catalog_points: number | null;
   points_override: number | null;
   ageHours: number;
+  /** The instant `ageHours` was rounded from — DESIGN.md §18.3's exact-timestamp `<Hint>`. */
+  since: string;
   queueKind: 'verify_or_clear' | 'cancellation_decision';
   pre_cancellation_status: string | null;
   cancellation_reason: string | null;
+}
+
+const HOUR_MS = 3_600_000;
+
+/** DESIGN.md §18 — the same badge shape `founder-digest.tsx`'s `AgeBadge` renders, this screen's other half of "an uncapped `{n}h`". */
+function AgeBadge({ task }: { task: QueueTask }) {
+  const ms = task.ageHours * HOUR_MS;
+  return (
+    <Hint text={`Since ${fmtDateTime(task.since)} — ${formatDurationLong(ms)}`}>
+      <span className={`num text-num-xs ${ageTone(ms)}`}>{formatDuration(ms)}</span>
+    </Hint>
+  );
 }
 
 /**
@@ -147,7 +164,7 @@ function QueueList() {
                     <span className="text-body">{t.title}</span>
                     <p className="text-label text-danger">Flagged for cancellation — {t.cancellation_reason}</p>
                   </div>
-                  <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : 'text-ink-3'}`}>{t.ageHours}h</span>
+                  <AgeBadge task={t} />
                   <Button
                     variant="destructive"
                     size="sm"
@@ -171,9 +188,7 @@ function QueueList() {
                 <div key={t.id} className="flex items-center gap-4 border-b border-hairline px-4 py-3 last:border-0">
                   <span className="flex-1 text-body">{t.title}</span>
                   <span className="num text-num-md text-ink-2">{t.points_override ?? t.catalog_points ?? '—'}</span>
-                  <span className={`num text-num-xs ${t.ageHours >= 24 ? 'text-danger' : t.ageHours >= 8 ? 'text-pending' : 'text-ink-3'}`}>
-                    {t.ageHours}h
-                  </span>
+                  <AgeBadge task={t} />
                   <Button
                     variant={nextAction === 'cleared' ? 'clear' : 'primary'}
                     size="sm"

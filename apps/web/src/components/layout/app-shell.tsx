@@ -84,6 +84,9 @@ export function PageHeader({
   description,
   actions,
   help,
+  helpOpen,
+  onHelpOpenChange,
+  helpFooter,
 }: {
   title: string;
   description?: string;
@@ -94,13 +97,21 @@ export function PageHeader({
    * route, which is what makes "know more" real instead of aspirational.
    */
   help: HelpTopicId;
+  /**
+   * Optional, additive pass-through to `<WhatIsThis>`'s controlled-open
+   * props (DESIGN.md §21.5) — every screen but `/briefing` leaves these
+   * three `undefined` and keeps the normal icon-triggered popover.
+   */
+  helpOpen?: boolean;
+  onHelpOpenChange?: (open: boolean) => void;
+  helpFooter?: ReactNode;
 }) {
   return (
     <div className="mb-5 flex items-start justify-between gap-4">
       <div>
         <h1 className="flex items-center gap-2 text-title text-ink">
           {title}
-          <WhatIsThis topic={help} />
+          <WhatIsThis topic={help} open={helpOpen} onOpenChange={onHelpOpenChange} footer={helpFooter} />
         </h1>
         {description ? <p className="mt-1 text-body-sm text-ink-3">{description}</p> : null}
       </div>

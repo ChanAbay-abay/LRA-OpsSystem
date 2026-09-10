@@ -20,6 +20,7 @@
  * this screen's permission-denied state.
  */
 import { LineChart, Line, ResponsiveContainer, YAxis } from 'recharts';
+import { HelpCircle } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/app-shell';
 import { ResourceView, SkeletonRows } from '@/components/ui/resource-state';
@@ -28,6 +29,9 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { bandChipClass, BAND_LABEL, type ReliabilityBand } from '@/lib/reliability-ui';
 import { positionLabel } from '@/lib/labels';
+import { Hint } from '@/components/ui/hint';
+import { ActivityHeatmap, ActivityHeatmapSkeleton } from '@/components/scoreboard/activity-heatmap';
+import type { ActivityWindow } from '@/components/scoreboard/activity-heatmap-model';
 
 interface WeeklyContribution {
   weekId: string;
@@ -77,6 +81,8 @@ interface PersonScoreboard {
   // founder/admin — same server-side strip as `reliability` above,
   // `apps/api/src/routes/scoreboard.ts`'s `stripReliability`.
   cycleTime?: { medianHours: number | null; sampleSize: number };
+  /** Tasks cleared per Manila day, DESIGN.md §19. Never stripped — it belongs to the person, not to management. */
+  activity: ActivityWindow;
 }
 
 function pct(n: number | null): string {
@@ -98,7 +104,20 @@ export function PersonPage() {
 
   return (
     <div>
-      <ResourceView resource={resource} skeleton={<SkeletonRows rows={6} height={40} />}>
+      <ResourceView
+        resource={resource}
+        skeleton={
+          <>
+            <SkeletonRows rows={2} height={40} />
+            {/* The heatmap's own placeholder, in its real geometry (DESIGN.md §8/§19.5) — never a generic row. */}
+            <div className="my-4 rounded-xl border border-hairline bg-surface p-5">
+              <ActivityHeatmapSkeleton variant="full" />
+            </div>
+            <SkeletonRows rows={3} height={40} />
+          </>
+        }
+      >
+
         {(p) => {
           // PLAN.md §10 #4: `reliability` (and with it `hitRate`) is
           // simply absent from the JSON for anyone who isn't
@@ -158,6 +177,23 @@ export function PersonPage() {
                     </span>
                   </div>
                 ) : null}
+              </div>
+
+              {/*
+                The activity heatmap (DESIGN.md §19/§22.4) — "what I have
+                now" (the panel above) -> "how I've been going" (this) ->
+                "exactly what happened" (the audit trail further down).
+                Visible to every viewer, staff included: it belongs to
+                the person, not to management (PLAN.md §10.2).
+              */}
+              <div className="mb-6 rounded-xl border border-hairline bg-surface p-5">
+                <h2 className="mb-3 flex items-center gap-1.5 text-subtitle text-ink">
+                  Activity
+                  <Hint text="One square per day. The darker it is, the more you cleared that day.">
+                    <HelpCircle className="size-4 text-ink-3 hover:text-ink-2" aria-label="What is this?" />
+                  </Hint>
+                </h2>
+                <ActivityHeatmap data={p.activity} variant="full" />
               </div>
 
               {/* Sparkline — DESIGN.md §2.4: chart-1 line, draws once on mount, no dots except the latest point. */}

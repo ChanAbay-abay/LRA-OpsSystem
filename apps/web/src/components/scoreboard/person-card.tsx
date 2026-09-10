@@ -36,7 +36,12 @@ import { cn } from '@/lib/utils';
 import { bandChipClass, BAND_LABEL } from '@/lib/reliability-ui';
 import { Hint } from '@/components/ui/hint';
 import { positionLabel } from '@/lib/labels';
+import { ActivityHeatmap } from './activity-heatmap';
+import { sumLastWeeks } from './activity-heatmap-model';
 import { PointsBar } from './points-bar';
+
+/** Matches the mini heatmap's fixed window (DESIGN.md §19.2) so the Velocity line and the grid beside it never disagree. */
+const MINI_HEATMAP_WEEKS = 13;
 import {
   capDisclosure,
   capSentence,
@@ -130,7 +135,7 @@ export function PersonCard({
     <Link
       to={`/people/${row.userId}`}
       className={cn(
-        'flex min-w-[300px] max-w-[420px] flex-[1_1_300px] snap-start flex-col gap-3 rounded-xl',
+        'flex min-h-[268px] min-w-[300px] max-w-[460px] flex-[1_1_320px] snap-start flex-col gap-3 rounded-xl',
         'border border-hairline bg-surface p-4 transition-[background-color,border-color] duration-press ease',
         'hover:border-hairline-strong hover:bg-[#FCFDFF]'
       )}
@@ -150,6 +155,15 @@ export function PersonCard({
       </div>
 
       <div className="border-t border-hairline" />
+
+      {/*
+        The 13-week mini heatmap (DESIGN.md §23.1) — Chan: "scoreboard
+        cards should be taller." Not padding: the honest filler is a
+        per-person velocity texture the card had the identity for
+        already, and it is the same component §19 uses everywhere else,
+        so it costs one import.
+      */}
+      <ActivityHeatmap data={row.activity} variant="mini" />
 
       {/* Completed against possible — Chan's "points with total points
           that they could have", and the card's single 24px figure. */}
@@ -227,7 +241,20 @@ export function PersonCard({
             )}
           </span>
         </div>
-      ) : null}
+      ) : (
+        // DESIGN.md §23.1: everyone who can't see reliability gets this
+        // row's place filled by Velocity instead, so every viewer's card
+        // is the same height and the rail never goes ragged — and it
+        // honours PLAN.md §10 #4: judgement of a person is founder-only,
+        // a person's own output is not.
+        <div className="border-t border-hairline pt-3">
+          <span className="text-eyebrow text-ink-3">Velocity</span>
+          <p className="mt-1 text-body-sm text-ink-2">
+            <span className="num text-num-sm text-ink">{sumLastWeeks(row.activity.days, MINI_HEATMAP_WEEKS)}</span>{' '}
+            tasks cleared in {MINI_HEATMAP_WEEKS} weeks
+          </p>
+        </div>
+      )}
     </Link>
   );
 }
@@ -243,7 +270,7 @@ export function PersonCardSkeleton({ index = 0 }: { index?: number }) {
   return (
     <div
       aria-hidden
-      className="flex min-w-[300px] max-w-[420px] flex-[1_1_300px] flex-col gap-3 rounded-xl border border-hairline bg-surface p-4"
+      className="flex min-h-[268px] min-w-[300px] max-w-[460px] flex-[1_1_320px] flex-col gap-3 rounded-xl border border-hairline bg-surface p-4"
     >
       <div className="flex items-center gap-2">
         <div className="skeleton-pulse size-6 shrink-0 rounded-full bg-surface-3" style={{ animationDelay: `${delay}ms` }} />
@@ -253,6 +280,12 @@ export function PersonCardSkeleton({ index = 0 }: { index?: number }) {
         </div>
       </div>
       <div className="border-t border-hairline" />
+      {/*
+        The mini heatmap's own placeholder, at its real height — DESIGN.md
+        §8: "a skeleton that is the wrong height is a layout shift with
+        extra steps." 68px is the strip's measured height (§23.1).
+      */}
+      <div className="skeleton-pulse h-[68px] w-full rounded-md bg-surface-2" style={{ animationDelay: `${delay + 30}ms` }} />
       <div className="flex flex-col gap-2">
         <div className="skeleton-pulse h-2 w-16 rounded-xs bg-surface-3" style={{ animationDelay: `${delay}ms` }} />
         <div className="skeleton-pulse h-6 w-24 rounded-xs bg-surface-2" style={{ animationDelay: `${delay + 60}ms` }} />
