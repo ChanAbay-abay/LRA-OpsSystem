@@ -963,31 +963,60 @@ comment on function ops.admin_force_transition(uuid, ops.task_status, text) is
 
 
 -- =====================================================================
--- CHAN'S DECISION 1, SEPARATE FROM THE MIGRATION ABOVE, AND DELIBERATELY
--- NOT A create or replace on any function.
+-- CHAN'S DECISION 1 -- CORRECTED AFTER IT FAILED ON A CONSTRAINT NOBODY
+-- HAD READ. DO NOT PASTE ANYTHING BELOW THIS LINE WITHOUT READING IT.
 --
--- `verified -> cleared` now refuses an admin who is not the clearing
--- founder, because `core.is_clearing_founder()` reads the per-row
--- `core.users.is_clearing_founder` COLUMN, not authority -- and today's
--- unconditional admin bypass was the only thing hiding that friction.
+-- The original version of this block was:
 --
--- Chan's ruling (option A): flip the column on his own account, once,
--- rather than widen `core.is_clearing_founder()` to admit `admin` --
--- widening the function would quietly re-open the single clearing seat
--- it exists to keep singular, for every admin account present or future,
--- not just his.
+--     update core.users set is_clearing_founder = true
+--     where email = 'chanabayabay@gmail.com';
 --
--- His account is the only non-demo user in `core.users` -- confirmed by
--- querying live data, not assumed: `chanabayabay@gmail.com`,
--- id b33eefcf-3de8-4fcd-adc0-29df38de3f71, authority = 'admin',
--- is_clearing_founder = false (read at the time this file was written).
--- The column's own comment already says no migration is needed for this
--- kind of one-row change.
+-- Chan ran it on 2026-09-10 and it failed:
 --
--- Run this once, after the migration above has been applied. Idempotent
--- -- running it twice sets the same value both times.
--- =====================================================================
-
-update core.users
-set is_clearing_founder = true
-where email = 'chanabayabay@gmail.com';
+--     ERROR: 23505 duplicate key value violates unique constraint
+--     "uq_core_users_one_clearing_founder"
+--     DETAIL: Key (is_clearing_founder)=(t) already exists.
+--
+-- AND IT TOOK THE WHOLE MIGRATION WITH IT. The SQL editor runs a pasted
+-- script as one transaction, so the failure at the very last statement
+-- rolled back every function above it -- verified afterwards:
+-- ops.admin_correct_task did not exist and enforce_task_transition still
+-- had the unconditional bypass. That is why this block now sits AFTER a
+-- hard stop instead of trailing the migration it can abort.
+--
+-- WHAT THE CONSTRAINT ACTUALLY IS. `is_clearing_founder` is not a
+-- per-account permission flag. It is a partial unique index admitting
+-- exactly ONE `true` row in the entire table -- the clearing seat is
+-- structurally singular, which is the same property
+-- `core.is_clearing_founder()` exists to express. The plan that produced
+-- this file checked that Chan's row was `false` and never checked
+-- whether anyone else's was `true`. Somebody does hold it:
+-- `founder-demo@ops-demo.invalid`, set by scripts/seed-demo.mjs's
+-- `founder` persona (`isClearingFounder: true`).
+--
+-- SO IT IS A MOVE, NEVER AN INSERT. Two statements, one transaction:
+--
+--     begin;
+--     update core.users set is_clearing_founder = false where is_clearing_founder;
+--     update core.users set is_clearing_founder = true
+--     where email = 'chanabayabay@gmail.com';
+--     commit;
+--
+-- BUT DO NOT RUN THAT YET, AND PROBABLY NOT EVER. Taking the seat costs
+-- something real: `founder-demo` is the account that clears tasks in the
+-- demo data, in scripts/disposable-week.mjs and in `simulate`. Move the
+-- seat to Chan and every one of those stops being able to clear, so the
+-- demo and the week simulation both break.
+--
+-- The seat belongs to whoever actually signs off cleared work at the
+-- brokerage -- Chan's father, the founder -- not to the developer's admin
+-- account. Right now no real founder account exists, so the demo holds
+-- it, which is correct for today. Decide this when real accounts are
+-- provisioned, not now.
+--
+-- WHAT THIS MEANS IN THE MEANTIME. Once the migration above is applied,
+-- an admin who is not the clearing founder can no longer clear a task
+-- silently -- the fall-through sends them through the ordinary ladder,
+-- and `verified -> cleared` asks for the seat. That is the intended
+-- behaviour, not a regression. Everything else an admin does is
+-- unaffected.
